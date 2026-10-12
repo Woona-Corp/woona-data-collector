@@ -1,5 +1,6 @@
 package com.example.myapplication
 
+import android.view.WindowManager
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.hasText
@@ -18,6 +19,7 @@ import com.example.myapplication.data.WoonaDatabase
 import com.example.myapplication.localization.AppLanguage
 import com.example.myapplication.localization.AppLanguagePreferences
 import org.junit.Rule
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -25,6 +27,21 @@ import org.junit.runner.RunWith
 class MainActivityRecreationTest {
     @get:Rule
     val composeRule = createEmptyComposeRule()
+
+    @Test
+    fun keepScreenOn_survivesActivityRecreation() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                assertTrue(activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0)
+            }
+
+            scenario.recreate()
+
+            scenario.onActivity { activity ->
+                assertTrue(activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0)
+            }
+        }
+    }
 
     @Test
     fun openSessionQuestionnaireAndDraft_surviveActivityRecreation() {

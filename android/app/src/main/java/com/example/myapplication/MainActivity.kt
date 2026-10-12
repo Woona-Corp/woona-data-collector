@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.os.CancellationSignal
 import android.util.Log
 import android.view.Surface
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -223,6 +224,7 @@ class MainActivity : ComponentActivity() {
         selectedThemeMode = appThemePreferences.selectedThemeMode()
         applyAppThemeMode(this, selectedThemeMode)
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         if (!CaptureServiceBridge.isRunning && !DeviceFeatureControllerHolder.hasActiveCapture()) {
             woonaDatabase.interruptUnfinished()
