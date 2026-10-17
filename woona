@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [[ -d "$root/apps/mobile" ]]; then
+    mobile="$root/apps/mobile"
+else
+    mobile="$root"
+    root=$(cd "$mobile/../.." && pwd)
+fi
+windows="$root/apps/windows"
+
+case "${1:-help}" in
+    status)
+        result=0
+        for path in health/live health/ready; do
+            printf '%s: ' "$path"
+            curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://cool-trams.digital/$path" || result=1
+            printf '\n'
+        done
+        ssh -o BatchMode=yes -o ConnectTimeout=10 root@167.99.223.71 \
+            'set -e
+             docker ps --format "{{.Names}}\t{{.Status}}"
+             df -h /
+             systemctl show woona-backup.service -p ActiveState -p Result
+             systemctl list-timers woona-backup.timer --no-pager
+             find /srv/woona/backups/scheduled -mindepth 2 -maxdepth 2 -name VERIFIED -printf "Server backup: %h (verified %TY-%Tm-%Td %TH:%TM)\n"' || result=1
+        printf '\nVerified off-host backups:\n'
+        if [[ -d "$HOME/.local/share/woona-backups" ]]; then
+            find "$HOME/.local/share/woona-backups" -mindepth 2 -maxdepth 2 -name VERIFIED -printf '%h (verified %TY-%Tm-%Td %TH:%TM)\n' | sort
+            find "$HOME/.local/share/woona-backups/.pending" -mindepth 1 -maxdepth 1 -type d -exec du -sh {} + 2>/dev/null || true
+        fi
+        for repo in "$mobile" "$windows"; do
+            printf '\n%s\n' "$repo"
+            git -C "$repo" status --short || result=1
+        done
+        exit "$result"
+        ;;
+    check)
+        case "${2:-all}" in
+            android) exec "$mobile/android/tools/check.sh" "${3:-fast}" ;;
+            server)
+                cd "$mobile/shared"
+                export WOONA_API_PORT=0
+                export WOONA_POSTGRES_ROOT=postgres_data
+                export WOONA_DEBUG_TOKEN=change-me-local-token
+                export WOONA_STORAGE_ROOT_HOST
+                WOONA_STORAGE_ROOT_HOST=$(mktemp -d)
+                chmod 777 "$WOONA_STORAGE_ROOT_HOST"
+                compose=(docker compose -f "$mobile/shared/compose.yaml" -p "woona-check-$$")
+                cleanup() {
+                    local result=$?
+                    trap - EXIT
+                    if [[ -n $(find "$WOONA_STORAGE_ROOT_HOST" -mindepth 1 -print -quit) ]]; then
+                        "${compose[@]}" run --rm --no-deps --user 0 --entrypoint chown api \
+                            -R "$(id -u):$(id -g)" /srv/woona || result=1
+                    fi
+                    if "${compose[@]}" down -v --remove-orphans; then
+                        if ! rm -r -- "$WOONA_STORAGE_ROOT_HOST"; then
+                            printf 'Storage cleanup failed: %s\n' "$WOONA_STORAGE_ROOT_HOST" >&2
+                            result=1
+                        fi
+                    else
+                        printf 'Cleanup failed; inspect %s and Compose project woona-check-%s\n' "$WOONA_STORAGE_ROOT_HOST" "$$" >&2
+                        result=1
+                    fi
+                    exit "$result"
+                }
+                trap cleanup EXIT
+                "${compose[@]}" config -q
+                bash server/tests/test_backup.sh
+                "${compose[@]}" up -d --build --wait
+                "${compose[@]}" exec -T api python -m unittest discover -v -s server/tests
+                ;;
+            windows)
+                export DOTNET_ROOT="$root/Monitor/tools/dotnet-sdk"
+                export DOTNET_CLI_TELEMETRY_OPTOUT=1
+                cd "$windows"
+                exec "$DOTNET_ROOT/dotnet" run --project Monitor.Checks -c Release -- --captures "$root/Monitor/captures"
+                ;;
+            clinic)
+                cd "$root"
+                python3 -m unittest discover -s Clinic -p 'test_*.py' -v
+                exec python3 Clinic/monitor/selfcheck.py
+                ;;
+            all)
+                for target in server android windows clinic; do "$0" check "$target"; done
+                ;;
+            *) printf 'Unknown check: %s\n' "$2" >&2; exit 2 ;;
+        esac
+        ;;
+    links)
+        cat <<'EOF'
+Dashboard: https://cool-trams.digital/dashboard
+Label Studio: https://cool-trams.digital/
+Files: https://cool-trams.digital/files/
+Woona DB: https://cool-trams.digital/db/woona/
+Labels DB: https://cool-trams.digital/db/labels/
+Android: https://github.com/ashromanov/woona-data-collector/releases
+Windows: https://github.com/ashromanov/woona-mindray-monitor/releases
+iOS: https://testflight.apple.com/join/b1U2rr4Q
+EOF
+        ;;
+    help|-h|--help)
+        cat <<'EOF'
+./woona status                 Live health, containers, backups and Git status
+./woona check [all|server|android|windows|clinic]
+./woona check android full     Also run managed-device instrumentation
+./woona links                  Server, apps and downloads
+
+Start: README.md. Findings and remaining work: Operations/STATUS.md.
+Backup schedule, recovery and logs: Operations/backups/README.md.
+Checks use an isolated local server; they never target production.
+EOF
+        ;;
+    *) printf 'Unknown command: %s; use ./woona help\n' "$1" >&2; exit 2 ;;
+esac

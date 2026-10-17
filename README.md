@@ -10,6 +10,8 @@ Operator accounts and post-recording questionnaire edits in 1.3.5 are documented
 
 The production labeling stack, canonical recordings, and annotation counts are documented in [Label Studio deployment](shared/LABEL_STUDIO.md).
 
+Daily full backups and resumable off-host verification are documented in [Backup operations](shared/operations/backups/README.md). `./woona status` shows production health and backup state; `./woona check server` and `./woona check android` run local checks. The optional Windows/Clinic commands require the full Woona workspace.
+
 | Directory | Contents |
 | --- | --- |
 | [`android/`](android/) | Single-module Kotlin/Compose app, Gradle wrapper, tests, and SDK setup |

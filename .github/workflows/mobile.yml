@@ -120,6 +120,7 @@ jobs:
         run: |
           docker compose config -q
           bash server/tests/test_backup.sh
+          bash operations/backups/test-scheduled-backup.sh
       - name: Test server and API
         run: |
           mkdir -p ../test-run/ci-storage
