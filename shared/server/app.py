@@ -1045,9 +1045,15 @@ def head_artifact(
     with engine.connect() as connection:
         row = artifact_row(connection, artifact_id)
     assert_owner(row, device_id)
+    offset = row["stored_size_bytes"]
+    if row["storage_status"] != "available":
+        try:
+            offset = min(offset, incoming_path(artifact_id).stat().st_size)
+        except FileNotFoundError:
+            offset = 0
     return Response(
         headers={
-            "Upload-Offset": str(row["stored_size_bytes"]),
+            "Upload-Offset": str(offset),
             "Upload-Length": str(row["expected_size_bytes"]),
             "ETag": f'"{row["sha256"]}"',
         }
@@ -1079,6 +1085,12 @@ async def patch_artifact(
         with engine.begin() as connection:
             row = artifact_row(connection, artifact_id, for_update=True)
             assert_owner(row, device_id)
+            if row["storage_status"] == "available":
+                raise HTTPException(
+                    409,
+                    detail={"code": "artifact_already_complete"},
+                    headers={"Upload-Offset": str(row["stored_size_bytes"])},
+                )
             current = row["stored_size_bytes"]
             part = incoming_path(artifact_id)
             part.parent.mkdir(parents=True, exist_ok=True)

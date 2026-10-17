@@ -23,8 +23,20 @@ final class PacketTimelineFileStore {
 
     func flush() throws { if let handle { try flushBuffer(to: handle); try handle.synchronize() } }
     func resetSession() throws { try flush(); try handle?.close(); handle = nil; fileURL = nil }
-    func closeCurrentSession() throws { try flush(); try handle?.close(); handle = nil }
-    func close() throws { guard !closed else { return }; try closeCurrentSession(); closed = true }
+    func closeCurrentSession() throws {
+        let currentHandle = handle
+        defer {
+            handle = nil
+            buffer.removeAll(keepingCapacity: true)
+        }
+        do { try flush() }
+        catch {
+            try? currentHandle?.close()
+            throw error
+        }
+        try currentHandle?.close()
+    }
+    func close() throws { guard !closed else { return }; defer { closed = true }; try closeCurrentSession() }
     func currentFile() -> URL? { fileURL }
     func hasOpenFileHandle() -> Bool { handle != nil }
 

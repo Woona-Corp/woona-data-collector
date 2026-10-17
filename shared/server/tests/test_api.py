@@ -677,6 +677,21 @@ class ApiIntegrationTest(unittest.TestCase):
             ],
         }
         request("PUT", f"/v1/recordings/{recording_id}", payload)
+        # Backups omit incoming files; retries must use bytes still on disk.
+        part = incoming_path(uuid.UUID(artifact_id))
+        for remainder, offset in ((None, 0), (expected[:2], 2), (expected[:4] + b"uncommitted", 4)):
+            with self.subTest(remainder=remainder):
+                patch_bytes(artifact_id, 0, expected[:4])
+                if remainder is None:
+                    part.unlink()
+                else:
+                    part.write_bytes(remainder)
+                _, headers, _ = request("HEAD", f"/v1/artifacts/{artifact_id}/content")
+                self.assertEqual(str(offset), headers["upload-offset"])
+                patch_bytes(artifact_id, offset, expected[offset:])
+                self.assertEqual(expected, part.read_bytes())
+                part.unlink()
+                self.assertEqual("0", request("HEAD", f"/v1/artifacts/{artifact_id}/content")[1]["upload-offset"])
         patch_bytes(artifact_id, 0, corrupt)
         error = expect_http(
             422, "POST", f"/v1/artifacts/{artifact_id}/complete", {}
@@ -705,6 +720,12 @@ class ApiIntegrationTest(unittest.TestCase):
         self.assertEqual(
             "available", json.loads(body)["artifacts"][0]["storageStatus"]
         )
+        for offset in (0, len(expected)):
+            error = expect_patch_error(artifact_id, offset, b"X", 409)
+            self.assertEqual("artifact_already_complete", error["code"])
+        self.assertEqual(str(len(expected)), request("HEAD", f"/v1/artifacts/{artifact_id}/content")[1]["upload-offset"])
+        self.assertEqual(expected, request("GET", f"/v1/artifacts/{artifact_id}/content")[2])
+        self.assertFalse(part.exists())
 
 
 def patch_bytes(artifact_id, offset, content, token=TOKEN):

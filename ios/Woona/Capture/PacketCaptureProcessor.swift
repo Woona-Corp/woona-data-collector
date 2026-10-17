@@ -15,6 +15,8 @@ actor PacketCaptureProcessor {
     private let onUpdate: @Sendable (PacketProcessingUpdate) async -> Void
     private let onError: @Sendable (String, Error?) async -> Void
 
+    private var storageFailure: (message: String, error: Error?)?
+    private var didReportStorageFailure = false
     private var isAcceptingFragments = true
     private var sessionId: UInt64 = 0
     private var pendingFragments: [QueuedFragment] = []
@@ -83,6 +85,8 @@ actor PacketCaptureProcessor {
             receivedRawBytes += UInt64(fragment.count)
         } catch {
             emitError("Failed to persist raw fragment", error)
+            await reportStorageFailure()
+            return .rejected
         }
 
         let currentQueueDepth = pendingQueueDepth()
@@ -92,6 +96,7 @@ actor PacketCaptureProcessor {
                 type: .info,
                 message: "Capture queue overflow depth=\(currentQueueDepth) max=\(maxPendingFragments) overflows=\(queueOverflowCount) fragmentBytes=\(fragment.count)"
             )
+            await reportStorageFailure()
             await onUpdate(createStatsUpdate(diagnosticEvents: [event]))
             return .overflow
         }
@@ -110,7 +115,9 @@ actor PacketCaptureProcessor {
     }
 
     func recordDiagnosticEvent(type: PacketDiagnosticType, message: String, publish: Bool = true) async {
+        guard storageFailure == nil else { return }
         let event = createDiagnosticEvent(type: type, message: message)
+        await reportStorageFailure()
         if publish {
             await onUpdate(createStatsUpdate(diagnosticEvents: [event]))
         }
@@ -133,18 +140,18 @@ actor PacketCaptureProcessor {
         pendingFragmentHeadIndex = 0
         packetAssembler.reset()
 
-        do {
-            try diagnosticLogFileStore.flush()
-            try rawFragmentFileStore.flush()
-            try packetFileStore.flush()
-            try packetTimelineFileStore?.flush()
-            try diagnosticLogFileStore.closeCurrentSession()
-            try rawFragmentFileStore.closeCurrentSession()
-            try packetFileStore.closeCurrentSession()
-            try packetTimelineFileStore?.closeCurrentSession()
-        } catch {
-            await onError("Failed to finish capture session", error)
+        // Attempt every writer even when another writer cannot flush.
+        let closeWriters: [() throws -> Void] = [
+            { try self.diagnosticLogFileStore.closeCurrentSession() },
+            { try self.rawFragmentFileStore.closeCurrentSession() },
+            { try self.packetFileStore.closeCurrentSession() },
+            { try self.packetTimelineFileStore?.closeCurrentSession() }
+        ]
+        for closeWriter in closeWriters {
+            do { try closeWriter() }
+            catch { emitError("Failed to finish capture session", error) }
         }
+        await reportStorageFailure()
     }
 
     func resetSession() async {
@@ -155,9 +162,10 @@ actor PacketCaptureProcessor {
         packetAssembler.reset()
 
         await waitForDrainCompletion()
+        storageFailure = nil
+        didReportStorageFailure = false
 
         do {
-            isAcceptingFragments = true
             packetStats.reset()
             packetsRejected = 0
             timerRegressionRejects = 0
@@ -177,8 +185,10 @@ actor PacketCaptureProcessor {
             try rawFragmentFileStore.resetSession()
             try diagnosticLogFileStore.resetSession()
             try packetTimelineFileStore?.resetSession()
+            isAcceptingFragments = true
         } catch {
-            await onError("Failed to reset capture session", error)
+            emitError("Failed to reset capture session", error)
+            await reportStorageFailure()
         }
     }
 
@@ -192,28 +202,24 @@ actor PacketCaptureProcessor {
             try packetFileStore.flush()
             try packetTimelineFileStore?.flush()
         } catch {
-            await onError("Failed to flush buffered output", error)
+            emitError("Failed to flush buffered output", error)
+            await reportStorageFailure()
         }
     }
 
     func close() async {
-        isAcceptingFragments = false
-        sessionId += 1
-        pendingFragments.removeAll(keepingCapacity: true)
-        pendingFragmentHeadIndex = 0
-        isDrainingFragments = false
-        do {
-            try diagnosticLogFileStore.flush()
-            try rawFragmentFileStore.flush()
-            try packetFileStore.flush()
-            try packetTimelineFileStore?.flush()
-            try diagnosticLogFileStore.close()
-            try rawFragmentFileStore.close()
-            try packetFileStore.close()
-            try packetTimelineFileStore?.close()
-        } catch {
-            await onError("Failed to close buffered output", error)
+        await finishCaptureSession()
+        let closeWriters: [() throws -> Void] = [
+            { try self.diagnosticLogFileStore.close() },
+            { try self.rawFragmentFileStore.close() },
+            { try self.packetFileStore.close() },
+            { try self.packetTimelineFileStore?.close() }
+        ]
+        for closeWriter in closeWriters {
+            do { try closeWriter() }
+            catch { emitError("Failed to close buffered output", error) }
         }
+        await reportStorageFailure()
     }
 
     func currentPacketFile() -> URL? {
@@ -282,6 +288,7 @@ actor PacketCaptureProcessor {
                 receivedAtWallClockMillis: queuedFragment.receivedAtWallClockMillis,
                 receivedAtMonotonicNs: queuedFragment.receivedAtMonotonicNs
             )
+            await reportStorageFailure()
             for update in updates {
                 await onUpdate(update)
             }
@@ -313,7 +320,9 @@ actor PacketCaptureProcessor {
     ) -> [PacketProcessingUpdate] {
         var updates: [PacketProcessingUpdate] = []
 
+        guard storageFailure == nil else { return [] }
         for assemblyResult in packetAssembler.append(fragment) {
+            guard storageFailure == nil else { break }
             switch assemblyResult {
             case .rejected(let reason):
                 let message = reason.diagnosticMessage
@@ -599,6 +608,7 @@ actor PacketCaptureProcessor {
         let event = PacketDiagnosticEvent(id: nextDiagnosticEventId, type: type, message: message)
         nextDiagnosticEventId += 1
 
+        guard storageFailure == nil else { return event }
         do {
             try diagnosticLogFileStore.appendEvent(
                 eventId: Int64(event.id),
@@ -641,7 +651,15 @@ actor PacketCaptureProcessor {
     private static let chartDownsampleStep = 4
 
     private func emitError(_ message: String, _ error: Error?) {
-        Task { await onError(message, error) }
+        guard storageFailure == nil else { return }
+        storageFailure = (message, error)
+        isAcceptingFragments = false
+    }
+
+    private func reportStorageFailure() async {
+        guard let storageFailure, !didReportStorageFailure else { return }
+        didReportStorageFailure = true
+        await onError(storageFailure.message, storageFailure.error)
     }
 
     private struct QueuedFragment {

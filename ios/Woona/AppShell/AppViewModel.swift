@@ -985,7 +985,7 @@ final class AppViewModel: ObservableObject {
         if let captureErrorMessage { sync["captureErrorMessage"] = captureErrorMessage }
         do {
             let data = try JSONSerialization.data(withJSONObject: sync, options: [.sortedKeys, .withoutEscapingSlashes])
-            let finalStatus = requestedStatus == "completed" && packetsReceived == 0 ? "failed" : requestedStatus
+            let finalStatus = captureErrorCode == "storage_failed" || (requestedStatus == "completed" && packetsReceived == 0) ? "failed" : requestedStatus
             try store.finalize(recording: recording, status: finalStatus, files: files, syncJSON: data)
             activeRecording = nil
             hasPreparedActiveCapture = false
@@ -1107,7 +1107,7 @@ final class AppViewModel: ObservableObject {
                 await updateBatcher.submit(update)
             },
             onError: { [weak self] message, error in
-                await self?.showError(message, error: error)
+                await self?.handleStorageFailure(message, error: error)
             }
         )
     }
@@ -1252,6 +1252,18 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func handleStorageFailure(_ message: String, error: Error?) {
+        captureErrorCode = "storage_failed"
+        captureErrorMessage = message
+        packetIngressGate.stop()
+        showError(message, error: error)
+        if let recording = activeRecording {
+            do { try store?.markRecording(recording.id, status: "failed") }
+            catch { showError("Failed to persist recording failure", error: error) }
+            stopActiveCapture(status: "failed")
+        } else { finishCaptureProcessingIfNeeded() }
+    }
+
     private func handleCaptureQueueOverflow() {
         showError("Capture queue overflow; stopped capture to preserve packet ordering", error: nil)
         if activeRecording != nil { stopActiveCapture(status: "failed") }
@@ -1270,8 +1282,10 @@ final class AppViewModel: ObservableObject {
     private func handleCameraFailure(_ message: String) {
         let isDuplicate = isCameraDegraded && captureErrorMessage == message
         isCameraDegraded = true
-        captureErrorCode = "camera_failed"
-        captureErrorMessage = message
+        if captureErrorCode != "storage_failed" {
+            captureErrorCode = "camera_failed"
+            captureErrorMessage = message
+        }
         if isRecording { statusText = "Recording — camera degraded" }
         if !isDuplicate { appendDiagnostic("Camera degraded: \(message)") }
     }

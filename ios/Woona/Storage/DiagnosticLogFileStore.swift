@@ -49,17 +49,23 @@ final class DiagnosticLogFileStore {
 
     func close() throws {
         guard !isClosed else { return }
-        try flush()
-        try fileHandle?.close()
-        fileHandle = nil
-        isClosed = true
+        defer { isClosed = true }
+        try closeCurrentSession()
     }
 
     func closeCurrentSession() throws {
         guard !isClosed else { throw DiagnosticLogFileStoreError.closed }
-        try flush()
-        try fileHandle?.close()
-        fileHandle = nil
+        let handle = fileHandle
+        defer {
+            fileHandle = nil
+            writeBuffer.removeAll(keepingCapacity: true)
+        }
+        do { try flush() }
+        catch {
+            try? handle?.close()
+            throw error
+        }
+        try handle?.close()
     }
 
     func resetSession() throws {

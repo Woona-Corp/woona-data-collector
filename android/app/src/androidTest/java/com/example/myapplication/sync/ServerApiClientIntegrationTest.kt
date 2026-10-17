@@ -396,12 +396,15 @@ class ServerApiClientIntegrationTest {
             expectFailure(401, "invalid_bearer_token") { ServerApiClient(ServerSettings(baseUrl, revoked, "unused", false)).uploadProfile(profile) }
         }
         InstrumentationRegistry.getArguments().getString("serverFaultBaseUrl")?.let { faultUrl ->
-            val faultClient = ServerApiClient(ServerSettings(faultUrl, token, "unused", false), readTimeoutMillis = 500)
+            val faultSettings = ServerSettings(faultUrl, token, "unused", false)
+            val faultClient = ServerApiClient(faultSettings)
             URL("$faultUrl/__fault/503").openStream().use { it.readBytes() }
             expectFailure(503, "intentional_e2e_fault") { faultClient.uploadProfile(profile) }
             faultClient.uploadProfile(profile)
             URL("$faultUrl/__fault/delay").openStream().use { it.readBytes() }
-            assertTrue(runCatching { faultClient.uploadProfile(profile) }.exceptionOrNull() is IOException)
+            // Keep the short deadline only on the deliberately delayed request.
+            val timeoutClient = ServerApiClient(faultSettings, readTimeoutMillis = 500)
+            assertTrue(runCatching { timeoutClient.uploadProfile(profile) }.exceptionOrNull() is IOException)
             faultClient.uploadProfile(profile)
             Log.i("WOONA_E2E", "PASS server503Retry=true readTimeoutRetry=true")
         }

@@ -2,6 +2,106 @@ import XCTest
 @testable import Woona
 
 final class PacketCaptureProcessorTests: XCTestCase {
+    func testRawWriteFailureRejectsFragmentAndClosesIngress() async throws {
+        let directory = try temporaryDirectory()
+        let raw = RawFragmentFileStore(directory: directory)
+        try raw.close()
+        let errors = StorageErrorBox()
+        let processor = PacketCaptureProcessor(
+            packetFileStore: PacketFileStore(directory: directory),
+            rawFragmentFileStore: raw,
+            diagnosticLogFileStore: DiagnosticLogFileStore(directory: directory),
+            onUpdate: { _ in XCTFail("Failed raw bytes must not become accepted packets") },
+            onError: { message, _ in await errors.append(message) }
+        )
+
+        let first = await processor.submit([1])
+        let second = await processor.submit([2])
+        await processor.finishCaptureSession()
+
+        let messages = await errors.messages
+        let hasOpenFiles = await processor.hasOpenOutputFiles()
+        XCTAssertEqual(first, .rejected)
+        XCTAssertEqual(second, .rejected)
+        XCTAssertEqual(messages, ["Failed to persist raw fragment"])
+        XCTAssertFalse(hasOpenFiles)
+    }
+
+    func testPacketWriteFailurePreservesRawAndStopsCapture() async throws {
+        let directory = try temporaryDirectory()
+        let blockedDirectory = directory.appendingPathComponent("blocked")
+        try Data([1]).write(to: blockedDirectory)
+        let errors = StorageErrorBox()
+        let processor = PacketCaptureProcessor(
+            packetFileStore: PacketFileStore(directory: blockedDirectory),
+            rawFragmentFileStore: RawFragmentFileStore(directory: directory),
+            diagnosticLogFileStore: DiagnosticLogFileStore(directory: directory),
+            onUpdate: { _ in },
+            onError: { message, _ in await errors.append(message) }
+        )
+        let packet = makeTestPacket(counter: 1, timerMillis: 100, measurementCount: 1,
+                                    blocks: [makeSensorBlock(sensorType: 1, channelSamples: [[]])])
+        await processor.submit(packet)
+        await processor.finishCaptureSession()
+
+        let result = await processor.submit(packet)
+        let messages = await errors.messages
+        let rawURL = await processor.currentRawFile()
+        let raw = try Data(contentsOf: XCTUnwrap(rawURL))
+        let hasOpenFiles = await processor.hasOpenOutputFiles()
+        XCTAssertEqual(result, .rejected)
+        XCTAssertEqual(messages, ["Failed to append validated packet"])
+        XCTAssertEqual(Array(raw.suffix(packet.count)), packet)
+        XCTAssertFalse(hasOpenFiles)
+    }
+
+    func testFlushFailureIsTerminalAndReportedOnce() async throws {
+        let directory = try temporaryDirectory()
+        let packets = PacketFileStore(directory: directory)
+        let errors = StorageErrorBox()
+        let processor = PacketCaptureProcessor(
+            packetFileStore: packets,
+            rawFragmentFileStore: RawFragmentFileStore(directory: directory),
+            diagnosticLogFileStore: DiagnosticLogFileStore(directory: directory),
+            onUpdate: { _ in },
+            onError: { message, _ in await errors.append(message) }
+        )
+        try packets.close()
+        await processor.flush()
+        let result = await processor.submit([1])
+        await processor.finishCaptureSession()
+
+        let messages = await errors.messages
+        XCTAssertEqual(result, .rejected)
+        XCTAssertEqual(messages, ["Failed to flush buffered output"])
+    }
+
+    func testFinishFailureStillClosesOtherWritersAndReportsBeforeReturning() async throws {
+        let directory = try temporaryDirectory()
+        let diagnostics = DiagnosticLogFileStore(directory: directory)
+        let errors = StorageErrorBox()
+        let processor = PacketCaptureProcessor(
+            packetFileStore: PacketFileStore(directory: directory),
+            rawFragmentFileStore: RawFragmentFileStore(directory: directory),
+            diagnosticLogFileStore: diagnostics,
+            onUpdate: { _ in },
+            onError: { message, _ in await errors.append(message) }
+        )
+        let packet = makeTestPacket(counter: 1, timerMillis: 100, measurementCount: 1,
+                                    blocks: [makeSensorBlock(sensorType: 1, channelSamples: [[]])])
+        await processor.submit(packet)
+        await processor.flush()
+        try diagnostics.close()
+        await processor.finishCaptureSession()
+
+        let messages = await errors.messages
+        let hasOpenFiles = await processor.hasOpenOutputFiles()
+        let packetURL = await processor.currentPacketFile()
+        XCTAssertEqual(messages, ["Failed to finish capture session"])
+        XCTAssertFalse(hasOpenFiles)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(packetURL)), Data(packet))
+    }
+
     func testSubmitterOverflowStillPersistsReceivedBytes() async throws {
         let harness = try makeHarness()
         let submitter = PacketFragmentSubmitter(packetProcessor: harness.processor,maxPendingFragments:0,onOverflow:{})
@@ -613,4 +713,9 @@ private extension Array {
         XCTAssertEqual(count, 1, file: file, line: line)
         return self[0]
     }
+}
+
+private actor StorageErrorBox {
+    var messages: [String] = []
+    func append(_ message: String) { messages.append(message) }
 }
