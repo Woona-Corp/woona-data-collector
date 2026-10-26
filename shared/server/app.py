@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -18,7 +19,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError as SchemaValidationError
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -81,6 +82,48 @@ class StrictModel(BaseModel):
         extra="forbid", populate_by_name=True, str_strip_whitespace=True
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def database_safe_metadata(cls, value):
+        # JSON accepts unpaired surrogates and nonfinite numbers; PostgreSQL
+        # JSONB and UTF-8 do not. Validate before hashing or idempotent returns.
+        pending = [(value, 0)]
+        while pending:
+            item, depth = pending.pop()
+            if depth > 64:
+                raise ValueError("Metadata nesting exceeds 64 levels")
+            if isinstance(item, str):
+                if "\x00" in item:
+                    raise ValueError("Text must not contain NUL characters")
+                try:
+                    item.encode("utf-8")
+                except UnicodeEncodeError as error:
+                    raise ValueError("Text must contain valid Unicode characters") from error
+            elif isinstance(item, float) and not math.isfinite(item):
+                raise ValueError("Numbers must be finite")
+            elif isinstance(item, int) and not -(2**63) <= item < 2**63:
+                raise ValueError("Integers must fit the signed 64-bit storage range")
+            elif isinstance(item, dict):
+                pending.extend((part, depth + 1) for pair in item.items() for part in pair)
+            elif isinstance(item, (list, tuple)):
+                pending.extend((part, depth + 1) for part in item)
+        return value
+
+    @field_validator("*")
+    @classmethod
+    def representable_utc(cls, value):
+        # Catch coercions such as a numeric string or finite 1e30 becoming int.
+        if isinstance(value, int) and not -(2**63) <= value < 2**63:
+            raise ValueError("Integers must fit the signed 64-bit storage range")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("Numbers must be finite")
+        if isinstance(value, datetime):
+            try:
+                value.astimezone(timezone.utc)
+            except (OverflowError, ValueError) as error:
+                raise ValueError("Timestamp must be representable in UTC years 1–9999") from error
+        return value
+
 
 class DogPayload(StrictModel):
     id: uuid.UUID
@@ -90,13 +133,13 @@ class DogPayload(StrictModel):
 
 class ProfileVersionPayload(StrictModel):
     id: uuid.UUID
-    schema_version: int = Field(alias="schemaVersion", ge=1)
+    schema_version: int = Field(alias="schemaVersion", ge=1, le=32767)
     validation_state: Literal["complete", "legacy_incomplete"] = Field(
         alias="validationState"
     )
     questionnaire: dict[str, Any]
     content_sha256: str = Field(alias="contentSha256")
-    client_created_at_utc: datetime = Field(alias="clientCreatedAtUtc")
+    client_created_at_utc: AwareDatetime = Field(alias="clientCreatedAtUtc")
 
     @field_validator("content_sha256")
     @classmethod
@@ -125,8 +168,8 @@ class RecordingPayload(StrictModel):
     capture_status: Literal["completed", "failed", "interrupted"] = Field(
         alias="captureStatus"
     )
-    started_at_utc: datetime = Field(alias="startedAtUtc")
-    ended_at_utc: datetime | None = Field(alias="endedAtUtc")
+    started_at_utc: AwareDatetime = Field(alias="startedAtUtc")
+    ended_at_utc: AwareDatetime | None = Field(alias="endedAtUtc")
     timezone: str = Field(min_length=1, max_length=100)
     session_label: str = Field(alias="sessionLabel", min_length=1, max_length=100)
     video_requested: bool = Field(alias="videoRequested")
@@ -134,7 +177,7 @@ class RecordingPayload(StrictModel):
     app_version: str = Field(alias="appVersion", min_length=1, max_length=100)
     protocol_version: str | None = Field(alias="protocolVersion", default=None)
     questionnaire_schema_version: int = Field(
-        alias="questionnaireSchemaVersion", ge=1
+        alias="questionnaireSchemaVersion", ge=1, le=32767
     )
     questionnaire_validation_state: Literal["complete", "legacy_incomplete"] = Field(
         alias="questionnaireValidationState"
@@ -147,13 +190,13 @@ class RecordingPayload(StrictModel):
 
 
 class SyncPayload(StrictModel):
-    schema_version: int = Field(alias="schemaVersion", ge=1)
+    schema_version: int = Field(alias="schemaVersion", ge=1, le=32767)
     monotonic_clock: Literal[
         "android.elapsedRealtimeNanos", "ios.CMClock.hostTime"
     ] = Field(
         alias="monotonicClock"
     )
-    session_zero_at_utc: datetime = Field(alias="sessionZeroAtUtc")
+    session_zero_at_utc: AwareDatetime = Field(alias="sessionZeroAtUtc")
     session_zero_wall_clock_ms: int = Field(alias="sessionZeroWallClockMs", ge=0)
     session_zero_monotonic_ns: int = Field(alias="sessionZeroMonotonicNs", ge=0)
     session_zero_uncertainty_ns: int = Field(
@@ -224,8 +267,8 @@ class SyncPayload(StrictModel):
 
 class ReferenceMetadata(StrictModel):
     source: str = Field(min_length=1, max_length=200)
-    started_at_utc: datetime = Field(alias="startedAtUtc")
-    ended_at_utc: datetime = Field(alias="endedAtUtc")
+    started_at_utc: AwareDatetime = Field(alias="startedAtUtc")
+    ended_at_utc: AwareDatetime = Field(alias="endedAtUtc")
     offset_from_recording_ms: float | None = Field(alias="offsetFromRecordingMs", default=None, allow_inf_nan=False)
     notes: str | None = Field(default=None, max_length=2000)
 
@@ -254,7 +297,7 @@ class ArtifactPayload(StrictModel):
     mime_type: str = Field(alias="mimeType", min_length=1, max_length=150)
     size_bytes: int = Field(alias="sizeBytes", ge=0)
     sha256: str
-    client_created_at_utc: datetime = Field(alias="clientCreatedAtUtc")
+    client_created_at_utc: AwareDatetime = Field(alias="clientCreatedAtUtc")
     reference_metadata: ReferenceMetadata | None = Field(alias="referenceMetadata", default=None)
 
     @field_validator("file_name")
@@ -280,7 +323,7 @@ class ArtifactPayload(StrictModel):
 
 
 class RecordingManifest(StrictModel):
-    schema_version: int = Field(alias="schemaVersion", ge=1)
+    schema_version: int = Field(alias="schemaVersion", ge=1, le=32767)
     capture_device_id: uuid.UUID = Field(alias="captureDeviceId")
     dog: DogPayload
     dog_profile_version: ProfileVersionPayload = Field(alias="dogProfileVersion")
@@ -616,6 +659,16 @@ def apply_profile(
             text("SELECT revision FROM dogs WHERE id=:id"), {"id": dog.id}
         ).scalar_one()
         return revision
+
+    same_content = connection.execute(
+        text("SELECT id FROM dog_profile_versions WHERE dog_id=:dog AND content_sha256=:hash"),
+        {"dog": dog.id, "hash": content_hash},
+    ).scalar_one_or_none()
+    if same_content is not None:
+        raise HTTPException(409, detail={
+            "code": "profile_content_already_exists", "dogId": str(dog.id),
+            "existingProfileVersionId": str(same_content),
+        })
 
     current_dog = connection.execute(
         text(
