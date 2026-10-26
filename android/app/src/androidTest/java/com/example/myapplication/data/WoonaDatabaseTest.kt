@@ -42,6 +42,48 @@ class WoonaDatabaseTest {
     }
 
     @Test
+    fun terminalImportedSessionsWithoutMachineEndCanRemoveOnlyVerifiedLocalFiles() {
+        for (status in listOf("completed", "failed", "interrupted")) {
+            val (local, original) = verifiedLocalAndRemote()
+            val remote = original.copy(endedAtUtc = null, captureStatus = status)
+            database.writableDatabase.execSQL("UPDATE recordings SET ended_at_utc=NULL,status=? WHERE id=?", arrayOf(status, local.id))
+            assertTrue(database.removeLocalRecordingFiles(local.id, remote) > 0)
+            assertEquals(null, database.recording(local.id)?.endedAtUtc)
+            assertEquals(status, database.recording(local.id)?.status?.value)
+            assertEquals("synced", database.recording(local.id)?.serverSyncState)
+        }
+    }
+
+    @Test
+    fun missingMachineEndNeverMakesActiveOrServerMissingSessionRemovable() {
+        val (local, original) = verifiedLocalAndRemote()
+        val remote = original.copy(endedAtUtc = null)
+        for (status in listOf("preparing", "recording")) {
+            database.writableDatabase.execSQL("UPDATE recordings SET ended_at_utc=NULL,status=? WHERE id=?", arrayOf(status, local.id))
+            org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { database.removeLocalRecordingFiles(local.id, remote) }
+            assertTrue(local.artifacts.all { database.resolveRelativePath(it.relativePath).isFile })
+        }
+        database.writableDatabase.execSQL("UPDATE recordings SET status='completed' WHERE id=?", arrayOf(local.id))
+        val missing = remote.copy(artifacts = remote.artifacts.map { it.copy(storageStatus = "missing") })
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { database.removeLocalRecordingFiles(local.id, missing) }
+        assertTrue(local.artifacts.all { database.resolveRelativePath(it.relativePath).isFile })
+    }
+
+    @Test
+    fun freshReceiptStatusRequiresCurrentVerifiedFilesAndStrictJsonBooleans() {
+        val status = JSONObject("""{"ingestStatus":"complete","transfer":{"receiptVerified":true},"artifacts":[{"storageStatus":"available","verified":true,"errorCode":null}]}""")
+        assertTrue(com.example.myapplication.sync.confirmsCurrentServerCopy(status))
+        status.getJSONArray("artifacts").getJSONObject(0).put("storageStatus", "missing")
+        assertTrue(!com.example.myapplication.sync.confirmsCurrentServerCopy(status))
+        status.getJSONArray("artifacts").getJSONObject(0).put("storageStatus", "available").put("verified", "true")
+        assertTrue(!com.example.myapplication.sync.confirmsCurrentServerCopy(status))
+        status.getJSONArray("artifacts").getJSONObject(0).put("verified", true)
+        status.getJSONObject("transfer").put("receiptVerified", "true")
+        assertTrue(!com.example.myapplication.sync.confirmsCurrentServerCopy(status))
+        assertTrue(!com.example.myapplication.sync.confirmsCurrentServerCopy(JSONObject("""{"transfer":{"receiptVerified":true}}""")))
+    }
+
+    @Test
     fun removeVerifiedLocalFilesKeepsHistoryAndAllowsDownloadAgain() {
         val (local, remote) = verifiedLocalAndRemote()
         val packet = database.resolveRelativePath(local.artifacts.first { it.type == "packet" }.relativePath)

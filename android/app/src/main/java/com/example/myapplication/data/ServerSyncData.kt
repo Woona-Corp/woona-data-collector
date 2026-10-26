@@ -932,9 +932,9 @@ fun WoonaDatabase.restoreServerMetadata(
 /** Remove only verified uploaded files; retain metadata for history and re-download. */
 fun WoonaDatabase.removeLocalRecordingFiles(recordingId: String, remote: RemoteRecording): Long {
     val local = requireNotNull(recording(recordingId)) { "local_copy_not_synced" }
-    require(local.endedAtUtc != null && local.status.value in setOf("completed", "failed", "interrupted") &&
+    require(local.status.value in setOf("completed", "failed", "interrupted") &&
         local.serverSyncState == "synced") { "local_copy_not_synced" }
-    require(remote.id == local.id && remote.dogId == local.profileId &&
+    require(remote.id == local.id && remote.dogId == local.profileId && remote.captureStatus in setOf("completed", "failed", "interrupted") &&
         !remote.receiptSha256.isNullOrBlank() && !remote.verifiedAtUtc.isNullOrBlank()) { "server_copy_unverified" }
     require(local.artifacts.isNotEmpty() && local.artifacts.all { artifact ->
         remote.artifacts.any { saved -> saved.fileName == artifact.fileName && saved.type == artifact.type.value &&

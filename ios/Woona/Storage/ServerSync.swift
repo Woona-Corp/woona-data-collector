@@ -42,7 +42,7 @@ struct ServerTransferStatus: Decodable {
     let artifacts: [Artifact]?
     let labeling: Labeling?
     var confirmsCurrentServerCopy: Bool {
-        transfer?.receiptVerified == true && artifacts?.isEmpty == false &&
+        ingestStatus == "complete" && transfer?.receiptVerified == true && artifacts?.isEmpty == false &&
         artifacts?.allSatisfy { $0.storageStatus == "available" && $0.verified == true && $0.errorCode == nil } == true
     }
 }

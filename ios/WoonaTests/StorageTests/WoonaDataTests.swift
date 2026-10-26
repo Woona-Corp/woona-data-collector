@@ -337,6 +337,38 @@ final class WoonaDataTests: XCTestCase {
         return (saved, remote)
     }
 
+    @MainActor
+    func testTerminalImportedSessionWithoutMachineEndCanRemoveVerifiedFilesButNotAnActiveSession() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        var (record, remote) = try localRemovalFixture(store)
+        remote = ServerRecordingDetail(id: remote.id, dogId: remote.dogId, profileVersion: remote.profileVersion,
+            source: remote.source, captureStatus: "failed", ingestStatus: remote.ingestStatus, startedAtUtc: remote.startedAtUtc,
+            endedAtUtc: nil, timezone: remote.timezone, sessionLabel: remote.sessionLabel,
+            questionnaireSchemaVersion: remote.questionnaireSchemaVersion, questionnaireValidationState: remote.questionnaireValidationState,
+            sessionQuestionnaire: remote.sessionQuestionnaire, videoRequested: remote.videoRequested, sync: remote.sync,
+            artifacts: remote.artifacts, captureErrorCode: remote.captureErrorCode, captureErrorMessage: remote.captureErrorMessage,
+            receiptSha256: remote.receiptSha256, serverVerifiedAtUtc: remote.serverVerifiedAtUtc)
+        _ = try store.restoreRemoteRecording(remote)
+        record = try XCTUnwrap(store.recording(id: record.id))
+        XCTAssertNil(record.endedAtUTC)
+        let model = AppViewModel(store: store, uiTesting: true)
+        XCTAssertTrue(model.canRemoveLocalRecording(record))
+        try store.markRecording(record.id, status: "recording")
+        XCTAssertFalse(model.canRemoveLocalRecording(try XCTUnwrap(store.recording(id: record.id))))
+        XCTAssertThrowsError(try store.localRemovalPlan(recordingID: record.id, verifiedRemote: remote))
+        try store.markRecording(record.id, status: "failed")
+        let plan = try store.localRemovalPlan(recordingID: record.id, verifiedRemote: remote)
+        XCTAssertTrue(try plan.removeFiles() > 0)
+        XCTAssertNil(try store.recording(id: record.id)?.endedAtUTC)
+    }
+
+    func testFreshServerCopyWithMissingCurrentFileNeverConfirmsSafeRemoval() throws {
+        let response = Data(#"{"ingestStatus":"complete","transfer":{"status":"stalled","totalBytes":12,"uploadedBytes":12,"verifiedBytes":0,"totalFiles":1,"verifiedFiles":0,"receiptVerified":false,"retryable":true,"nextAction":"restore_missing_file"},"artifacts":[{"id":"00000000-0000-0000-0000-000000000001","fileName":"video.mp4","storageStatus":"missing","verified":false,"sizeBytes":12,"uploadedBytes":12,"errorCode":"stored_file_missing","nextAction":"restore_missing_file"}]}"#.utf8)
+        XCTAssertFalse(try JSONDecoder().decode(ServerTransferStatus.self, from: response).confirmsCurrentServerCopy)
+    }
+
     func testVerifiedLocalRemovalPreservesHistoryCauseAndDownloadMetadata() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
