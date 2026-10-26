@@ -1,11 +1,51 @@
 import Foundation
 import CryptoKit
 import Security
+import Darwin
 
 struct ServerConfiguration: Equatable {
     var baseURL: String
     var wifiOnly: Bool
     var accountID: String? = nil
+
+    static func validatedBaseURL(_ input: String) throws -> URL {
+        var value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        while value.hasSuffix("/") { value.removeLast() }
+        guard !value.unicodeScalars.contains(where: { $0.properties.isWhitespace || CharacterSet.controlCharacters.contains($0) }),
+              !value.contains("\\"), let components = URLComponents(string: value),
+              let url = components.url, let rawHost = components.host, !rawHost.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              components.percentEncodedHost?.contains("%") == false,
+              components.port.map({ (1...65535).contains($0) }) ?? true,
+              let separator = value.range(of: "://"),
+              !value[separator.upperBound...].prefix(while: { $0 != "/" }).hasSuffix(":") else {
+            throw ServerSyncError.invalidURL
+        }
+        let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        guard validHost(host) else { throw ServerSyncError.invalidURL }
+        let scheme = components.scheme?.lowercased()
+        let localHosts = ["10.0.2.2", "localhost", "127.0.0.1", "::1"]
+        guard scheme == "https" || (scheme == "http" && localHosts.contains(host)) else { throw ServerSyncError.invalidURL }
+        return url
+    }
+
+    private static func validHost(_ host: String) -> Bool {
+        if host.contains(":") {
+            var address = in6_addr()
+            return inet_pton(AF_INET6, host, &address) == 1
+        }
+        guard host.utf8.count <= 253 else { return false }
+        let labels = (host.hasSuffix(".") ? String(host.dropLast()) : host).split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.allSatisfy({ label in
+            (1...63).contains(label.utf8.count) && label.range(of: "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$", options: .regularExpression) != nil
+        }) else { return false }
+        if labels.count > 1, labels.last?.first?.isNumber == true {
+            var address = in_addr()
+            return inet_pton(AF_INET, host, &address) == 1
+        }
+        return true
+    }
 }
 
 struct ServerTransferStatus: Decodable {
@@ -177,7 +217,7 @@ enum ServerSyncError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL: "Server URL is invalid"
+        case .invalidURL: "Server URL is invalid. Use a complete HTTPS URL with a valid host and port, without username/password, query or fragment. HTTP is allowed only for localhost, 127.0.0.1, [::1] or 10.0.2.2."
         case .tokenMissing: "Server token is missing"
         case .responseInvalid: "Server response is invalid"
         case .transfer(let code, let message, _): "\(code): \(message)"
@@ -244,10 +284,7 @@ final class WoonaServerClient {
     private let downloadTransport: DownloadTransport?
 
     init(configuration: ServerConfiguration, token: String, sessionConfiguration: URLSessionConfiguration = .default, downloadTransport: DownloadTransport? = nil) throws {
-        guard let url = URL(string: configuration.baseURL), url.host != nil,
-              ["http", "https"].contains(url.scheme?.lowercased()) else {
-            throw ServerSyncError.invalidURL
-        }
+        let url = try ServerConfiguration.validatedBaseURL(configuration.baseURL)
         guard !token.isEmpty else { throw ServerSyncError.tokenMissing }
         self.baseURL = url
         self.token = token
@@ -820,7 +857,8 @@ final class WoonaServerClient {
     }
 
     private func makeRequest(method: String, path: String) throws -> URLRequest {
-        guard let url = URL(string: path, relativeTo: baseURL) else { throw ServerSyncError.invalidURL }
+        guard path.hasPrefix("/"), !path.hasPrefix("//"),
+              let url = URL(string: baseURL.absoluteString + path) else { throw ServerSyncError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
