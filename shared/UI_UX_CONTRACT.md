@@ -46,7 +46,7 @@ XCUITest OverviewParityTests проверяет положение аккаун�
 
 ## Результат проверки текущего исправления
 
-Коммит `7f34673`, CI [40361929329](https://github.com/ashromanov/woona-data-collector/actions/runs/40361929329):
+Коммит `7f34673`, CI [40361929329](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40361929329):
 158 unit/integration tests и 8 XCUITest passed; Android и server jobs success.
 Проверены первое Edit, New с сохранением отдельного животного, отмена,
 смена выбранного животного, аккаунт наверху Overview, язык, тёмная тема,
@@ -57,7 +57,7 @@ XCUITest OverviewParityTests проверяет положение аккаун�
 
 
 iOS 1.3.9 (12201) с этим изменением загружен в TestFlight:
-[release run](https://github.com/ashromanov/woona-data-collector/actions/runs/40362142464)
+[release run](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40362142464)
 success. Apple VALID; Internal Testing — IN_BETA_TESTING (2 тестера).
 External Testing (6 тестеров) пока без новой сборки: Apple API отклонил
 назначение группы с 403 (недостаточно прав текущего ключа).

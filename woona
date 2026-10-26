@@ -95,8 +95,8 @@ Label Studio: https://cool-trams.digital/
 Files: https://cool-trams.digital/files/
 Woona DB: https://cool-trams.digital/db/woona/
 Labels DB: https://cool-trams.digital/db/labels/
-Android: https://github.com/ashromanov/woona-data-collector/releases
-Windows: https://github.com/ashromanov/woona-mindray-monitor/releases
+Android: https://github.com/Woona-Corp/woona-data-collector/releases
+Windows: https://github.com/Woona-Corp/woona-mindray-monitor/releases
 iOS: https://testflight.apple.com/join/b1U2rr4Q
 EOF
         ;;
