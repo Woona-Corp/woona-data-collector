@@ -7,6 +7,7 @@ final class AppShellTests: XCTestCase {
     func testBuiltAppAdvertisesBackgroundProcessingWithTypedPlistArrays() {
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String], ["com.woona.apps.sync"])
         XCTAssertTrue((Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String])?.contains("processing") == true)
+        XCTAssertEqual((Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity") as? [String: Any])?["NSAllowsLocalNetworking"] as? Bool, true)
     }
 
     func testBackgroundRegistrationIsOncePerCoordinatorAndUpdatesOnlyItsWeakOwner() {

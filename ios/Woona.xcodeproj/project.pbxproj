@@ -614,7 +614,6 @@
 				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "Woona uses Bluetooth to connect to the sensor and capture packet notifications.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Woona records synchronized rear-camera video with sensor sessions.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Woona connects to your configured local Woona server.";
-				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking = YES;
 				INFOPLIST_FILE = Woona/Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
