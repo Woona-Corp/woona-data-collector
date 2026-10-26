@@ -1,13 +1,17 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct DogProfileEditorPresentation: Identifiable {
+    let id = UUID()
+    let profile: DogProfile?
+}
+
 struct OverviewView: View {
     @EnvironmentObject private var appState: AppViewModel
     @State private var isReplayImporterPresented = false
     @State private var isExportOptionsPresented = false
     @State private var pendingExportKind: ExportKind?
-    @State private var isDogEditorPresented = false
-    @State private var editingProfile: DogProfile?
+    @State private var dogEditorPresentation: DogProfileEditorPresentation?
     @State private var editingSession: WoonaRecording?
     @State private var isSessionEditorPresented = false
     @State private var pendingDevice: BleDevice?
@@ -34,12 +38,11 @@ struct OverviewView: View {
                     }
                     HStack(spacing: 16) {
                         Button(appState.selectedLanguage == .russian ? "Новая" : "New") {
-                            editingProfile = nil
-                            isDogEditorPresented = true
+                            dogEditorPresentation = DogProfileEditorPresentation(profile: nil)
                         }
                         Button(appState.selectedLanguage == .russian ? "Изменить" : "Edit") {
-                            editingProfile = appState.selectedDogProfile
-                            isDogEditorPresented = true
+                            guard let profile = appState.selectedDogProfile else { return }
+                            dogEditorPresentation = DogProfileEditorPresentation(profile: profile)
                         }
                         .disabled(appState.selectedDogProfile == nil)
                     }
@@ -282,13 +285,14 @@ struct OverviewView: View {
                 }
                     .presentationDetents([.medium, .large])
             }
-            .sheet(isPresented: $isDogEditorPresented) {
+            .sheet(item: $dogEditorPresentation) { presentation in
                 DogQuestionnaireEditor(
-                    initial: editingProfile?.questionnaire,
+                    initial: presentation.profile?.questionnaire,
                     language: appState.selectedLanguage
                 ) { questionnaire in
-                    appState.saveDogProfile(questionnaire, replacing: editingProfile)
+                    appState.saveDogProfile(questionnaire, replacing: presentation.profile)
                 }
+                .id(presentation.id)
             }
             .sheet(isPresented: $isSessionEditorPresented) {
                 SessionQuestionnaireEditor(

@@ -3,6 +3,61 @@ import XCTest
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    func testFirstEditAfterReloadPreservesProfileAndUpdatesExistingDog() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var questionnaire = DogQuestionnaire()
+        questionnaire.schemaVersion = 2
+        questionnaire.animalId = "martin-1"
+        questionnaire.numberOrName = "Мартин"
+        questionnaire.species = "собака"
+        let original: DogProfile
+        do {
+            let store = try WoonaStore(rootDirectory: directory)
+            original = try store.saveProfile(questionnaire)
+        }
+
+        let store = try WoonaStore(rootDirectory: directory)
+        let restored = try XCTUnwrap(store.profiles().first)
+        let presentation = DogProfileEditorPresentation(profile: restored)
+        var draft = try XCTUnwrap(presentation.profile?.questionnaire)
+        XCTAssertEqual(draft, questionnaire)
+        draft.numberOrName = "Мартин Тест"
+
+        let saved = try store.saveProfile(draft, replacing: presentation.profile)
+        XCTAssertEqual(saved.id, original.id)
+        XCTAssertNotEqual(saved.profileVersionID, original.profileVersionID)
+        XCTAssertEqual(saved.numberOrName, "Мартин Тест")
+        XCTAssertEqual(try store.profiles().count, 1)
+        XCTAssertEqual(try store.profile(dogID: original.id, versionID: original.profileVersionID)?.questionnaire, questionnaire)
+    }
+
+    func testNewAfterEditCreatesAnotherDogWithoutReplacingExistingProfile() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try WoonaStore(rootDirectory: directory)
+        var questionnaire = DogQuestionnaire()
+        questionnaire.schemaVersion = 2
+        questionnaire.animalId = "martin-1"
+        questionnaire.numberOrName = "Мартин"
+        questionnaire.species = "собака"
+        let original = try store.saveProfile(questionnaire)
+        var presentation: DogProfileEditorPresentation? = DogProfileEditorPresentation(profile: original)
+        let editID = try XCTUnwrap(presentation?.id)
+        presentation = nil
+        presentation = DogProfileEditorPresentation(profile: nil)
+        let newPresentation = try XCTUnwrap(presentation)
+        XCTAssertNotEqual(newPresentation.id, editID)
+        XCTAssertNil(newPresentation.profile)
+        questionnaire.animalId = "finnik-1"
+        questionnaire.numberOrName = "Финик"
+
+        let created = try store.saveProfile(questionnaire, replacing: newPresentation.profile)
+        XCTAssertNotEqual(created.id, original.id)
+        XCTAssertEqual(try store.profiles().count, 2)
+        XCTAssertEqual(try store.profile(dogID: original.id, versionID: original.profileVersionID), original)
+    }
+
     func testInitialTabIsOverview() {
         let viewModel = AppViewModel()
 
