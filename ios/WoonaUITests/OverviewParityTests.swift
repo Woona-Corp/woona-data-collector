@@ -35,8 +35,12 @@ final class OverviewParityTests: XCTestCase {
         }
         XCTAssertTrue(remove.isEnabled)
         remove.tap()
-        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout: 5))
-        app.buttons["Cancel"].tap()
+        let confirmation = app.alerts["Remove session files from this device?"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        XCTAssertTrue(confirmation.buttons["Remove from device"].exists)
+        XCTAssertTrue(confirmation.buttons["Cancel"].exists)
+        attachScreen("Remove-local-confirmation-EnglishLight")
+        confirmation.buttons["Cancel"].tap()
         XCTAssertTrue(remove.exists)
         XCTAssertTrue(app.buttons["Share session ZIP"].isEnabled)
     }

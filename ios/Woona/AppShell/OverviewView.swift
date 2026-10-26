@@ -670,7 +670,7 @@ struct OverviewView: View {
                     heartRecording = records.first { ["completed", "failed", "interrupted"].contains($0.status) && $0.questionnaire?.sessionKind == "heart" && $0.questionnaire?.readyForSync == false }
                 }
             }
-            .confirmationDialog(russian ? "Удалить файлы сессии с устройства?" : "Remove session files from this device?", isPresented: Binding(
+            .alert(russian ? "Удалить файлы сессии с устройства?" : "Remove session files from this device?", isPresented: Binding(
                 get: { pendingLocalRemoval != nil }, set: { if !$0 { pendingLocalRemoval = nil } }
             ), titleVisibility: .visible, presenting: pendingLocalRemoval) { recording in
                 Button(russian ? "Удалить с устройства" : "Remove from device", role: .destructive) {
