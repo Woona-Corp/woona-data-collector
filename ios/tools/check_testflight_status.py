@@ -64,6 +64,13 @@ def main():
         apps = get('/v1/apps', {'filter[bundleId]': 'com.woona.apps'})['data']
         if len(apps) != 1:
             raise RuntimeError('Expected one Woona app')
+        available_groups = []
+        for group in get('/v1/apps/' + apps[0]['id'] + '/betaGroups', {'limit': 200})['data']:
+            attributes = group['attributes']
+            testers = get('/v1/betaGroups/' + group['id'] + '/betaTesters', {'limit': 200})
+            available_groups.append({'id': group['id'], 'name': attributes.get('name'),
+                'is_internal': attributes.get('isInternalGroup'),
+                'tester_count': testers.get('meta', {}).get('paging', {}).get('total', len(testers['data']))})
         for attempt in range(45):
             result = get('/v1/builds', {'filter[app]': apps[0]['id'], 'filter[version]': build_number,
                 'filter[preReleaseVersion.version]': version, 'include': 'buildBetaDetail,betaGroups,preReleaseVersion'})
@@ -84,7 +91,7 @@ def main():
                     'processing_state': attrs.get('processingState'), 'expired': attrs.get('expired'),
                     'internal_build_state': detail.get('internalBuildState'),
                     'external_build_state': detail.get('externalBuildState'), 'groups': groups,
-                    'physical_installation_verified': False}
+                    'available_groups': available_groups, 'physical_installation_verified': False}
                 print(json.dumps(report), flush=True)
                 if attrs.get('processingState') == 'VALID':
                     Path('testflight-status.json').write_text(json.dumps(report, indent=2) + '\n')
