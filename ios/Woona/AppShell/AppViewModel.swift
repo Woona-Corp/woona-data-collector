@@ -33,6 +33,10 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var chart = ChartUiState()
     @Published private(set) var exportPhase: ExportPhase?
     @Published private(set) var preparedExport: PreparedExport?
+    @Published private(set) var isCompleteArchiveExporting = false
+    @Published private(set) var completeArchiveProgress: CompleteDataArchive.Progress?
+    private var completeArchiveTask: Task<Void, Never>?
+    private var completeArchiveWorker: Task<URL, Error>?
     @Published private(set) var dogProfiles: [DogProfile] = []
     @Published private(set) var selectedDogProfile: DogProfile?
     @Published private(set) var recentRecordings: [WoonaRecording] = []
@@ -58,7 +62,7 @@ final class AppViewModel: ObservableObject {
     @Published private var scheduledSyncCount = 0
 
     var canChangeAccount: Bool {
-        !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
+        completeArchiveTask == nil && !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
         !captureStopInProgress && activeRecording == nil && syncingRecordingIDs.isEmpty &&
         uploadingProfileCount == 0 && scheduledSyncCount == 0 && downloadingRecordingID == nil
     }
@@ -681,6 +685,70 @@ final class AppViewModel: ObservableObject {
         chartVerticalZoomFactor = 1
         chartVerticalCenterOverride = nil
         rebuildChartState()
+    }
+
+    func prepareCompleteDataArchive() {
+        guard exportPhase == nil, canChangeAccount, let store else {
+            showError(selectedLanguage == .russian ? "Сначала завершите запись и операции с сервером, затем повторите экспорт." : "Finish recording and server operations, then retry export.", error: nil)
+            return
+        }
+        isCompleteArchiveExporting = true
+        discardPreparedExportSnapshot()
+        preparedExport = nil
+        exportPhase = .preparingSnapshots
+        let manager = FileManager.default
+        let directory = manager.temporaryDirectory.appendingPathComponent("WoonaAllData-\(UUID().uuidString)", isDirectory: true)
+        preparedExportSnapshotDirectory = directory
+        var roots: [CompleteDataArchive.Root] = []
+        if let documents = manager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            roots.append(.init(prefix: "data/documents", directory: documents))
+        }
+        if let caches = manager.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            roots.append(.init(prefix: "data/recovered-cache", directory: caches, legacyOnly: true))
+        }
+        roots.append(.init(prefix: "data/recovered-temporary", directory: manager.temporaryDirectory, legacyOnly: true))
+        let exporter = CompleteDataArchive(dataDirectory: store.rootDirectory, additionalRoots: roots, configuration: [
+            "language": selectedLanguage.rawValue, "theme": selectedThemeMode.rawValue,
+            "transport": String(describing: selectedTransportProfile), "wifiOnly": String(serverWifiOnly),
+            "serverConfigured": String(!serverBaseURL.isEmpty && !serverToken.isEmpty),
+            "selectedAccountId": selectedAccountID ?? "", "selectedDogId": selectedDogProfile?.id.uuidString ?? "",
+        ])
+        completeArchiveTask = Task {
+            do {
+                let worker = Task.detached(priority: .userInitiated) { [weak self] in
+                    var lastUpdate = Date.distantPast
+                    return try exporter.create(in: directory.appendingPathComponent("Woona-All-Data.zip"), onProgress: { progress in
+                        if Date().timeIntervalSince(lastUpdate) >= 0.1 || progress.completedFiles == progress.totalFiles {
+                            lastUpdate = Date()
+                            Task { @MainActor [weak self] in
+                                if self?.isCompleteArchiveExporting == true { self?.completeArchiveProgress = progress }
+                            }
+                        }
+                    })
+                }
+                completeArchiveWorker = worker
+                let url = try await worker.value
+                try Task.checkCancellation()
+                exportPhase = .openingShareSheet
+                preparedExport = PreparedExport(kind: .all, urls: [url])
+            } catch is CancellationError {
+                exportPhase = nil
+                discardPreparedExportSnapshot()
+            } catch {
+                exportPhase = nil
+                discardPreparedExportSnapshot()
+                showError(selectedLanguage == .russian ? "Архив не создан. Исходные данные сохранены. Причина" : "Archive was not created. Original data is safe. Reason", error: error)
+            }
+            isCompleteArchiveExporting = false
+            completeArchiveProgress = nil
+            completeArchiveWorker = nil
+            completeArchiveTask = nil
+        }
+    }
+
+    func cancelCompleteDataArchive() {
+        completeArchiveWorker?.cancel()
+        completeArchiveTask?.cancel()
     }
 
     func prepareExport(_ kind: ExportKind) {

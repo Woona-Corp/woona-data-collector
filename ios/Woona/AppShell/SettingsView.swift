@@ -55,6 +55,8 @@ struct SettingsView: View {
                     }
                 }
 
+                CompleteArchiveCard()
+
                 AppCard(title: appState.selectedLanguage == .russian ? "Серверное хранилище" : "Server storage") {
                     HStack {
                         Text(isServerConfigured ? appState.serverBaseURL : (russian ? "Не настроено" : "Not configured"))

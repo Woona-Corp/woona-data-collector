@@ -281,6 +281,14 @@ fun DeviceSettingsScreen(
         }
 
         item {
+            com.example.myapplication.storage.CompleteArchiveCard(
+                language = selectedLanguage,
+                captureActive = uiState.showCaptureUi || uiState.isReplayPreparing || uiState.isReplayRunning ||
+                    uiState.videoState == VideoCaptureState.STOPPING,
+            )
+        }
+
+        item {
             ServerSyncSettingsCard(
                 state = serverSyncState,
                 language = selectedLanguage,

@@ -56,6 +56,9 @@
 		8A1A00962B00000900000001 /* PacketTimelineFileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1A00862B00000900000001 /* PacketTimelineFileStoreTests.swift */; };
 		8A1A00972B00000900000001 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 8A1A00872B00000900000001 /* libsqlite3.tbd */; };
 		8A1B00012B00000100000001 = {isa = PBXBuildFile; fileRef = 8A1B00022B00000100000001; };
+		8A1AB0022B00000100000001 /* CompleteDataArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AB0012B00000100000001 /* CompleteDataArchive.swift */; };
+		8A1AB0042B00000100000001 /* CompleteArchiveCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AB0032B00000100000001 /* CompleteArchiveCard.swift */; };
+		8A1AB0062B00000100000001 /* CompleteDataArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AB0052B00000100000001 /* CompleteDataArchiveTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -122,6 +125,9 @@
 		8A1A00872B00000900000001 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.text-based-dylib-definition; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
 		8A1B00022B00000100000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewParityTests.swift; sourceTree = "<group>"; };
 		8A1B00032B00000100000001 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = WoonaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		8A1AB0012B00000100000001 /* CompleteDataArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompleteDataArchive.swift; sourceTree = "<group>"; };
+		8A1AB0032B00000100000001 /* CompleteArchiveCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompleteArchiveCard.swift; sourceTree = "<group>"; };
+		8A1AB0052B00000100000001 /* CompleteDataArchiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompleteDataArchiveTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -199,6 +205,7 @@
 				8A1A00102B00000100000001 /* OverviewView.swift */,
 				8A1A00122B00000100000001 /* ChartsView.swift */,
 				8A1A00142B00000100000001 /* SettingsView.swift */,
+				8A1AB0032B00000100000001 /* CompleteArchiveCard.swift */,
 				8A1A00802B00000900000001 /* QuestionnaireViews.swift */,
 			);
 			path = AppShell;
@@ -233,6 +240,7 @@
 			isa = PBXGroup;
 			children = (
 				8A1A00462B00000300000001 /* CsvExporter.swift */,
+				8A1AB0012B00000100000001 /* CompleteDataArchive.swift */,
 				8A1A00442B00000300000001 /* DiagnosticLogFileStore.swift */,
 				8A1A00402B00000300000001 /* PacketFileStore.swift */,
 				8A1A00712B00000800000001 /* RawFragmentFileParser.swift */,
@@ -248,6 +256,7 @@
 			isa = PBXGroup;
 			children = (
 				8A1A004F2B00000300000001 /* CsvExporterTests.swift */,
+				8A1AB0052B00000100000001 /* CompleteDataArchiveTests.swift */,
 				8A1A004D2B00000300000001 /* DiagnosticLogFileStoreTests.swift */,
 				8A1A00492B00000300000001 /* PacketFileStoreTests.swift */,
 				8A1A00732B00000800000001 /* RawFragmentFileParserTests.swift */,
@@ -407,6 +416,7 @@
 				8A1A00112B00000100000001 /* OverviewView.swift in Sources */,
 				8A1A00132B00000100000001 /* ChartsView.swift in Sources */,
 				8A1A00152B00000100000001 /* SettingsView.swift in Sources */,
+				8A1AB0042B00000100000001 /* CompleteArchiveCard.swift in Sources */,
 				8A1A00292B00000200000001 /* SensorBlockParser.swift in Sources */,
 				8A1A002B2B00000200000001 /* PacketValidator.swift in Sources */,
 				8A1A002D2B00000200000001 /* PacketStatsTracker.swift in Sources */,
@@ -417,6 +427,7 @@
 				8A1A00432B00000300000001 /* RawFragmentFileStore.swift in Sources */,
 				8A1A00452B00000300000001 /* DiagnosticLogFileStore.swift in Sources */,
 				8A1A00472B00000300000001 /* CsvExporter.swift in Sources */,
+				8A1AB0022B00000100000001 /* CompleteDataArchive.swift in Sources */,
 				8A1A00542B00000400000001 /* CaptureModels.swift in Sources */,
 				8A1A00562B00000400000001 /* PacketCaptureProcessor.swift in Sources */,
 				8A1A00582B00000400000001 /* PacketProcessingUpdateBatcher.swift in Sources */,
@@ -449,6 +460,7 @@
 				8A1A004C2B00000300000001 /* RawFragmentFileStoreTests.swift in Sources */,
 				8A1A004E2B00000300000001 /* DiagnosticLogFileStoreTests.swift in Sources */,
 				8A1A00502B00000300000001 /* CsvExporterTests.swift in Sources */,
+				8A1AB0062B00000100000001 /* CompleteDataArchiveTests.swift in Sources */,
 				8A1A005B2B00000400000001 /* PacketCaptureProcessorTests.swift in Sources */,
 				8A1A005F2B00000500000001 /* PacketReplayControllerTests.swift in Sources */,
 				8A1A006B2B00000600000001 /* BleSessionManagerTests.swift in Sources */,
