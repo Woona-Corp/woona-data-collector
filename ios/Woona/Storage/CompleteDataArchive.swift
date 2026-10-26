@@ -52,9 +52,14 @@ struct CompleteDataArchive: Sendable {
         let initial = try inventory(roots)
         let sources = [try source(name: "data/Woona/woona.sqlite", url: snapshot)] + initial
         guard Set(sources.map(\.name)).count == sources.count else { throw completeArchiveError("Duplicate archive entry") }
-        let total = sources.reduce(UInt64(0)) { $0 + $1.size }
+        let total = try sources.reduce(UInt64(0)) { value, source in
+            let (sum, overflow) = value.addingReportingOverflow(source.size)
+            guard !overflow else { throw completeArchiveError("Data size exceeds the archive's 64-bit limit. Original data is unchanged.") }
+            return sum
+        }
         let free = (try manager.attributesOfFileSystem(forPath: parent.path)[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0
-        let required = total + 16 * 1_024 * 1_024 + UInt64(sources.count) * 1_024
+        let (required, sizeOverflow) = total.addingReportingOverflow(16 * 1_024 * 1_024 + UInt64(sources.count) * 1_024)
+        guard !sizeOverflow else { throw completeArchiveError("Not enough addressable space for the archive. Original data is unchanged.") }
         guard free >= required else { throw completeArchiveError("Not enough free space: approximately \(required) bytes needed, \(free) bytes available. Original data is unchanged.") }
         do {
             let zip = try StreamingZIP64(partial)

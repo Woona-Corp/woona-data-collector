@@ -688,7 +688,11 @@ final class AppViewModel: ObservableObject {
     }
 
     func prepareCompleteDataArchive() {
-        guard exportPhase == nil, canChangeAccount, let store else {
+        guard let store else {
+            showError(selectedLanguage == .russian ? "Локальная база недоступна. Полный архив не создан; исходные файлы не изменены." : "The local database is unavailable. The complete archive was not created; original files are unchanged.", error: nil)
+            return
+        }
+        guard exportPhase == nil, canChangeAccount else {
             showError(selectedLanguage == .russian ? "Сначала завершите запись и операции с сервером, затем повторите экспорт." : "Finish recording and server operations, then retry export.", error: nil)
             return
         }

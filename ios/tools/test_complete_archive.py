@@ -6,6 +6,7 @@ standard ZIP reader and SQLite (not another copy of the production ZIP parser).
 """
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -33,6 +34,18 @@ do {
         let zip = try StreamingZIP64(output)
         for index in 0..<65_537 {
             try zip.add(name: "file-\(index).bin", size: 0) { Data() }
+        }
+        try zip.finish()
+    } else if mode == "large-file" {
+        let zip = try StreamingZIP64(output)
+        let size: UInt64 = 4_294_967_296 + 65_537
+        var remaining = size
+        let block = Data(repeating: 0x5a, count: 65_536)
+        try zip.add(name: "large-video.mp4", size: size) {
+            guard remaining > 0 else { return Data() }
+            let count = Int(min(remaining, UInt64(block.count)))
+            remaining -= UInt64(count)
+            return count == block.count ? block : Data(block.prefix(count))
         }
         try zip.finish()
     } else if mode == "paths" {
@@ -168,6 +181,18 @@ class CompleteArchiveCompatibilityTests(unittest.TestCase):
         (self.root / "unsafe").symlink_to(self.base / "outside")
         (self.base / "outside").write_text("secret outside data root")
         self.run_export(success=False)
+
+    @unittest.skipUnless(os.environ.get("WOONA_TEST_ZIP64_LARGE") == "1", "Set WOONA_TEST_ZIP64_LARGE=1 for a 4+ GiB streaming fixture")
+    def test_file_larger_than_4_gib_is_readable(self):
+        self.run_export("large-file")
+        with zipfile.ZipFile(self.base / "out.zip") as archive:
+            self.assertEqual(archive.getinfo("large-video.mp4").file_size, 4_294_967_296 + 65_537)
+            count = 0
+            with archive.open("large-video.mp4") as stream:
+                while chunk := stream.read(1_048_576):
+                    self.assertEqual(chunk, b"Z" * len(chunk))
+                    count += len(chunk)
+            self.assertEqual(count, 4_294_967_296 + 65_537)
 
     def test_recording_must_be_finalized_first(self):
         self.db.execute("UPDATE recordings SET status='recording'")
