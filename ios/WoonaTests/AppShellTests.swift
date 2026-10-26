@@ -278,6 +278,43 @@ final class AppShellTests: XCTestCase {
         try await exerciseFixture()
     }
 
+    func testCaptureFinalizationReleasesNextSessionBeforeAnyNetworkRequest() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        @MainActor func exerciseFixture() async throws {
+            let store = try WoonaStore(rootDirectory: directory)
+            var animal = DogQuestionnaire(); animal.schemaVersion = 2; animal.animalId = "finalize-fixture"; animal.numberOrName = "Synthetic finalize animal"
+            let profile = try store.saveProfile(animal)
+            try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
+            var networkObserved = false
+            weak var observedModel: AppViewModel?
+            let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { _ in
+                let owner = try XCTUnwrap(observedModel)
+                XCTAssertNil(owner.activeRecording, "Capture must already be durable before upload")
+                XCTAssertTrue(owner.canStartNewSession, "Network latency must not keep capture finalization busy")
+                networkObserved = true
+                throw WoonaStoreError.invalidData("Synthetic network stop after checking durable completion")
+            })
+            observedModel = model
+            model.serverToken = "fixture"; model.serverWifiOnly = false
+            model.updateTransferNetworkPath(available: true, unmetered: true)
+            try await waitUntil("startup queue to finish") { model.canChangeAccount }
+            // Invalid replay also has to finalize locally and upload its diagnostics.
+            // The test uses no camera, Bluetooth device or real network.
+            let source = directory.appendingPathComponent("empty-replay.bin")
+            try Data().write(to: source)
+            var questionnaire = SessionQuestionnaire(); questionnaire.schemaVersion = 2
+            questionnaire.sessionLabel = "Finalize ordering"; questionnaire.plannedActivities = ["Покой"]; questionnaire.videoRequested = false
+            try model.startReplay(from: source, questionnaire: questionnaire)
+            let recording = try XCTUnwrap(model.activeRecording)
+            try await waitUntil("upload to start after local finalization") { networkObserved }
+            try await waitUntil("owned upload housekeeping to finish") { model.canChangeAccount }
+            XCTAssertTrue(["failed", "interrupted", "completed"].contains(try XCTUnwrap(store.recording(id: recording.id)).status))
+            XCTAssertTrue(model.canStartNewSession)
+        }
+        try await exerciseFixture()
+    }
+
     func testSessionExportAvailabilityUsesLocalFilesAfterRestartDownloadAndRemoval() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -628,7 +628,7 @@ struct OverviewView: View {
                         } else {
                             Button(russian ? "Новое соединение" : "New connection") { pendingDevice = nil; pendingReplaySelection = false; pendingReplayURL = nil; isBLESelectionPresented = true }
                                 .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary).accessibilityIdentifier("devices.newConnection")
-                                .disabled(appState.selectedDogProfile == nil)
+                                .disabled(appState.selectedDogProfile == nil || !appState.canStartNewSession)
                             if appState.selectedDogProfile == nil {
                                 Text(russian ? "Сначала выберите или создайте анкету во вкладке «Животные»." : "First select or create an animal in Animals.").font(.footnote)
                             }
@@ -800,7 +800,7 @@ struct OverviewView: View {
                     Button(russian ? "Воспроизвести локальный файл (отладка)" : "Replay local file (debug)") { pendingReplaySelection = true; isBLESelectionPresented = false }
                         .buttonStyle(.bordered)
                         .frame(maxWidth: .infinity)
-                        .disabled(appState.selectedDogProfile == nil)
+                        .disabled(appState.selectedDogProfile == nil || !appState.canStartNewSession)
                         .accessibilityIdentifier("devices.replay")
                     if appState.foundDevices.isEmpty {
                         Text(appState.isScanning ? (russian ? "Идет поиск ближайших BLE-устройств..." : "Scanning for nearby BLE devices...") : (russian ? "Устройства еще не найдены." : "No discovered devices yet."))

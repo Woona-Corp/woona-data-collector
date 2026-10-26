@@ -161,6 +161,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    var canStartNewSession: Bool { activeRecording == nil && !captureStopInProgress }
     var canSelectAnimal: Bool { !isBackgroundSyncRunning && activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
     var transferNetworkAllowsWork: Bool {
         networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting
@@ -616,7 +617,7 @@ final class AppViewModel: ObservableObject {
 
     func connect(to device: BleDevice, questionnaire: SessionQuestionnaire) throws {
         guard !isAccountOperationRunning else { throw WoonaStoreError.invalidData("Дождитесь завершения операции аккаунта / Wait for the account operation") }
-        guard activeRecording == nil, !captureStopInProgress else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
+        guard canStartNewSession else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
         guard let profile = selectedDogProfile, let store else {
             throw WoonaStoreError.invalidData("Выберите или создайте карточку животного / Select or create an animal profile")
         }
@@ -669,7 +670,7 @@ final class AppViewModel: ObservableObject {
 
     func startReplay(from fileURL: URL, questionnaire: SessionQuestionnaire) throws {
         guard !isAccountOperationRunning else { throw WoonaStoreError.invalidData("Дождитесь завершения операции аккаунта / Wait for the account operation") }
-        guard activeRecording == nil, !captureStopInProgress else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
+        guard canStartNewSession else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
         guard let profile = selectedDogProfile, let store else {
             throw WoonaStoreError.invalidData("Выберите или создайте карточку животного / Select or create an animal profile")
         }
@@ -1452,7 +1453,9 @@ final class AppViewModel: ObservableObject {
             statusText = finalStatus.capitalized
             reloadRecentRecordings()
             if let finalized = try store.recording(id: recording.id) {
-                await self.sync(recording: finalized)
+                // Durable capture completion releases the next session before network
+                // transfer starts. The upload queue owns its own busy/error states.
+                scheduleSync(finalized)
             }
         } catch { showError("Failed to finalize recording", error: error) }
     }
