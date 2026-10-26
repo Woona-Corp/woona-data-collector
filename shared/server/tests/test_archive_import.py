@@ -111,6 +111,25 @@ class ArchiveValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'monotonic value missing'):
             self.inspect()
 
+    def test_only_final_completion_fields_may_differ_from_start_snapshot(self):
+        with zipfile.ZipFile(self.archive) as bundle:
+            files = {name: bundle.read(name) for name in bundle.namelist()}
+        share = json.loads(files['manifest.json'])
+        share['recording']['questionnaire']['endTime'] = '10:01'
+        share['recording']['questionnaire']['durationMinutes'] = 1
+        files['manifest.json'] = json.dumps(share).encode()
+        with zipfile.ZipFile(self.archive, 'w') as bundle:
+            for name, content in files.items():bundle.writestr(name, content)
+        plan = self.inspect()
+        self.assertEqual(plan['completionFieldsFinalizedAfterCapture'], ['durationMinutes', 'endTime'])
+        self.assertNotEqual(plan['manifest']['recording']['questionnaire']['endTime'], plan['sync']['sessionQuestionnaire'].get('endTime'))
+        share['recording']['questionnaire']['animalId'] = 'different-animal'
+        files['manifest.json'] = json.dumps(share).encode()
+        with zipfile.ZipFile(self.archive, 'w') as bundle:
+            for name, content in files.items():bundle.writestr(name, content)
+        with self.assertRaisesRegex(ValueError, 'changes require review'):
+            self.inspect()
+
     def test_no_room_fails_without_removing_archive(self):
         usage = type('Disk', (), {'free': 1})()
         with patch('server.archive_import.shutil.disk_usage', return_value=usage):
