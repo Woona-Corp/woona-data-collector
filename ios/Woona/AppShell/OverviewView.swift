@@ -32,7 +32,7 @@ struct OverviewView: View {
                             }
                         }
                     }
-                    HStack {
+                    HStack(spacing: 16) {
                         Button(appState.selectedLanguage == .russian ? "Новая" : "New") {
                             editingProfile = nil
                             isDogEditorPresented = true
@@ -43,6 +43,8 @@ struct OverviewView: View {
                         }
                         .disabled(appState.selectedDogProfile == nil)
                     }
+                    // Explicit styling keeps List from treating both actions as a row tap.
+                    .buttonStyle(.bordered)
                 }
 
                 Section(appState.text(.session)) {
