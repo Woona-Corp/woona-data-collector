@@ -1171,10 +1171,11 @@ final class WoonaStore {
     }
 
     func localRemovalPlan(recordingID: UUID, verifiedRemote remote: ServerRecordingDetail) throws -> LocalRecordingRemoval {
-        guard let local = try recording(id: recordingID), local.endedAtUTC != nil,
+        guard let local = try recording(id: recordingID),
               ["completed", "failed", "interrupted"].contains(local.status),
               local.serverSyncState == "synced", !local.questionnaireDirty else { throw WoonaStoreError.invalidData("local_copy_not_synced") }
         guard remote.id == local.id, remote.dogId == local.dogID, remote.ingestStatus == "complete",
+              ["completed", "failed", "interrupted"].contains(remote.captureStatus),
               remote.receiptSha256?.isEmpty == false, remote.serverVerifiedAtUtc?.isEmpty == false else { throw WoonaStoreError.invalidData("server_copy_unverified") }
         let localArtifacts = try artifacts(recordingID: recordingID)
         guard !localArtifacts.isEmpty, localArtifacts.allSatisfy({ artifact in

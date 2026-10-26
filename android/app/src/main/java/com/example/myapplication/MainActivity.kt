@@ -968,9 +968,7 @@ class MainActivity : ComponentActivity() {
             val outcome = runCatching { serverOperationLock.withLock {
                 val client = ServerApiClient(settings)
                 val status = client.syncStatus(recordingId)
-                val files = status.optJSONArray("artifacts")
-                require(status.optJSONObject("transfer")?.optBoolean("receiptVerified") == true && files != null && files.length() > 0 &&
-                    (0 until files.length()).all { files.getJSONObject(it).optBoolean("verified") && files.getJSONObject(it).isNull("errorCode") }) { "server_copy_unverified" }
+                require(com.example.myapplication.sync.confirmsCurrentServerCopy(status)) { "server_copy_unverified" }
                 woonaDatabase.removeLocalRecordingFiles(recordingId, client.fetchRecording(recordingId))
             } }
             runOnUiThread {

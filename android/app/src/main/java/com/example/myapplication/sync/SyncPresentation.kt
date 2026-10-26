@@ -101,3 +101,14 @@ fun ServerSyncUiState.mutationBlockExplanation(language: AppLanguage): String {
         else -> if (ru) "Дождитесь завершения текущей операции с аккаунтом или файлами." else "Wait for the current account or file operation to finish."
     }
 }
+
+/** A cached receipt alone is insufficient: this response must verify every current file. */
+fun confirmsCurrentServerCopy(status: org.json.JSONObject): Boolean {
+    if (status.optString("ingestStatus") != "complete" || status.optJSONObject("transfer")?.opt("receiptVerified") != true) return false
+    val files = status.optJSONArray("artifacts") ?: return false
+    if (files.length() == 0) return false
+    return (0 until files.length()).all { index ->
+        val file = files.optJSONObject(index)
+        file != null && file.optString("storageStatus") == "available" && file.opt("verified") == true && file.isNull("errorCode")
+    }
+}

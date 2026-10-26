@@ -425,7 +425,7 @@ final class AppViewModel: ObservableObject {
 
     func canRemoveLocalRecording(_ recording: WoonaRecording) -> Bool {
         canChangeAccount && exportPhase == nil && preparedExport == nil && recording.serverSyncState == "synced" &&
-        !recording.questionnaireDirty && recording.endedAtUTC != nil &&
+        !recording.questionnaireDirty && ["completed", "failed", "interrupted"].contains(recording.status) &&
         (recordingFileCounts[recording.id]?.local ?? 0) > 0
     }
 
