@@ -3,6 +3,103 @@ import SQLite3
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    func testCaptureReasonPersistsInHistoryAndSurvivesRestart() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var id: UUID!
+        do {
+            let store = try WoonaStore(rootDirectory: root)
+            let dog = try store.saveProfile(completeDog())
+            let record = try store.createRecording(profile: dog, source: "live", questionnaire: completeSession())
+            id = record.id
+            try store.finalize(recording: record, status: "failed", files: [], syncJSON: Data(#"{"captureErrorCode":"gatt_error","captureErrorMessage":"GATT status 8"}"#.utf8))
+            try store.updateRecordingSync(id, state: "synced")
+        }
+        let reopened = try WoonaStore(rootDirectory: root)
+        let record = try XCTUnwrap(reopened.recording(id: id))
+        XCTAssertEqual(record.captureErrorCode, "gatt_error")
+        XCTAssertEqual(record.captureErrorMessage, "GATT status 8")
+        XCTAssertEqual(record.serverSyncState, "synced")
+        XCTAssertEqual(try reopened.recentRecordings(dogID: record.dogID).first?.captureErrorCode, "gatt_error")
+    }
+
+    private func localRemovalFixture(_ store: WoonaStore) throws -> (WoonaRecording, ServerRecordingDetail) {
+        let dog = try store.saveProfile(completeDog())
+        let local = try store.createRecording(profile: dog, source: "live", questionnaire: completeSession())
+        let packet = store.directory(for: local).appendingPathComponent("packets.bin")
+        try Data("packet data".utf8).write(to: packet)
+        try store.finalize(recording: local, status: "failed", files: [("packet", packet, "application/octet-stream")], syncJSON: Data("{}".utf8))
+        let saved = try XCTUnwrap(store.recording(id: local.id))
+        let remote = ServerRecordingDetail(id: saved.id, dogId: dog.id,
+            profileVersion: .init(id: dog.profileVersionID, schemaVersion: dog.questionnaire.schemaVersion, validationState: "complete", questionnaire: dog.questionnaire,
+                                 contentSha256: dog.contentSha256, clientCreatedAtUtc: dog.createdAtUTC, supersededAtUtc: nil),
+            source: saved.source, captureStatus: saved.status, ingestStatus: "complete", startedAtUtc: saved.startedAtUTC,
+            endedAtUtc: saved.endedAtUTC, timezone: saved.timezone, sessionLabel: saved.sessionLabel,
+            questionnaireSchemaVersion: 1, questionnaireValidationState: "complete",
+            sessionQuestionnaire: try JSONDecoder().decode(JSONValue.self, from: WoonaStore.sessionQuestionnaireData(saved.questionnaire!)),
+            videoRequested: saved.videoRequested, sync: .object([:]),
+            artifacts: try store.artifacts(recordingID: saved.id).map { .init(id: $0.id, type: $0.type, fileName: $0.fileName, mimeType: $0.mimeType, sizeBytes: $0.sizeBytes, sha256: $0.sha256, storageStatus: "available") },
+            captureErrorCode: "gatt_error", captureErrorMessage: "GATT status 8",
+            receiptSha256: String(repeating: "b", count: 64), serverVerifiedAtUtc: "2026-10-26T12:00:00Z")
+        return (saved, remote)
+    }
+
+    func testVerifiedLocalRemovalPreservesHistoryCauseAndDownloadMetadata() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let (record, remote) = try localRemovalFixture(store)
+        _ = try store.restoreRemoteRecording(remote)
+        let plan = try store.localRemovalPlan(recordingID: record.id, verifiedRemote: remote)
+        XCTAssertTrue(try plan.removeFiles() > 0)
+        let history = try XCTUnwrap(store.recording(id: record.id))
+        XCTAssertEqual(history.serverSyncState, "synced")
+        XCTAssertEqual(history.captureErrorCode, "gatt_error")
+        XCTAssertEqual(history.captureErrorMessage, "GATT status 8")
+        XCTAssertEqual(history.dogID, record.dogID)
+        XCTAssertEqual(try store.missingArtifacts(recordingID: record.id).count, remote.artifacts.count)
+        XCTAssertEqual(Set(try store.artifacts(recordingID: record.id).map(\.id)), Set(remote.artifacts.map(\.id)))
+        let packet = try XCTUnwrap(store.artifacts(recordingID: record.id).first { $0.type == "packet" })
+        let target = store.rootDirectory.appendingPathComponent(packet.relativePath)
+        try Data("packet data".utf8).write(to: target)
+        XCTAssertEqual(try WoonaStore.sha256File(target), packet.sha256)
+        XCTAssertEqual(try store.missingArtifacts(recordingID: record.id).count, remote.artifacts.count - 1)
+    }
+
+    func testRemovalPlanCannotDeleteAFileOutsideTheSessionDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let (record, remote) = try localRemovalFixture(store)
+        _ = try store.restoreRemoteRecording(remote)
+        let plan = try store.localRemovalPlan(recordingID: record.id, verifiedRemote: remote)
+        let outside = root.appendingPathComponent("unrelated.txt")
+        let bytes = Data("Keep this unrelated file".utf8)
+        try bytes.write(to: outside)
+        let unsafe = LocalRecordingRemoval(directory: plan.directory, files: plan.files + [.init(url: outside, size: Int64(bytes.count), sha256: WoonaStore.sha256(bytes))])
+        XCTAssertThrowsError(try unsafe.removeFiles())
+        XCTAssertEqual(try Data(contentsOf: outside), bytes)
+        XCTAssertTrue(plan.files.allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) })
+    }
+
+    func testLocalRemovalRejectsPendingAndChangedFilesWithoutDeletingOthers() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let (record, remote) = try localRemovalFixture(store)
+        XCTAssertThrowsError(try store.localRemovalPlan(recordingID: record.id, verifiedRemote: remote))
+        _ = try store.restoreRemoteRecording(remote)
+        var unverified = remote
+        unverified.receiptSha256 = nil
+        XCTAssertThrowsError(try store.localRemovalPlan(recordingID: record.id, verifiedRemote: unverified))
+        let plan = try store.localRemovalPlan(recordingID: record.id, verifiedRemote: remote)
+        let packet = try XCTUnwrap(plan.files.first { $0.url.lastPathComponent == "packets.bin" })
+        try Data("packet datX".utf8).write(to: packet.url)
+        XCTAssertThrowsError(try plan.removeFiles())
+        XCTAssertTrue(plan.files.allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) })
+        XCTAssertEqual(try String(contentsOf: packet.url, encoding: .utf8), "packet datX")
+    }
+
     @MainActor
     func testIdentityConflictKeepsLocalRecordingAndStopsAutomaticRetry() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

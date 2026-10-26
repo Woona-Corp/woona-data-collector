@@ -10,32 +10,32 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
-    primary = AppThemeTokens.purple80,
-    secondary = AppThemeTokens.purpleGrey80,
-    tertiary = AppThemeTokens.pink80
+    primary = androidx.compose.ui.graphics.Color(0xFF7ACCC5),
+    secondary = androidx.compose.ui.graphics.Color(0xFFA8C9CC),
+    tertiary = androidx.compose.ui.graphics.Color(0xFFE9BE7C),
+    background = androidx.compose.ui.graphics.Color(0xFF101E27),
+    surface = androidx.compose.ui.graphics.Color(0xFF182C38),
+    onSurface = androidx.compose.ui.graphics.Color(0xFFE3EDF1),
 )
-
 private val LightColorScheme = lightColorScheme(
-    primary = AppThemeTokens.purple40,
-    secondary = AppThemeTokens.purpleGrey40,
-    tertiary = AppThemeTokens.pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
-    onPrimary = Color.White,
-    onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
+    primary = androidx.compose.ui.graphics.Color(0xFF146B74),
+    secondary = androidx.compose.ui.graphics.Color(0xFF437C80),
+    tertiary = androidx.compose.ui.graphics.Color(0xFFA86E19),
+    background = androidx.compose.ui.graphics.Color(0xFFF4F7FA),
+    surface = androidx.compose.ui.graphics.Color.White,
+    surfaceContainer = androidx.compose.ui.graphics.Color.White,
+    secondaryContainer = androidx.compose.ui.graphics.Color(0xFFE3F4F1),
+    onSecondaryContainer = androidx.compose.ui.graphics.Color(0xFF10555E),
+    onSurface = androidx.compose.ui.graphics.Color(0xFF172B3C),
+    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFF65778A),
+    error = androidx.compose.ui.graphics.Color(0xFFB34A49),
 )
 
 @Composable
 fun MyApplicationTheme(
     themeMode: AppThemeMode = AppThemeMode.SYSTEM,
     // minSdk is Android 12+, so dynamic color is always available when enabled.
-    dynamicColor: Boolean = true,
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val darkTheme = when (themeMode) {
@@ -64,7 +64,7 @@ object AppThemeEntryPoint {
     @Composable
     fun Render(
         themeMode: AppThemeMode = AppThemeMode.SYSTEM,
-        dynamicColor: Boolean = true,
+        dynamicColor: Boolean = false,
         content: @Composable () -> Unit,
     ) {
         MyApplicationTheme(

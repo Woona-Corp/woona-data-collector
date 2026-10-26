@@ -37,6 +37,8 @@ import com.example.myapplication.data.restoreServerMetadata
 import com.example.myapplication.data.applyServerDeletions
 import com.example.myapplication.data.serverSyncCounts
 import com.example.myapplication.data.sessionQuestionnaireFromJson
+import com.example.myapplication.data.removeLocalRecordingFiles
+import com.example.myapplication.localization.recordingUploadErrorText
 import com.example.myapplication.data.toJson
 import com.example.myapplication.feature.device.DeviceFeatureController
 import com.example.myapplication.feature.device.VideoCaptureState
@@ -101,7 +103,16 @@ class MainActivity : ComponentActivity() {
     private var dogProfiles by mutableStateOf<List<DogProfile>>(emptyList())
     private var selectedProfileId by mutableStateOf<String?>(null)
     private var recentRecordings by mutableStateOf<List<Recording>>(emptyList())
+    private var showingAllRecordings by mutableStateOf(false)
+    private var localHistorySummary by mutableStateOf("")
+    private var serverRecordingReports by mutableStateOf<Map<String, Pair<String?, Boolean>>>(emptyMap())
     private var serverSyncState by mutableStateOf(ServerSyncUiState())
+    private var connectionCheck = com.example.myapplication.sync.ConnectionCheck.NOT_CHECKED
+    private var checkedConfiguration: com.example.myapplication.sync.ServerSettings? = null
+    private var connectionCheckedAt: String? = null
+    private var connectionCheckError: String? = null
+    private var workersRunning = 0
+    private var workersQueued = 0
     private var isServerRestoreInProgress = false
     private var isServerSettingsVisible by mutableStateOf(false)
     private var isDogQuestionnaireVisible by mutableStateOf(false)
@@ -302,6 +313,7 @@ class MainActivity : ComponentActivity() {
                             refreshServerState()
                         },
                         onServerRestore = ::restoreServerData,
+                        onServerCheck = ::checkServerConnection,
                         onDisconnect = ::stopSession,
                         onSensorSelect = deviceFeatureController::onSensorSelected,
                         onChannelSelect = deviceFeatureController::onChannelSelected,
@@ -355,7 +367,9 @@ class MainActivity : ComponentActivity() {
                                 isSessionQuestionnaireVisible = true
                             }
                         },
-                        overviewProfileContent = {
+                        overviewProfileContent = { section ->
+                            if (section == com.example.myapplication.profile.ProfileScreenSection.ANIMALS) {
+                            androidx.compose.material3.Text(localHistorySummary)
                             AccountControls(
                                 accountId = serverSettingsStore.get().accountId,
                                 language = selectedLanguage,
@@ -363,7 +377,13 @@ class MainActivity : ComponentActivity() {
                                 unassigned = woonaDatabase.profiles().filter { it.accountId == null },
                                 onApply = ::applyAccount, onLink = ::linkDogAccount,
                             )
+                            }
                             ProfilesOverview(
+                                showingAllRecordings = showingAllRecordings,
+                                onShowAllRecordings = { showingAllRecordings = true; refreshProfilesAndRecordings() },
+                                serverReports = serverRecordingReports,
+                                onCheckServerRecording = ::checkRecordingOnServer,
+                                section = section,
                                 profiles = dogProfiles,
                                 selectedProfileId = selectedProfileId,
                                 recordings = recentRecordings,
@@ -386,6 +406,8 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 onDownloadRecording = ::downloadRecording,
+                                onRemoveLocalRecording = ::removeLocalRecordingFiles,
+                                localRemovalEnabled = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive(),
                                 videoState = uiState.videoState,
                                 videoOffsetMillis = uiState.videoOffsetMillis,
                                 onVideoAction = ::toggleCapture,
@@ -649,11 +671,18 @@ class MainActivity : ComponentActivity() {
         if (dogProfiles.none { it.id == profileId }) return
         selectedProfileId = profileId
         profilePreferences.edit().putString(LAST_PROFILE_ID_KEY, profileId).apply()
+        showingAllRecordings = false
         recentRecordings = woonaDatabase.recentRecordings(profileId)
     }
 
     private fun refreshProfilesAndRecordings(preferredProfileId: String? = null) {
-        val profiles = woonaDatabase.profiles().filter { it.accountId == serverSettingsStore.get().accountId }
+        val allProfiles = woonaDatabase.profiles()
+        val account = serverSettingsStore.get().accountId
+        val profiles = allProfiles.filter { it.accountId == account }
+        val recordingCount = woonaDatabase.readableDatabase.rawQuery("SELECT COUNT(*) FROM recordings", null).use { it.moveToFirst(); it.getInt(0) }
+        localHistorySummary = if (selectedLanguage == AppLanguage.RUSSIAN)
+            "Локальная история: ${allProfiles.size} животных, $recordingCount сессий. Аккаунт: ${account ?: "без аккаунта"}. Фильтр скрывает ${allProfiles.size - profiles.size} животных; смена аккаунта не удаляет данные."
+            else "Local history: ${allProfiles.size} animals, $recordingCount sessions. Account: ${account ?: "unassigned"}. The filter hides ${allProfiles.size - profiles.size} animals; changing accounts does not delete data."
         dogProfiles = profiles
         val storedId = profilePreferences.getString(LAST_PROFILE_ID_KEY, null)
         val selectedId = sequenceOf(preferredProfileId, selectedProfileId, storedId)
@@ -667,7 +696,7 @@ class MainActivity : ComponentActivity() {
             isDogQuestionnaireVisible = false
         } else {
             profilePreferences.edit().putString(LAST_PROFILE_ID_KEY, selectedId).apply()
-            recentRecordings = woonaDatabase.recentRecordings(selectedId)
+            recentRecordings = woonaDatabase.recentRecordings(selectedId, if (showingAllRecordings) Int.MAX_VALUE else 10)
         }
     }
 
@@ -684,6 +713,10 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshServerState() {
         val settings = serverSettingsStore.get()
+        if (checkedConfiguration != null && checkedConfiguration != settings && connectionCheck != com.example.myapplication.sync.ConnectionCheck.CHECKING) {
+            connectionCheck = com.example.myapplication.sync.ConnectionCheck.NOT_CHECKED
+            connectionCheckedAt = null; connectionCheckError = null
+        }
         val counts = woonaDatabase.serverSyncCounts()
         serverSyncState = ServerSyncUiState(
             status = when {
@@ -700,7 +733,67 @@ class MainActivity : ComponentActivity() {
             failed = counts.failed,
             lastErrorMessage = counts.lastErrorMessage,
             restoring = isServerRestoreInProgress,
+            networkAvailable = networkCapabilities()?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true,
+            unmeteredNetwork = networkCapabilities()?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true,
+            workersRunning = workersRunning,
+            workersQueued = workersQueued,
+            connectionCheck = connectionCheck,
+            checkedAtUtc = connectionCheckedAt,
+            connectionError = connectionCheckError,
+            accountId = settings.accountId,
+            operationMessage = serverSyncState.operationMessage,
         )
+    }
+
+    private fun networkCapabilities(): android.net.NetworkCapabilities? {
+        val manager = getSystemService(android.net.ConnectivityManager::class.java)
+        return manager.getNetworkCapabilities(manager.activeNetwork)
+    }
+
+    private fun checkRecordingOnServer(id: String) {
+        if (serverRecordingReports[id]?.second == true) return
+        val settings = serverSettingsStore.get()
+        if (!settings.isConfigured) {
+            serverRecordingReports = serverRecordingReports + (id to ((if (selectedLanguage == AppLanguage.RUSSIAN) "Подключите сервер в Настройках." else "Configure the server in Settings.") to false))
+            return
+        }
+        serverRecordingReports = serverRecordingReports + (id to (null to true))
+        val language = selectedLanguage
+        backgroundExecutor.execute {
+            val result = runCatching { com.example.myapplication.sync.recordingServerReport(ServerApiClient(settings).syncStatus(id), language) }
+            runOnUiThread {
+                if (settings.accountId != serverSettingsStore.get().accountId) {
+                    serverRecordingReports = serverRecordingReports - id
+                } else {
+                    val report = result.getOrElse { com.example.myapplication.localization.recordingUploadErrorText(it.message, language) + "\n" + it.message.orEmpty() }
+                    serverRecordingReports = serverRecordingReports + (id to (report to false))
+                }
+            }
+        }
+    }
+
+    private fun checkServerConnection() {
+        if (connectionCheck == com.example.myapplication.sync.ConnectionCheck.CHECKING) return
+        val settings = serverSettingsStore.get()
+        if (!settings.isConfigured) return
+        connectionCheck = com.example.myapplication.sync.ConnectionCheck.CHECKING
+        checkedConfiguration = settings
+        connectionCheckError = null
+        refreshServerState()
+        backgroundExecutor.execute {
+            val result = runCatching { ServerApiClient(settings).checkConnection() }
+            runOnUiThread {
+                if (settings != serverSettingsStore.get()) {
+                    connectionCheck = com.example.myapplication.sync.ConnectionCheck.NOT_CHECKED
+                    connectionCheckedAt = null
+                } else {
+                    connectionCheck = if (result.isSuccess) com.example.myapplication.sync.ConnectionCheck.VERIFIED else com.example.myapplication.sync.ConnectionCheck.FAILED
+                    connectionCheckedAt = java.time.Instant.now().toString()
+                    connectionCheckError = result.exceptionOrNull()?.let { com.example.myapplication.localization.recordingUploadErrorText(it.message, selectedLanguage) + "\n" + it.message.orEmpty() }
+                }
+                refreshServerState()
+            }
+        }
     }
 
     private fun applyAccount(value: String) {
@@ -821,6 +914,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun removeLocalRecordingFiles(recordingId: String) {
+        if (accountBusy || isServerRestoreInProgress || deviceFeatureController.isCaptureActive()) return
+        val settings = serverSettingsStore.get()
+        if (!settings.isConfigured) {
+            toast(if (selectedLanguage == AppLanguage.RUSSIAN) "Подключите сервер, чтобы проверить копию перед удалением" else "Connect the server to verify the copy before removal")
+            return
+        }
+        accountBusy = true
+        backgroundExecutor.execute {
+            val outcome = runCatching { serverOperationLock.withLock {
+                val client = ServerApiClient(settings)
+                val status = client.syncStatus(recordingId)
+                val files = status.optJSONArray("artifacts")
+                require(status.optJSONObject("transfer")?.optBoolean("receiptVerified") == true && files != null && files.length() > 0 &&
+                    (0 until files.length()).all { files.getJSONObject(it).optBoolean("verified") && files.getJSONObject(it).isNull("errorCode") }) { "server_copy_unverified" }
+                woonaDatabase.removeLocalRecordingFiles(recordingId, client.fetchRecording(recordingId))
+            } }
+            runOnUiThread {
+                accountBusy = false
+                refreshProfilesAndRecordings()
+                refreshServerState()
+                outcome.fold(
+                    onSuccess = { toast(if (selectedLanguage == AppLanguage.RUSSIAN) "Локальные файлы удалены. Сессия осталась на сервере" else "Local files removed. The session remains on the server") },
+                    onFailure = { error -> deviceFeatureController.showErrorOnMainThread(
+                        if (selectedLanguage == AppLanguage.RUSSIAN) "Удаление с устройства не выполнено" else "Removal from this device failed",
+                        IllegalStateException(recordingUploadErrorText(error.message, selectedLanguage)),
+                    ) },
+                )
+            }
+        }
+    }
+
     private fun downloadRecording(recordingId: String) {
         val settings = serverSettingsStore.get()
         if (!settings.isConfigured) return
@@ -869,7 +994,9 @@ class MainActivity : ComponentActivity() {
     private fun observeServerWork() {
         WorkManager.getInstance(applicationContext)
             .getWorkInfosByTagLiveData(ServerSyncScheduler.WORK_TAG)
-            .observe(this) {
+            .observe(this) { infos ->
+                workersRunning = infos.count { it.state == androidx.work.WorkInfo.State.RUNNING }
+                workersQueued = infos.count { it.state in setOf(androidx.work.WorkInfo.State.ENQUEUED, androidx.work.WorkInfo.State.BLOCKED) }
                 refreshServerState()
                 refreshProfilesAndRecordings()
             }

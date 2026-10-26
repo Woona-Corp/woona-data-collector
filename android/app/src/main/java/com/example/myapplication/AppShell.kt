@@ -21,6 +21,12 @@ import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Pets
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material.icons.rounded.Folder
+import com.example.myapplication.profile.ProfileScreenSection
+import androidx.compose.material3.FilterChip
+import androidx.compose.ui.platform.testTag
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.ShowChart
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,18 +72,10 @@ private enum class AppDestination(
     val icon: ImageVector,
     val supportsExport: Boolean,
 ) {
-    OVERVIEW(
-        titleRes = R.string.nav_overview,
-        navLabelRes = R.string.nav_overview,
-        icon = Icons.Rounded.Home,
-        supportsExport = true,
-    ),
-    CHARTS(
-        titleRes = R.string.nav_charts,
-        navLabelRes = R.string.nav_charts,
-        icon = Icons.Rounded.ShowChart,
-        supportsExport = true,
-    ),
+    ANIMALS(R.string.nav_animals, R.string.nav_animals, Icons.Rounded.Pets, false),
+    SESSION(R.string.nav_session, R.string.nav_session, Icons.Rounded.ShowChart, true),
+    VIDEO(R.string.nav_video, R.string.nav_video, Icons.Rounded.Videocam, false),
+    RECORDINGS(R.string.nav_records, R.string.nav_records, Icons.Rounded.Folder, true),
     SETTINGS(
         titleRes = R.string.nav_settings,
         navLabelRes = R.string.nav_settings,
@@ -102,6 +100,7 @@ fun DeviceAppShell(
     onServerWifiOnlyChange: (Boolean) -> Unit = {},
     onServerRetryPending: () -> Unit = {},
     onServerRestore: () -> Unit = {},
+    onServerCheck: () -> Unit = {},
     onDisconnect: () -> Unit,
     onSensorSelect: (Int) -> Unit,
     onChannelSelect: (Int) -> Unit,
@@ -127,13 +126,14 @@ fun DeviceAppShell(
     onShareLogFile: () -> Unit,
     showReplayAction: Boolean,
     onReplayRequest: () -> Unit,
-    overviewProfileContent: @Composable () -> Unit = {},
+    overviewProfileContent: @Composable (ProfileScreenSection) -> Unit = {},
 ) {
     var selectedDestinationName by rememberSaveable {
-        mutableStateOf(AppDestination.OVERVIEW.name)
+        mutableStateOf(AppDestination.ANIMALS.name)
     }
     var isExportSheetVisible by rememberSaveable { mutableStateOf(false) }
-    val selectedDestination = AppDestination.valueOf(selectedDestinationName)
+    var showSessionCharts by rememberSaveable { mutableStateOf(false) }
+    val selectedDestination = AppDestination.entries.firstOrNull { it.name == selectedDestinationName } ?: AppDestination.ANIMALS
     val canExportAnyFile = canShareAllFiles && uiState.exportPhase == null
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -175,17 +175,31 @@ fun DeviceAppShell(
                     .padding(innerPadding),
             ) {
                 when (selectedDestination) {
-                    AppDestination.OVERVIEW -> DeviceScreenEntryPoint.Overview(
-                        uiState = uiState,
-                        onStartScan = onStartScan,
-                        onConnect = onConnect,
-                        onDisconnect = onDisconnect,
-                        showReplayAction = showReplayAction,
-                        onReplayRequest = onReplayRequest,
-                        profileContent = overviewProfileContent,
-                    )
-
-                    AppDestination.CHARTS -> DeviceScreenEntryPoint.Charts(
+                    AppDestination.ANIMALS, AppDestination.VIDEO, AppDestination.RECORDINGS -> Column(
+                        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        overviewProfileContent(when (selectedDestination) {
+                            AppDestination.ANIMALS -> ProfileScreenSection.ANIMALS
+                            AppDestination.VIDEO -> ProfileScreenSection.VIDEO
+                            else -> ProfileScreenSection.RECORDINGS
+                        })
+                    }
+                    AppDestination.SESSION -> Column(modifier = Modifier.fillMaxSize()) {
+                        Row(modifier = Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(selected = !showSessionCharts, onClick = { showSessionCharts = false }, label = { Text(appStringResource(R.string.nav_session)) })
+                            FilterChip(selected = showSessionCharts, onClick = { showSessionCharts = true }, label = { Text(appStringResource(R.string.nav_charts)) }, modifier = Modifier.testTag("session.charts"))
+                        }
+                        Box(modifier = Modifier.weight(1f)) {
+                        if (!showSessionCharts) DeviceScreenEntryPoint.Overview(
+                            uiState = uiState,
+                            onStartScan = onStartScan,
+                            onConnect = onConnect,
+                            onDisconnect = onDisconnect,
+                            showReplayAction = showReplayAction,
+                            onReplayRequest = onReplayRequest,
+                            profileContent = { overviewProfileContent(ProfileScreenSection.SESSION) },
+                        ) else DeviceScreenEntryPoint.Charts(
                         uiState = uiState,
                         onSensorSelect = onSensorSelect,
                         onChannelSelect = onChannelSelect,
@@ -200,6 +214,8 @@ fun DeviceAppShell(
                         onChartZoomGesture = onChartZoomGesture,
                         onChartFullscreenChange = onChartFullscreenChange,
                     )
+                        }
+                    }
 
                     AppDestination.SETTINGS -> DeviceScreenEntryPoint.Settings(
                         uiState = uiState,
@@ -213,6 +229,7 @@ fun DeviceAppShell(
                         onServerWifiOnlyChange = onServerWifiOnlyChange,
                         onServerRetryPending = onServerRetryPending,
                         onServerRestore = onServerRestore,
+            onServerCheck = onServerCheck,
                     )
                 }
             }
@@ -499,7 +516,8 @@ private fun ShellNavItem(
                     onClick = onClick,
                     role = Role.Tab,
                 )
-                .padding(horizontal = 12.dp, vertical = 14.dp),
+                .testTag("tab." + destination.name.lowercase())
+                .padding(horizontal = 2.dp, vertical = 12.dp),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -514,8 +532,9 @@ private fun ShellNavItem(
                 )
                 Text(
                     text = appStringResource(destination.navLabelRes),
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
                     color = titleColor,
                 )
             }
@@ -640,6 +659,7 @@ object AppShellEntryPoint {
         onServerWifiOnlyChange: (Boolean) -> Unit = {},
         onServerRetryPending: () -> Unit = {},
         onServerRestore: () -> Unit = {},
+    onServerCheck: () -> Unit = {},
         onDisconnect: () -> Unit,
         onSensorSelect: (Int) -> Unit,
         onChannelSelect: (Int) -> Unit,
@@ -665,7 +685,7 @@ object AppShellEntryPoint {
         onShareLogFile: () -> Unit,
         showReplayAction: Boolean,
         onReplayRequest: () -> Unit,
-        overviewProfileContent: @Composable () -> Unit = {},
+        overviewProfileContent: @Composable (ProfileScreenSection) -> Unit = {},
     ) {
         DeviceAppShell(
             uiState = uiState,
@@ -681,6 +701,7 @@ object AppShellEntryPoint {
             onServerWifiOnlyChange = onServerWifiOnlyChange,
             onServerRetryPending = onServerRetryPending,
             onServerRestore = onServerRestore,
+            onServerCheck = onServerCheck,
             onDisconnect = onDisconnect,
             onSensorSelect = onSensorSelect,
             onChannelSelect = onChannelSelect,

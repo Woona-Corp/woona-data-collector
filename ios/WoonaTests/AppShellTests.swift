@@ -3,6 +3,44 @@ import XCTest
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    func testCaptureCauseIsIndependentOfSuccessfulUpload() {
+        XCTAssertEqual(recordingCaptureText(status: "failed", code: "gatt_error", message: "Ошибка GATT-подключения: 8", language: .russian),
+                       "Запись: прервана — сбой связи с ошейником (GATT 8)")
+        XCTAssertEqual(recordingCaptureText(status: "failed", code: "gatt_error", message: "GATT status 133", language: .english),
+                       "Capture: interrupted — collar connection failed (GATT 133)")
+        XCTAssertEqual(recordingUploadText(state: "synced", message: nil, language: .russian), "Загрузка: файлы подтверждены сервером")
+        XCTAssertTrue(recordingCaptureText(status: "completed", code: "camera_failed", message: "Broken pipe", language: .russian).contains("завершена с проблемой"))
+    }
+
+    func testUnknownCaptureReasonIsExplicitAndNeverInvented() {
+        XCTAssertTrue(recordingCaptureText(status: "failed", code: nil, message: nil, language: .russian).contains("причина не сохранена"))
+        XCTAssertFalse(recordingCaptureText(status: "interrupted", code: nil, message: nil, language: .english).contains("collar"))
+        let future = recordingCaptureText(status: "failed", code: "new_firmware_error", message: "Specific future error", language: .english)
+        XCTAssertTrue(future.contains("new_firmware_error"))
+        XCTAssertTrue(future.contains("Specific future error"))
+    }
+
+    func testUploadErrorsExposeCauseAndRetryPolicy() {
+        let retry = recordingUploadText(state: "retryable_error", message: "Server returned 503: unavailable", language: .russian)
+        XCTAssertTrue(retry.contains("запланирован повтор"))
+        XCTAssertTrue(retry.contains("HTTP 503"))
+        let forbidden = recordingUploadText(state: "permanent_error", message: "Server returned 403: forbidden", language: .english)
+        XCTAssertTrue(forbidden.contains("action is required"))
+        XCTAssertTrue(forbidden.contains("Permission was denied"))
+        XCTAssertTrue(recordingUploadErrorText("invalid_bearer_token", language: .russian).contains("Токен"))
+        XCTAssertTrue(recordingUploadErrorText("artifact_hash_mismatch", language: .russian).contains("Контрольная сумма"))
+        XCTAssertTrue(recordingUploadErrorText("local_copy_changed", language: .russian).contains("Удаление отменено"))
+        XCTAssertTrue(recordingUploadErrorText("Server token is missing", language: .russian).contains("токен"))
+        XCTAssertEqual(recordingUploadErrorText("Unexpected future failure", language: .english), "Unexpected future failure")
+    }
+
+    func testServerErrorDecodingRetainsBothCodeAndMessage() {
+        let payload = Data(#"{"detail":{"code":"questionnaire_revision_conflict","message":"Changed on server"}}"#.utf8)
+        let error = ServerSyncError.responseError(status: 409, data: payload)
+        XCTAssertTrue(error.localizedDescription.contains("questionnaire_revision_conflict"))
+        XCTAssertTrue(error.localizedDescription.contains("Changed on server"))
+    }
+
     func testRecordingTimeMatchesAndroidFormatAcrossISOInputs() {
         let zone = TimeZone(secondsFromGMT: 3 * 3600)!
         XCTAssertEqual(recordingDisplayTime("2026-10-26T11:32:00Z", timeZone: zone), "26.10.2026 14:32")
@@ -106,6 +144,30 @@ final class AppShellTests: XCTestCase {
         }
     }
 
+    func testServerQueueDoesNotTreatNoPendingWorkAsServerHealth() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppViewModel(store: try WoonaStore(rootDirectory: root), uiTesting: true)
+        model.serverToken = "synthetic-test-only"
+        XCTAssertTrue(model.uploadQueueExplanation.contains("does not verify server"))
+        XCTAssertTrue(model.uploadQueueExplanation.contains("Label Studio"))
+        XCTAssertEqual(model.connectionCheck, "not_checked")
+    }
+
+    func testOldServerTransferStatusRemainsReadable() throws {
+        let value = try JSONDecoder().decode(ServerTransferStatus.self, from: Data(#"{"ingestStatus":"uploading"}"#.utf8))
+        XCTAssertEqual(value.ingestStatus, "uploading")
+        XCTAssertNil(value.transfer)
+        XCTAssertNil(value.labeling)
+        XCTAssertFalse(value.confirmsCurrentServerCopy)
+    }
+
+    func testMetadataReceiptDoesNotPermitRemovalWithoutCurrentFileVerification() throws {
+        let data = Data(#"{"ingestStatus":"complete","transfer":{"status":"verified","totalBytes":1,"uploadedBytes":1,"verifiedBytes":1,"totalFiles":1,"verifiedFiles":1,"receiptVerified":true,"retryable":false,"nextAction":"none"},"artifacts":[{"id":"11111111-1111-1111-1111-111111111111","fileName":"packets.bin","storageStatus":"available","verified":false,"sizeBytes":1,"uploadedBytes":1,"nextAction":"none"}]}"#.utf8)
+        let value = try JSONDecoder().decode(ServerTransferStatus.self, from: data)
+        XCTAssertFalse(value.confirmsCurrentServerCopy)
+    }
+
     func testInitialTabIsOverview() {
         let viewModel = AppViewModel()
 
@@ -115,8 +177,10 @@ final class AppShellTests: XCTestCase {
     func testCanSelectEachTopLevelTab() {
         let viewModel = AppViewModel()
 
-        viewModel.selectedTab = .charts
-        XCTAssertEqual(viewModel.selectedTab, .charts)
+        for tab in [AppViewModel.AppTab.overview, .session, .video, .recordings, .settings] {
+            viewModel.selectedTab = tab
+            XCTAssertEqual(viewModel.selectedTab, tab)
+        }
 
         viewModel.selectedTab = .settings
         XCTAssertEqual(viewModel.selectedTab, .settings)
@@ -141,7 +205,7 @@ final class AppShellTests: XCTestCase {
         XCTAssertFalse(viewModel.isConnected)
         XCTAssertFalse(viewModel.isConnectionActive)
         XCTAssertTrue(viewModel.foundDevices.isEmpty)
-        XCTAssertEqual(viewModel.selectedTab, .overview)
+        XCTAssertEqual(viewModel.selectedTab, .session)
     }
 
     func testFoundDevicesDeduplicateByIdentifier() {

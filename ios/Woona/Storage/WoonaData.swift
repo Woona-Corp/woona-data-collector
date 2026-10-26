@@ -55,6 +55,39 @@ struct RecordingArchive: Sendable {
     }
 }
 
+/// A verified immutable snapshot; file hashing/removal runs off the main thread.
+struct LocalRecordingRemoval: Sendable {
+    let directory: URL
+    let files: [RecordingArchive.File]
+
+    func removeFiles() throws -> Int64 {
+        let manager = FileManager.default
+        let root = directory.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        var existing: [(RecordingArchive.File, Date?)] = []
+        for file in files {
+            let resolved = file.url.resolvingSymlinksInPath().standardizedFileURL
+            guard resolved.path.hasPrefix(root), resolved.path != directory.path else { throw WoonaStoreError.invalidData("local_copy_unsafe_path") }
+            if manager.fileExists(atPath: file.url.path) {
+                let attrs = try manager.attributesOfItem(atPath: file.url.path)
+                guard attrs[.type] as? FileAttributeType == .typeRegular,
+                      (attrs[.size] as? NSNumber)?.int64Value == file.size,
+                      try WoonaStore.sha256File(file.url) == file.sha256 else { throw WoonaStoreError.invalidData("local_copy_changed") }
+                existing.append((file, attrs[.modificationDate] as? Date))
+            }
+        }
+        var removedBytes: Int64 = 0
+        for (file, modified) in existing {
+            let attrs = try manager.attributesOfItem(atPath: file.url.path)
+            guard file.url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(root),
+                  (attrs[.size] as? NSNumber)?.int64Value == file.size,
+                  attrs[.modificationDate] as? Date == modified else { throw WoonaStoreError.invalidData("local_copy_changed") }
+            try manager.removeItem(at: file.url)
+            removedBytes += file.size
+        }
+        return removedBytes
+    }
+}
+
 struct QuestionnaireValidation: Equatable {
     let errors: [String: String]
     var isValid: Bool { errors.isEmpty }
@@ -400,6 +433,8 @@ struct WoonaRecording: Identifiable, Equatable {
     var appVersion: String? = nil
     var questionnaireRevision = 1
     var questionnaireDirty = false
+    var captureErrorCode: String? = nil
+    var captureErrorMessage: String? = nil
 }
 
 struct LocalArtifact: Identifiable, Equatable {
@@ -445,6 +480,28 @@ final class WoonaStore {
     }
 
     deinit { sqlite3_close(database) }
+
+    func localInventory() throws -> (profiles: Int, recordings: Int) {
+        let statement = try prepare("SELECT (SELECT COUNT(*) FROM dogs), (SELECT COUNT(*) FROM recordings)")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw WoonaStoreError.sqlite("Unable to count local data") }
+        return (Int(sqlite3_column_int64(statement, 0)), Int(sqlite3_column_int64(statement, 1)))
+    }
+
+    func syncOverview() throws -> (pending: Int, uploading: Int, synced: Int, failed: Int, lastError: String?) {
+        let statement = try prepare("""
+            SELECT
+              SUM(CASE WHEN server_sync_state='pending' THEN 1 ELSE 0 END),
+              SUM(CASE WHEN server_sync_state='uploading' THEN 1 ELSE 0 END),
+              SUM(CASE WHEN server_sync_state IN ('synced','remote') THEN 1 ELSE 0 END),
+              SUM(CASE WHEN server_sync_state IN ('retryable_error','permanent_error') THEN 1 ELSE 0 END),
+              (SELECT last_error_message FROM server_sync_state WHERE state IN ('retryable_error','permanent_error') ORDER BY updated_at_utc DESC LIMIT 1)
+            FROM recordings
+            """)
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw WoonaStoreError.sqlite("Unable to load upload queue") }
+        return (Int(sqlite3_column_int64(statement, 0)), Int(sqlite3_column_int64(statement, 1)), Int(sqlite3_column_int64(statement, 2)), Int(sqlite3_column_int64(statement, 3)), columnOptionalText(statement, 4))
+    }
 
     func profiles() throws -> [DogProfile] {
         let statement = try prepare(
@@ -713,7 +770,13 @@ final class WoonaStore {
         )
         let profileJSON = String(data: try Self.dogQuestionnaireData(remote.profileVersion.questionnaire), encoding: .utf8)!
         let sessionJSON = String(data: try Self.encoder.encode(remote.sessionQuestionnaire), encoding: .utf8)!
-        let syncJSON = String(data: try Self.encoder.encode(remote.sync), encoding: .utf8)!
+        var restoredSync = remote.sync
+        if case .object(var fields) = restoredSync {
+            if let code = remote.captureErrorCode { fields["captureErrorCode"] = .string(code) }
+            if let message = remote.captureErrorMessage { fields["captureErrorMessage"] = .string(message) }
+            restoredSync = .object(fields)
+        }
+        let syncJSON = String(data: try Self.encoder.encode(restoredSync), encoding: .utf8)!
         let now = Self.iso8601(Date())
         try transaction {
             if let version = try existingProfileVersion(id: remote.profileVersion.id),
@@ -1107,6 +1170,27 @@ final class WoonaStore {
         return values
     }
 
+    func localRemovalPlan(recordingID: UUID, verifiedRemote remote: ServerRecordingDetail) throws -> LocalRecordingRemoval {
+        guard let local = try recording(id: recordingID), local.endedAtUTC != nil,
+              ["completed", "failed", "interrupted"].contains(local.status),
+              local.serverSyncState == "synced", !local.questionnaireDirty else { throw WoonaStoreError.invalidData("local_copy_not_synced") }
+        guard remote.id == local.id, remote.dogId == local.dogID, remote.ingestStatus == "complete",
+              remote.receiptSha256?.isEmpty == false, remote.serverVerifiedAtUtc?.isEmpty == false else { throw WoonaStoreError.invalidData("server_copy_unverified") }
+        let localArtifacts = try artifacts(recordingID: recordingID)
+        guard !localArtifacts.isEmpty, localArtifacts.allSatisfy({ artifact in
+            remote.artifacts.contains { saved in
+                saved.fileName == artifact.fileName && saved.type == artifact.type &&
+                saved.sizeBytes == artifact.sizeBytes && saved.sha256 == artifact.sha256 && saved.storageStatus == "available"
+            }
+        }) else { throw WoonaStoreError.invalidData("server_copy_unverified") }
+        let directory = self.directory(for: local).resolvingSymlinksInPath().standardizedFileURL
+        guard directory.path.hasPrefix(rootDirectory.resolvingSymlinksInPath().standardizedFileURL.path + "/") else { throw WoonaStoreError.invalidData("local_copy_unsafe_path") }
+        let files = localArtifacts.map { artifact in RecordingArchive.File(url: rootDirectory.appendingPathComponent(artifact.relativePath), size: artifact.sizeBytes, sha256: artifact.sha256) }
+        // Reconcile canonical server artifact IDs so later downloads use current IDs.
+        _ = try restoreRemoteRecording(remote)
+        return LocalRecordingRemoval(directory: directory, files: files)
+    }
+
     func missingArtifacts(recordingID: UUID) throws -> [LocalArtifact] {
         try artifacts(recordingID: recordingID).filter {
             !FileManager.default.fileExists(atPath: rootDirectory.appendingPathComponent($0.relativePath).path)
@@ -1120,7 +1204,7 @@ final class WoonaStore {
     }
 
     func recordingSyncError(recordingID: UUID) throws -> String? {
-        let statement = try prepare("SELECT last_error_message FROM server_sync_state WHERE recording_id=? AND state IN ('retryable_error','permanent_error')", [.text(recordingID.uuidString)])
+        let statement = try prepare("SELECT COALESCE(NULLIF(last_error_message,''),last_error_code) FROM server_sync_state WHERE recording_id=? AND state IN ('retryable_error','permanent_error')", [.text(recordingID.uuidString)])
         defer { sqlite3_finalize(statement) }
         guard sqlite3_step(statement) == SQLITE_ROW, sqlite3_column_type(statement, 0) != SQLITE_NULL else { return nil }
         return columnText(statement, 0)
@@ -1251,6 +1335,9 @@ final class WoonaStore {
               let versionID = UUID(uuidString: columnText(statement, 2)) else {
             throw WoonaStoreError.invalidData("Invalid recording UUID")
         }
+        let sync = try syncJSON(recordingID: id).flatMap {
+            (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+        }
         return WoonaRecording(
             id: id,
             dogID: dogID,
@@ -1267,7 +1354,9 @@ final class WoonaStore {
             serverSyncState: columnText(statement, 12),
             appVersion: columnOptionalText(statement, 13),
             questionnaireRevision: Int(sqlite3_column_int64(statement, 14)),
-            questionnaireDirty: sqlite3_column_int(statement, 15) == 1
+            questionnaireDirty: sqlite3_column_int(statement, 15) == 1,
+            captureErrorCode: sync?["captureErrorCode"] as? String,
+            captureErrorMessage: sync?["captureErrorMessage"] as? String
         )
     }
 

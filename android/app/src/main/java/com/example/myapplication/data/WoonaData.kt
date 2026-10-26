@@ -395,6 +395,9 @@ data class Recording(
     val artifacts: List<Artifact> = emptyList(),
     val serverSyncState: String = "pending",
     val questionnaireRevision: Int = 1,
+    val captureErrorCode: String? = null,
+    val captureErrorMessage: String? = null,
+    val serverSyncError: String? = null,
 )
 
 data class RecordingSummary(
@@ -1435,6 +1438,7 @@ class WoonaDatabase(
                         recording.copy(
                             artifacts = artifacts(recording.id),
                             serverSyncState = recordingServerSyncState(recording.id),
+                            serverSyncError = recordingServerSyncError(recording.id),
                         ),
                     )
                 }
@@ -1458,6 +1462,7 @@ class WoonaDatabase(
                 recording.copy(
                     artifacts = artifacts(recording.id),
                     serverSyncState = recordingServerSyncState(recording.id),
+                            serverSyncError = recordingServerSyncError(recording.id),
                 )
             } else {
                 null
@@ -1507,7 +1512,9 @@ class WoonaDatabase(
                             relativePath = cursor.getString(5),
                             sizeBytes = cursor.getLong(6),
                             sha256 = cursor.getString(7),
-                            localPresence = cursor.getString(8),
+                            localPresence = if (cursor.getString(9) == "available") {
+                                if (runCatching { resolveRelativePath(cursor.getString(5)).isFile }.getOrDefault(false)) "both" else "remote_only"
+                            } else cursor.getString(8),
                             uploadState = cursor.getString(9),
                             uploadedBytes = cursor.getLong(10),
                             createdAtUtc = cursor.getString(11),
@@ -1530,6 +1537,13 @@ class WoonaDatabase(
             null,
             "1",
         ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else "pending" }
+
+    private fun recordingServerSyncError(recordingId: String): String? =
+        readableDatabase.rawQuery(
+            "SELECT COALESCE(NULLIF(last_error_message,''),last_error_code) FROM server_sync_state " +
+                "WHERE recording_id=? AND state IN ('retryable_error','permanent_error')",
+            arrayOf(recordingId),
+        ).use { cursor -> if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null }
 
     private fun insertArtifact(
         recordingId: String,
@@ -1716,6 +1730,8 @@ class WoonaDatabase(
         questionnaire = if (isNull(10)) null else sessionQuestionnaireFromJson(getString(10)),
         relativeDirectory = getString(11),
         questionnaireRevision = getInt(12),
+        captureErrorCode = if (isNull(13)) null else getString(13),
+        captureErrorMessage = if (isNull(14)) null else getString(14),
     )
 
     companion object {
@@ -1734,6 +1750,8 @@ class WoonaDatabase(
             "questionnaire_json",
             "relative_directory",
             "questionnaire_revision",
+            "capture_error_code",
+            "capture_error_message",
         )
         private val ARTIFACT_COLUMNS = arrayOf(
             "id",

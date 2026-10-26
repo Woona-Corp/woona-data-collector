@@ -214,4 +214,9 @@
     <string name="value_not_available">н/д</string>
     <string name="ble_transport_snapshot">Снимок BLE-транспорта: profile=%1$s, mtu=%2$s, phy=%3$s, interval=%4$sms, latency=%5$s, timeout=%6$sms</string>
     <string name="ble_transport_summary">%1$s, notifications=%2$d, notifGapAvg=%3$sms, notifGapMax=%4$sms, notifGapLong=%5$d</string>
+    <string name="nav_animals">Животные</string>
+    <string name="nav_session">Сессия</string>
+    <string name="nav_video">Видео</string>
+    <string name="nav_records">Записи</string>
+    <string name="new_connection">Новое соединение</string>
 </resources>

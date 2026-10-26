@@ -1,5 +1,9 @@
 package com.example.myapplication.profile
 
+import com.example.myapplication.localization.recordingCaptureText
+import com.example.myapplication.localization.recordingUploadText
+import com.example.myapplication.localization.recordingUploadErrorText
+
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
@@ -81,6 +85,8 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
 
+enum class ProfileScreenSection { ALL, ANIMALS, SESSION, VIDEO, RECORDINGS }
+
 @Composable
 fun ProfilesOverview(
     profiles: List<DogProfile>,
@@ -92,6 +98,8 @@ fun ProfilesOverview(
     onEditProfile: (DogProfile) -> Unit,
     onShareRecording: (String) -> Unit,
     onDownloadRecording: (String) -> Unit = {},
+    onRemoveLocalRecording: (String) -> Unit = {},
+    localRemovalEnabled: Boolean = true,
     videoState: VideoCaptureState,
     videoOffsetMillis: Double?,
     onVideoAction: () -> Unit,
@@ -107,22 +115,46 @@ fun ProfilesOverview(
     onHeartQuestionnaire: (String) -> Unit = {},
     onAddReference: (String) -> Unit = {},
     onEditQuestionnaire: (Recording) -> Unit = {},
+    section: ProfileScreenSection = ProfileScreenSection.ALL,
+    showingAllRecordings: Boolean = false,
+    onShowAllRecordings: () -> Unit = {},
+    serverReports: Map<String, Pair<String?, Boolean>> = emptyMap(),
+    onCheckServerRecording: (String) -> Unit = {},
 ) {
+    var pendingLocalRemoval by remember { mutableStateOf<Recording?>(null) }
+    pendingLocalRemoval?.let { recording ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pendingLocalRemoval = null },
+            title = { Text(tr(language, "Remove session files from this device?", "Удалить файлы сессии с устройства?")) },
+            text = { Text(tr(language,
+                "Session ${recording.sessionLabel}: the app will first verify the server copy. Only local files will be removed. Session history stays and files can be downloaded again.",
+                "Сессия ${recording.sessionLabel}: приложение сначала проверит серверную копию. Будут удалены только локальные файлы. История останется, файлы можно будет скачать снова.")) },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    pendingLocalRemoval = null
+                    onRemoveLocalRecording(recording.id)
+                }) { Text(tr(language, "Remove from device", "Удалить с устройства")) }
+            },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { pendingLocalRemoval = null }) { Text(tr(language, "Cancel", "Отмена")) } },
+        )
+    }
     val selected = profiles.firstOrNull { it.id == selectedProfileId }
-    if (videoState != VideoCaptureState.IDLE) {
+    if (section in setOf(ProfileScreenSection.ALL, ProfileScreenSection.SESSION, ProfileScreenSection.VIDEO) && videoState != VideoCaptureState.IDLE) {
         CaptureStatusCard(
             videoState,
             videoOffsetMillis,
             language,
             onVideoAction,
-            showVideoPreview,
+            showVideoPreview && section != ProfileScreenSection.SESSION,
             onPreviewSurface,
             connectionQuality,
             packetsLost,
             polarStatus,
+            videoRequested = showVideoPreview,
         )
     }
 
+    if (section in setOf(ProfileScreenSection.ALL, ProfileScreenSection.ANIMALS)) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -160,7 +192,9 @@ fun ProfilesOverview(
         }
     }
 
-    if (videoState == VideoCaptureState.IDLE) {
+    }
+
+    if (section in setOf(ProfileScreenSection.ALL, ProfileScreenSection.SESSION) && videoState == VideoCaptureState.IDLE) {
         PolarStatusCard(
             status = polarStatus,
             devices = polarDevices,
@@ -171,16 +205,28 @@ fun ProfilesOverview(
         )
     }
 
+    if (section == ProfileScreenSection.SESSION) {
+        Text(tr(language, "Selected animal: ${selected?.numberOrName ?: "none — choose one in Animals"}", "Животное: ${selected?.numberOrName ?: "не выбрано — откройте Животные"}"))
+        Text(tr(language, "Storage: phone. Files remain on this device until the server verifies their upload.", "Хранение: телефон. Файлы остаются на устройстве до подтверждения серверной загрузки."), style = MaterialTheme.typography.bodySmall)
+    }
+    if (section == ProfileScreenSection.VIDEO && videoState == VideoCaptureState.IDLE) {
+        Text(tr(language, "No active video. Prepare a session and enable video in its questionnaire. Start and stop control the sensor and camera together.", "Видео не запущено. Подготовьте сессию и включите видео в её анкете. Старт и остановка управляют датчиком и камерой вместе."))
+    }
+    if (section in setOf(ProfileScreenSection.ALL, ProfileScreenSection.RECORDINGS)) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                text = tr(language, "Last 10 recordings", "Последние 10 записей"),
+                text = if (showingAllRecordings) tr(language, "All recordings", "Все записи") else tr(language, "Last 10 recordings", "Последние 10 записей"),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
+            Text(tr(language, "Animal: ${selected?.numberOrName ?: "not selected"}. Choose another animal in Animals.", "Животное: ${selected?.numberOrName ?: "не выбрано"}. Выбор другого животного — во вкладке Животные."), style = MaterialTheme.typography.bodySmall)
+            if (!showingAllRecordings && recordings.size >= 10) {
+                OutlinedButton(onClick = onShowAllRecordings) { Text(tr(language, "Show all recordings", "Показать все записи")) }
+            }
             if (recordings.isEmpty()) {
                 Text(
                     tr(language, "No recordings for this dog", "У этой собаки пока нет записей"),
@@ -204,18 +250,34 @@ fun ProfilesOverview(
                     fontWeight = FontWeight.Medium,
                 )
                 Text(
-                    "${selected?.numberOrName.orEmpty()} · ${recordingStatusLabel(recording, language)}",
+                    "${selected?.numberOrName.orEmpty()} · ${recordingCaptureText(recording.status.value, recording.captureErrorCode, recording.captureErrorMessage, language)}",
                     style = MaterialTheme.typography.bodySmall,
+                    color = if (recording.status.value in setOf("failed", "interrupted") || recording.captureErrorCode != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    tr(
-                        language,
-                        "Server: ${syncStateLabel(recording.serverSyncState, language)}",
-                        "Сервер: ${syncStateLabel(recording.serverSyncState, language)}",
-                    ),
+                    recordingUploadText(recording.serverSyncState, recording.serverSyncError, language),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (recording.serverSyncState in setOf("retryable_error", "permanent_error")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                val bytesTotal = recording.artifacts.sumOf { it.sizeBytes }
+                val bytesUploaded = recording.artifacts.sumOf { it.uploadedBytes.coerceIn(0, it.sizeBytes) }
+                val verifiedFiles = recording.artifacts.count { it.uploadState == "available" }
+                Text(tr(language, "Transferred: $bytesUploaded of $bytesTotal bytes. Server-confirmed files: $verifiedFiles/${recording.artifacts.size}.", "Передано: $bytesUploaded из $bytesTotal байт. Подтверждено сервером файлов: $verifiedFiles/${recording.artifacts.size}."), style = MaterialTheme.typography.bodySmall)
+                if (bytesTotal > 0) androidx.compose.material3.LinearProgressIndicator(progress = { (bytesUploaded.toDouble() / bytesTotal).toFloat() }, modifier = Modifier.fillMaxWidth())
+                OutlinedButton(onClick = { onCheckServerRecording(recording.id) }, enabled = serverReports[recording.id]?.second != true) {
+                    Text(tr(language, "Check server transfer and files", "Проверить доставку и файлы на сервере"))
+                }
+                if (serverReports[recording.id]?.second == true) androidx.compose.material3.CircularProgressIndicator()
+                serverReports[recording.id]?.first?.let { report ->
+                    androidx.compose.foundation.text.selection.SelectionContainer { Text(report, style = MaterialTheme.typography.bodySmall) }
+                }
+                val errorDetails = listOfNotNull(recording.captureErrorCode, recording.captureErrorMessage, recording.serverSyncError).joinToString("\n")
+                if (errorDetails.isNotBlank()) {
+                    var expanded by remember(recording.id) { mutableStateOf(false) }
+                    androidx.compose.material3.TextButton(onClick = { expanded = !expanded }) { Text(tr(language, "Error details", "Подробности ошибки")) }
+                    if (expanded) androidx.compose.foundation.text.selection.SelectionContainer { Text(errorDetails, style = MaterialTheme.typography.bodySmall) }
+                }
+
                 Text(
                     tr(
                         language,
@@ -245,8 +307,18 @@ fun ProfilesOverview(
                 ) {
                     Text(tr(language, "Share session ZIP", "Поделиться ZIP сессии"))
                 }
+                if (localArtifacts.isNotEmpty()) {
+                    androidx.compose.material3.TextButton(
+                        onClick = { pendingLocalRemoval = recording },
+                        enabled = localRemovalEnabled && recording.serverSyncState == "synced" && recording.endedAtUtc != null,
+                    ) { Text(tr(language, "Remove from device", "Удалить с устройства")) }
+                    if (recording.serverSyncState != "synced") Text(tr(language,
+                        "Local files can be removed after the server confirms the full upload.",
+                        "Удаление локальных файлов доступно после подтверждения полной загрузки."), style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
+    }
     }
 }
 
@@ -261,12 +333,13 @@ private fun CaptureStatusCard(
     connectionQuality: ConnectionQuality,
     packetsLost: Long,
     polarStatus: PolarStatus,
+    videoRequested: Boolean,
 ) {
     val status = when (state) {
         VideoCaptureState.WAITING_FOR_SENSOR -> tr(language, "Waiting for the sensor", "Ожидание датчика")
-        VideoCaptureState.READY -> tr(language, "Sensor and camera are ready", "Датчик и камера готовы")
+        VideoCaptureState.READY -> if (videoRequested) tr(language, "Sensor and camera are ready", "Датчик и камера готовы") else tr(language, "Sensor is ready; video is disabled in the questionnaire", "Датчик готов; видео отключено в анкете")
         VideoCaptureState.STARTING -> tr(language, "Starting synchronized capture…", "Запуск синхронной записи…")
-        VideoCaptureState.RECORDING -> tr(language, "Sensor and video are recording", "Датчик и видео записываются")
+        VideoCaptureState.RECORDING -> if (videoRequested) tr(language, "Sensor and video are recording", "Датчик и видео записываются") else tr(language, "Sensor is recording; video is disabled", "Датчик записывается; видео отключено")
         VideoCaptureState.DEGRADED -> tr(language, "Sensor is recording; video failed", "Датчик записывается; видео недоступно")
         VideoCaptureState.STOPPING -> tr(language, "Finalizing all files…", "Сохранение всех файлов…")
         VideoCaptureState.FINISHED -> tr(language, "Session saved", "Сессия сохранена")
@@ -432,14 +505,6 @@ internal fun recordingDataLabels(recording: Recording, language: AppLanguage): L
     if ("video.mp4" in names) add(tr(language, "video", "видео"))
     if (names.any { it.startsWith("polar_") }) add("Polar HR/ECG/ACC")
     if ("diagnostics.log" in names) add(tr(language, "diagnostics", "диагностика"))
-}
-
-private fun recordingStatusLabel(recording: Recording, language: AppLanguage): String = when (recording.status.name) {
-    "COMPLETED" -> tr(language, "completed", "завершена")
-    "FAILED" -> tr(language, "failed", "ошибка")
-    "INTERRUPTED" -> tr(language, "interrupted", "прервана")
-    "RECORDING" -> tr(language, "recording", "идёт запись")
-    else -> tr(language, "preparing", "подготовка")
 }
 
 private fun collarQualityLabel(quality: ConnectionQuality, language: AppLanguage): String = when (quality) {
@@ -1394,15 +1459,6 @@ private fun surfaceOptions(language: AppLanguage) = options(
 
 private fun tr(language: AppLanguage, english: String, russian: String): String =
     if (language == AppLanguage.RUSSIAN) russian else english
-
-private fun syncStateLabel(state: String, language: AppLanguage): String = when (state) {
-    "pending" -> tr(language, "pending", "ожидает")
-    "uploading" -> tr(language, "uploading", "выгружается")
-    "synced" -> tr(language, "synced", "синхронизировано")
-    "retryable_error" -> tr(language, "retry scheduled", "будет повторено")
-    "permanent_error" -> tr(language, "error", "ошибка")
-    else -> state
-}
 
 private const val LIST_SEPARATOR = "\u001F"
 

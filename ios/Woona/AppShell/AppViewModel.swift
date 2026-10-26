@@ -1,9 +1,11 @@
 import BackgroundTasks
 import Foundation
+import Network
 
 @MainActor
 final class AppViewModel: ObservableObject {
     @Published var selectedTab: AppTab = .overview
+    @Published var showingSessionCharts = false
     @Published private(set) var isReplayRunning = false
     @Published private(set) var isConnected = false
     @Published private(set) var isConnectionActive = false
@@ -33,6 +35,10 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var chart = ChartUiState()
     @Published private(set) var exportPhase: ExportPhase?
     @Published private(set) var preparedExport: PreparedExport?
+    @Published private(set) var isCompleteArchiveExporting = false
+    @Published private(set) var completeArchiveProgress: CompleteDataArchive.Progress?
+    private var completeArchiveTask: Task<Void, Never>?
+    private var completeArchiveWorker: Task<URL, Error>?
     @Published private(set) var dogProfiles: [DogProfile] = []
     @Published private(set) var selectedDogProfile: DogProfile?
     @Published private(set) var recentRecordings: [WoonaRecording] = []
@@ -41,7 +47,9 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var exportableRecordingIDs: Set<UUID> = []
     @Published private(set) var recordingFileCounts: [UUID: (local: Int, total: Int)] = [:]
     @Published private(set) var recordingSyncErrors: [UUID: String] = [:]
+    @Published private(set) var recordingUploadProgress: [UUID: (bytes: Int64, total: Int64, verified: Int, files: Int)] = [:]
     @Published private(set) var showingAllRecordings = false
+    @Published private(set) var removingLocalRecordingID: UUID?
     @Published private(set) var downloadingRecordingID: UUID?
     @Published private(set) var activeRecording: WoonaRecording?
     @Published private(set) var isCaptureReady = false
@@ -57,10 +65,77 @@ final class AppViewModel: ObservableObject {
     @Published private var uploadingProfileCount = 0
     @Published private var scheduledSyncCount = 0
 
+    @Published private(set) var localProfileCount = 0
+    @Published private(set) var localRecordingCount = 0
+    @Published private(set) var hiddenProfileCount = 0
+    @Published private(set) var uploadPending = 0
+    @Published private(set) var uploadRunning = 0
+    @Published private(set) var uploadSynced = 0
+    @Published private(set) var uploadFailed = 0
+    @Published private(set) var uploadLastError: String?
+    @Published private(set) var networkAvailable: Bool?
+    @Published private(set) var networkUnmetered: Bool?
+    @Published private(set) var connectionCheck = "not_checked"
+    @Published private(set) var connectionCheckedAt: String?
+    @Published private(set) var connectionCheckError: String?
+    @Published private(set) var serverTransferStatuses: [UUID: ServerTransferStatus] = [:]
+    @Published private(set) var transferStatusErrors: [UUID: String] = [:]
+    @Published private(set) var checkingTransferIDs: Set<UUID> = []
+    private var networkMonitor: NWPathMonitor?
+
+    var uploadQueueExplanation: String {
+        let ru = selectedLanguage == .russian
+        if serverToken.isEmpty { return ru ? "Сервер не подключён. Данные сохраняются на телефоне; настройте адрес и токен." : "Server is not configured. Data stays on this phone; configure the address and token." }
+        if isAccountOperationRunning { return ru ? "Выполняется операция с аккаунтом или восстановление. Существующие локальные файлы сохраняются." : "An account or restore operation is running. Existing local files are preserved." }
+        if networkAvailable == false { return ru ? "Нет интернета. Очередь сохранена; отправка продолжится после подключения." : "No internet. The queue is saved and will resume when connected." }
+        if serverWifiOnly && networkUnmetered == false { return ru ? "Отправка ждёт Wi-Fi или сети без тарификации. Подключите её либо отключите ограничение." : "Uploads are waiting for Wi-Fi or an unmetered network. Connect or disable the restriction." }
+        if uploadFailed > 0 { return ru ? "Есть ошибки доставки. Откройте причину в записи; повторите отправку после устранения причины." : "Some transfers failed. Open the recording for its cause; retry after correcting it." }
+        if !syncingRecordingIDs.isEmpty || uploadingProfileCount > 0 { return ru ? "Обрабатываем очередь: подготовка, передача и проверка целостности. Переданные байты ещё не подтверждают копию." : "Processing the queue: preparation, transfer and integrity checks. Transferred bytes alone do not confirm a verified copy." }
+        if uploadPending > 0 { return ru ? "Сессии ожидают запуска, анкеты или повтора. Нажмите «Повторить выгрузку». Незавершённая анкета сессии должна быть заполнена." : "Sessions are waiting for their questionnaire, a start or a retry. Use Retry uploads. Complete any unfinished session questionnaire." }
+        return ru ? "Локальная очередь пуста. Это не проверка доступности сервера и не статус разметки Label Studio." : "The local queue is empty. This does not verify server availability or Label Studio annotation status."
+    }
+
+    func checkServerConnection() {
+        guard connectionCheck != "checking" else { return }
+        let configuration = ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID)
+        let token = serverToken
+        connectionCheck = "checking"; connectionCheckError = nil
+        Task {
+            do {
+                try await WoonaServerClient(configuration: configuration, token: token).checkConnection()
+                guard configuration == ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID), token == serverToken else { connectionCheck = "not_checked"; return }
+                connectionCheck = "verified"
+            } catch {
+                guard configuration == ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID), token == serverToken else { connectionCheck = "not_checked"; return }
+                connectionCheck = "failed"
+                connectionCheckError = recordingUploadErrorText(error.localizedDescription, language: selectedLanguage) + "\n" + error.localizedDescription
+            }
+            connectionCheckedAt = WoonaStore.iso8601(Date())
+        }
+    }
+
+    func checkRecordingTransfer(_ id: UUID) {
+        guard !checkingTransferIDs.contains(id) else { return }
+        let account = selectedAccountID
+        checkingTransferIDs.insert(id)
+        Task {
+            defer { checkingTransferIDs.remove(id) }
+            do {
+                let status = try await serverClient(accountID: account).syncStatus(id)
+                guard selectedAccountID == account else { return }
+                serverTransferStatuses[id] = status
+                transferStatusErrors[id] = nil
+            } catch {
+                guard selectedAccountID == account else { return }
+                transferStatusErrors[id] = recordingUploadErrorText(error.localizedDescription, language: selectedLanguage) + "\n" + error.localizedDescription
+            }
+        }
+    }
+
     var canChangeAccount: Bool {
-        !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
+        completeArchiveTask == nil && !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
         !captureStopInProgress && activeRecording == nil && syncingRecordingIDs.isEmpty &&
-        uploadingProfileCount == 0 && scheduledSyncCount == 0 && downloadingRecordingID == nil
+        uploadingProfileCount == 0 && scheduledSyncCount == 0 && downloadingRecordingID == nil && removingLocalRecordingID == nil
     }
 
     let cameraRecorder = CameraRecorder()
@@ -123,14 +198,30 @@ final class AppViewModel: ObservableObject {
         if uiTesting, let profile = dogProfiles.first(where: { $0.numberOrName == "UI Dog 1" }) { selectDogProfile(profile) }
         if store == nil { errorMessage = "Unable to open local Woona database" }
         if !uiTesting {
+            let monitor = NWPathMonitor()
+            networkMonitor = monitor
+            monitor.pathUpdateHandler = { [weak self] path in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let wasBlocked = self.networkAvailable == false || (self.serverWifiOnly && self.networkUnmetered == false)
+                    self.networkAvailable = path.status == .satisfied
+                    self.networkUnmetered = !path.isExpensive
+                    if wasBlocked && self.networkAvailable == true && (!self.serverWifiOnly || self.networkUnmetered == true) { self.schedulePendingSync() }
+                }
+            }
+            monitor.start(queue: DispatchQueue(label: "woona.network-status"))
             registerBackgroundSync()
             schedulePendingSync()
         }
     }
 
+    deinit { networkMonitor?.cancel() }
+
     enum AppTab: Hashable {
         case overview
-        case charts
+        case session
+        case video
+        case recordings
         case settings
     }
 
@@ -164,6 +255,7 @@ final class AppViewModel: ObservableObject {
 
     func saveServerSettings() {
         guard canChangeAccount else { return }
+        connectionCheck = "not_checked"; connectionCheckedAt = nil; connectionCheckError = nil
         serverBaseURL = serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         serverToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
         UserDefaults.standard.set(serverBaseURL, forKey: "serverBaseURL")
@@ -269,8 +361,34 @@ final class AppViewModel: ObservableObject {
         } catch { appendDiagnostic("Pending sync unavailable: \(error.localizedDescription)") }
     }
 
+    func canRemoveLocalRecording(_ recording: WoonaRecording) -> Bool {
+        canChangeAccount && exportPhase == nil && preparedExport == nil && recording.serverSyncState == "synced" &&
+        !recording.questionnaireDirty && recording.endedAtUTC != nil &&
+        (recordingFileCounts[recording.id]?.local ?? 0) > 0
+    }
+
+    func removeLocalRecordingFiles(_ recordingID: UUID) {
+        guard let store, let recording = try? store.recording(id: recordingID), canRemoveLocalRecording(recording) else { return }
+        removingLocalRecordingID = recordingID
+        Task {
+            defer { removingLocalRecordingID = nil; reloadRecentRecordings() }
+            do {
+                let client = try serverClient(accountID: selectedAccountID)
+                let status = try await client.syncStatus(recordingID)
+                guard status.confirmsCurrentServerCopy else { throw WoonaStoreError.invalidData("server_copy_unverified") }
+                let remote = try await client.recordingDetail(recordingID)
+                let plan = try store.localRemovalPlan(recordingID: recordingID, verifiedRemote: remote)
+                _ = try await Task.detached(priority: .userInitiated) { try plan.removeFiles() }.value
+                appendDiagnostic(selectedLanguage == .russian ? "Локальные файлы удалены. Сессия осталась на сервере" : "Local files removed. The session remains on the server")
+            } catch {
+                showError(selectedLanguage == .russian ? "Удаление с устройства не выполнено" : "Removal from this device failed",
+                          error: WoonaStoreError.invalidData(recordingUploadErrorText(error.localizedDescription, language: selectedLanguage)))
+            }
+        }
+    }
+
     func downloadRecording(_ recordingID: UUID) {
-        guard downloadingRecordingID == nil, let store else { return }
+        guard downloadingRecordingID == nil, removingLocalRecordingID == nil, let store else { return }
         downloadingRecordingID = recordingID
         Task {
             defer { downloadingRecordingID = nil }
@@ -474,7 +592,7 @@ final class AppViewModel: ObservableObject {
         currentSessionWallClockStartMillis = Self.currentWallClockMillis()
         clearChartHistory()
         resetCounters()
-        selectedTab = .overview
+        selectedTab = .session
         isReplayRunning = true
         isConnected = false
         isConnectionActive = false
@@ -500,7 +618,6 @@ final class AppViewModel: ObservableObject {
     }
 
     func stopCaptureSession() {
-        selectedTab = .overview
         isReplayRunning = false
         isConnected = false
         isConnectionActive = false
@@ -683,8 +800,76 @@ final class AppViewModel: ObservableObject {
         rebuildChartState()
     }
 
+    func prepareCompleteDataArchive() {
+        guard let store else {
+            showError(selectedLanguage == .russian ? "Локальная база недоступна. Полный архив не создан; исходные файлы не изменены." : "The local database is unavailable. The complete archive was not created; original files are unchanged.", error: nil)
+            return
+        }
+        guard exportPhase == nil, canChangeAccount else {
+            showError(selectedLanguage == .russian ? "Сначала завершите запись и операции с сервером, затем повторите экспорт." : "Finish recording and server operations, then retry export.", error: nil)
+            return
+        }
+        isCompleteArchiveExporting = true
+        discardPreparedExportSnapshot()
+        preparedExport = nil
+        exportPhase = .preparingSnapshots
+        let manager = FileManager.default
+        let directory = manager.temporaryDirectory.appendingPathComponent("WoonaAllData-\(UUID().uuidString)", isDirectory: true)
+        preparedExportSnapshotDirectory = directory
+        var roots: [CompleteDataArchive.Root] = []
+        if let documents = manager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            roots.append(.init(prefix: "data/documents", directory: documents))
+        }
+        if let caches = manager.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            roots.append(.init(prefix: "data/recovered-cache", directory: caches, legacyOnly: true))
+        }
+        roots.append(.init(prefix: "data/recovered-temporary", directory: manager.temporaryDirectory, legacyOnly: true))
+        let exporter = CompleteDataArchive(dataDirectory: store.rootDirectory, additionalRoots: roots, configuration: [
+            "language": selectedLanguage.rawValue, "theme": selectedThemeMode.rawValue,
+            "transport": String(describing: selectedTransportProfile), "wifiOnly": String(serverWifiOnly),
+            "serverConfigured": String(!serverBaseURL.isEmpty && !serverToken.isEmpty),
+            "selectedAccountId": selectedAccountID ?? "", "selectedDogId": selectedDogProfile?.id.uuidString ?? "",
+        ])
+        completeArchiveTask = Task {
+            do {
+                let worker = Task.detached(priority: .userInitiated) { [weak self] in
+                    var lastUpdate = Date.distantPast
+                    return try exporter.create(in: directory.appendingPathComponent("Woona-All-Data.zip"), onProgress: { progress in
+                        if Date().timeIntervalSince(lastUpdate) >= 0.1 || progress.completedFiles == progress.totalFiles {
+                            lastUpdate = Date()
+                            Task { @MainActor [weak self] in
+                                if self?.isCompleteArchiveExporting == true { self?.completeArchiveProgress = progress }
+                            }
+                        }
+                    })
+                }
+                completeArchiveWorker = worker
+                let url = try await worker.value
+                try Task.checkCancellation()
+                exportPhase = .openingShareSheet
+                preparedExport = PreparedExport(kind: .all, urls: [url])
+            } catch is CancellationError {
+                exportPhase = nil
+                discardPreparedExportSnapshot()
+            } catch {
+                exportPhase = nil
+                discardPreparedExportSnapshot()
+                showError(selectedLanguage == .russian ? "Архив не создан. Исходные данные сохранены. Причина" : "Archive was not created. Original data is safe. Reason", error: error)
+            }
+            isCompleteArchiveExporting = false
+            completeArchiveProgress = nil
+            completeArchiveWorker = nil
+            completeArchiveTask = nil
+        }
+    }
+
+    func cancelCompleteDataArchive() {
+        completeArchiveWorker?.cancel()
+        completeArchiveTask?.cancel()
+    }
+
     func prepareExport(_ kind: ExportKind) {
-        guard exportPhase == nil else { return }
+        guard exportPhase == nil, removingLocalRecordingID == nil else { return }
         if kind == .all {
             guard activeRecording == nil else {
                 showError("Stop and finalize the recording before exporting its ZIP", error: nil)
@@ -762,7 +947,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func shareRecording(_ recordingID: UUID) {
-        guard exportPhase == nil else { return }
+        guard exportPhase == nil, removingLocalRecordingID == nil else { return }
         exportPhase = .preparingSnapshots
         discardPreparedExportSnapshot()
         preparedExport = nil
@@ -829,7 +1014,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func canEditQuestionnaire(_ recording: WoonaRecording) -> Bool {
-        !isAccountOperationRunning && scheduledSyncCount == 0 && !syncingRecordingIDs.contains(recording.id) && recording.endedAtUTC != nil
+        removingLocalRecordingID == nil && !isAccountOperationRunning && scheduledSyncCount == 0 && !syncingRecordingIDs.contains(recording.id) && recording.endedAtUTC != nil
     }
 
     func saveHeartQuestionnaire(_ heart: HeartQuestionnaire, recordingID: UUID) {
@@ -854,7 +1039,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func attachReference(recordingID: UUID, type: String, url: URL, metadata: ReferenceMetadata) {
-        guard let root = store?.rootDirectory,
+        guard removingLocalRecordingID == nil, let root = store?.rootDirectory,
               let recording = try? store?.recording(id: recordingID),
               let profile = try? store?.profile(dogID: recording.dogID, versionID: recording.profileVersionID),
               profile.accountID == selectedAccountID else { return }
@@ -880,6 +1065,9 @@ final class AppViewModel: ObservableObject {
             let previousDogID = selectedDogProfile?.id
             let previousAccountID = selectedDogProfile?.accountID
             let allProfiles = try store.profiles()
+            let inventory = try store.localInventory()
+            localProfileCount = inventory.profiles; localRecordingCount = inventory.recordings
+            hiddenProfileCount = allProfiles.filter { $0.accountID != selectedAccountID }.count
             dogProfiles = allProfiles.filter { $0.accountID == selectedAccountID }
             unassignedDogProfiles = allProfiles.filter { $0.accountID == nil }
             let id = preferredID ?? selectedDogProfile?.id
@@ -893,6 +1081,9 @@ final class AppViewModel: ObservableObject {
     }
 
     private func reloadRecentRecordings() {
+        if let overview = try? store?.syncOverview() {
+            uploadPending = overview.pending; uploadRunning = overview.uploading; uploadSynced = overview.synced; uploadFailed = overview.failed; uploadLastError = overview.lastError
+        }
         guard let store, let selectedDogProfile else {
             recentRecordings = []; downloadableRecordingIDs = []; exportableRecordingIDs = []; recordingSyncErrors = [:]; recordingFileCounts = [:]
             return
@@ -902,6 +1093,7 @@ final class AppViewModel: ObservableObject {
             downloadableRecordingIDs = []; exportableRecordingIDs = []; recordingSyncErrors = [:]; recordingFileCounts = [:]
             for recording in recentRecordings {
                 let artifacts = try store.artifacts(recordingID: recording.id)
+                recordingUploadProgress[recording.id] = (artifacts.reduce(0) { $0 + min(max(0, $1.uploadedBytes), $1.sizeBytes) }, artifacts.reduce(0) { $0 + $1.sizeBytes }, artifacts.filter { $0.uploadState == "available" }.count, artifacts.count)
                 let local = artifacts.filter {
                     FileManager.default.fileExists(atPath: store.rootDirectory.appendingPathComponent($0.relativePath).path)
                 }.count
@@ -942,9 +1134,19 @@ final class AppViewModel: ObservableObject {
         guard !serverToken.isEmpty, let profile = selectedDogProfile else { serverRecordings = []; return }
         let accountID = selectedAccountID
         do {
-            let recordings = try await serverClient(accountID: accountID).recordings(dogID: profile.id, limit: 10)
+            let client = try serverClient(accountID: accountID)
+            var recordings = try await client.recordings(dogID: profile.id, limit: 10)
             guard selectedAccountID == accountID, selectedDogProfile?.id == profile.id else { return }
             serverRecordings = recordings
+            // Older restores did not retain the top-level capture error fields.
+            // Hydrate visible history as well as server-only rows from the existing detail API.
+            for index in recordings.indices {
+                let detail = try await client.recordingDetail(recordings[index].id)
+                guard selectedAccountID == accountID, selectedDogProfile?.id == profile.id else { return }
+                recordings[index].captureErrorCode = detail.captureErrorCode
+                recordings[index].captureErrorMessage = detail.captureErrorMessage
+                serverRecordings = recordings
+            }
         }
         catch { appendDiagnostic("Server recordings unavailable: \(error.localizedDescription)") }
     }
@@ -1003,6 +1205,10 @@ final class AppViewModel: ObservableObject {
             }
             sync["cameraTimestampSource"] = info.timestampSource
         }
+        if requestedStatus == "completed", packetsReceived == 0, captureErrorCode == nil {
+            captureErrorCode = "no_sensor_data"
+            captureErrorMessage = "No valid sensor packets were received"
+        }
         if let captureErrorCode { sync["captureErrorCode"] = captureErrorCode }
         if let captureErrorMessage { sync["captureErrorMessage"] = captureErrorMessage }
         do {
@@ -1022,14 +1228,15 @@ final class AppViewModel: ObservableObject {
     }
 
     private func sync(recording: WoonaRecording) async {
-        guard !isAccountOperationRunning, !serverToken.isEmpty, let store, recording.questionnaire?.readyForSync != false, !syncingRecordingIDs.contains(recording.id) else { return }
+        guard networkAvailable != false, !(serverWifiOnly && networkUnmetered == false), removingLocalRecordingID == nil, !isAccountOperationRunning, !serverToken.isEmpty, let store, recording.questionnaire?.readyForSync != false, !syncingRecordingIDs.contains(recording.id) else { return }
         syncingRecordingIDs.insert(recording.id)
-        defer { syncingRecordingIDs.remove(recording.id) }
+        reloadRecentRecordings()
+        defer { syncingRecordingIDs.remove(recording.id); reloadRecentRecordings() }
         do {
             guard let profile = try store.profile(dogID: recording.dogID, versionID: recording.profileVersionID) else {
                 throw WoonaStoreError.invalidData("Recording profile version is missing")
             }
-            try await serverClient(accountID: profile.accountID).upload(recording: recording, profile: profile, store: store)
+            try await serverClient(accountID: profile.accountID).upload(recording: recording, profile: profile, store: store, onProgress: { [weak self] in self?.reloadRecentRecordings() })
             reloadRecentRecordings()
             await reloadServerRecordings()
             if let latest = try store.recording(id: recording.id), latest.serverSyncState == "pending" {
@@ -1087,6 +1294,10 @@ final class AppViewModel: ObservableObject {
                 self?.applyBleState(state)
             },
             onError: { [weak self] message, error in
+                if let self, self.activeRecording != nil, self.captureErrorCode == nil {
+                    self.captureErrorCode = "gatt_error"
+                    self.captureErrorMessage = [message, error?.localizedDescription].compactMap { $0 }.joined(separator: ": ")
+                }
                 self?.showError(message, error: error)
             }
         )
@@ -1287,6 +1498,8 @@ final class AppViewModel: ObservableObject {
     }
 
     private func handleCaptureQueueOverflow() {
+        captureErrorCode = "queue_overflow"
+        captureErrorMessage = "Capture queue overflow; stopped capture to preserve packet ordering"
         showError("Capture queue overflow; stopped capture to preserve packet ordering", error: nil)
         if activeRecording != nil { stopActiveCapture(status: "failed") }
         else { bleSessionManager.disconnect(); finishCaptureProcessingIfNeeded() }

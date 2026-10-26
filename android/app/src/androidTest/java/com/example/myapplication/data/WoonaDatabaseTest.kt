@@ -17,6 +17,88 @@ import org.json.JSONObject
 @RunWith(AndroidJUnit4::class)
 class WoonaDatabaseTest {
     @Test
+    fun captureFailureIsVisibleInHistoryAfterRestartEvenWhenSynced() {
+        val dog = database.saveProfile(completeDogQuestionnaire("Capture failure"))
+        val session = database.beginRecording(dog.id, RecordingSource.LIVE, completeSessionQuestionnaire())
+        database.markCaptureError(session.id, "gatt_error", "Ошибка GATT-подключения: 8")
+        database.finishRecording(session.id, RecordingStatus.FAILED)
+        database.markRecordingSyncError(session.id, false, "http_401", "invalid_bearer_token")
+        database.close()
+        database = WoonaDatabase(ApplicationProvider.getApplicationContext(), root)
+        val history = database.recentRecordings(dog.id).single()
+        assertEquals("gatt_error", history.captureErrorCode)
+        assertEquals("Ошибка GATT-подключения: 8", history.captureErrorMessage)
+        assertEquals("invalid_bearer_token", history.serverSyncError)
+        assertEquals("permanent_error", history.serverSyncState)
+    }
+
+    private fun verifiedLocalAndRemote(): Pair<RecordingSyncRecord, RemoteRecording> {
+        val initial = completedPacketRecording("Remove local")
+        val full = requireNotNull(database.recordingSyncRecord(initial.id))
+        val remote = remoteCompletedRecording(full)
+        database.restoreServerMetadata(emptyList(), listOf(remote))
+        assertEquals("synced", database.recording(full.id)?.serverSyncState)
+        return full to remote
+    }
+
+    @Test
+    fun removeVerifiedLocalFilesKeepsHistoryAndAllowsDownloadAgain() {
+        val (local, remote) = verifiedLocalAndRemote()
+        val packet = database.resolveRelativePath(local.artifacts.first { it.type == "packet" }.relativePath)
+        val original = packet.readBytes()
+        val unregistered = File(packet.parentFile, "operator-note.txt").apply { writeText("Keep this local note") }
+        assertTrue(database.removeLocalRecordingFiles(local.id, remote) > 0)
+        assertTrue(!packet.exists())
+        assertEquals("Keep this local note", unregistered.readText())
+        assertEquals("synced", database.recording(local.id)?.serverSyncState)
+        assertEquals(local.profileVersionId, database.recording(local.id)?.profileVersionId)
+        assertTrue(database.profile(local.dogId) != null)
+        assertTrue(database.recording(local.id)!!.artifacts.all { it.localPresence == "remote_only" })
+        val missing = database.remoteArtifacts(local.id)
+        assertEquals(local.artifacts.size, missing.size)
+        val artifact = missing.first { it.type == ArtifactType.PACKET }
+        database.artifactDownloadTarget(artifact).writeBytes(original)
+        database.markArtifactDownloaded(artifact.id)
+        assertEquals("both", database.recording(local.id)!!.artifacts.first { it.id == artifact.id }.localPresence)
+        assertTrue(packet.exists())
+    }
+
+    @Test
+    fun removingUnsyncedOrUnverifiedSessionNeverDeletesFiles() {
+        val initial = completedPacketRecording("Pending local")
+        val full = requireNotNull(database.recordingSyncRecord(initial.id))
+        val remote = remoteCompletedRecording(full)
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { database.removeLocalRecordingFiles(full.id, remote) }
+        assertTrue(full.artifacts.all { database.resolveRelativePath(it.relativePath).isFile })
+        database.restoreServerMetadata(emptyList(), listOf(remote))
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { database.removeLocalRecordingFiles(full.id, remote.copy(receiptSha256 = null)) }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { database.removeLocalRecordingFiles(full.id, remote.copy(artifacts = remote.artifacts.dropLast(1))) }
+        assertTrue(full.artifacts.all { database.resolveRelativePath(it.relativePath).isFile })
+    }
+
+    @Test
+    fun missingUploadedCacheFileIsOfferedForDownloadAfterRestart() {
+        val (local, _) = verifiedLocalAndRemote()
+        val packet = local.artifacts.first { it.type == "packet" }
+        assertTrue(database.resolveRelativePath(packet.relativePath).delete())
+        database.close()
+        database = WoonaDatabase(ApplicationProvider.getApplicationContext(), root)
+        assertEquals("remote_only", database.recording(local.id)!!.artifacts.first { it.id == packet.id }.localPresence)
+        assertTrue(database.remoteArtifacts(local.id).any { it.id == packet.id })
+    }
+
+    @Test
+    fun changedLocalFileBlocksDeletionOfEveryArtifact() {
+        val (local, remote) = verifiedLocalAndRemote()
+        val packet = database.resolveRelativePath(local.artifacts.first { it.type == "packet" }.relativePath)
+        packet.writeText("packet datX") // Same size, different SHA-256.
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { database.removeLocalRecordingFiles(local.id, remote) }
+        assertEquals("packet datX", packet.readText())
+        assertTrue(local.artifacts.all { database.resolveRelativePath(it.relativePath).isFile })
+        assertTrue(database.recording(local.id)!!.artifacts.none { it.localPresence == "remote_only" })
+    }
+
+    @Test
     fun accountOwnershipPersistsAndLinkIncludesAllSessions() {
         val old = database.saveProfile(completeDogQuestionnaire("Unassigned"))
         val one = database.beginRecording(old.id, RecordingSource.LIVE, completeSessionQuestionnaire())
@@ -487,6 +569,8 @@ class WoonaDatabaseTest {
 
     @Test
     fun serverMetadataRestore_isIdempotentAndKeepsArtifactsRemoteOnly() {
+        val downloadBytes = byteArrayOf(1, 2, 3)
+        val downloadHash = java.security.MessageDigest.getInstance("SHA-256").digest(downloadBytes).joinToString("") { "%02x".format(it) }
         val dogJson = completeDogQuestionnaire("Remote Rex").toJson()
         val sessionJson = completeSessionQuestionnaire().toJson()
         val profile = RemoteProfileVersion(
@@ -563,7 +647,7 @@ class WoonaDatabaseTest {
                     fileName = "packets.bin",
                     mimeType = "application/octet-stream",
                     sizeBytes = 3,
-                    sha256 = "b".repeat(64),
+                    sha256 = downloadHash,
                     storageStatus = "available",
                 ),
             ),
@@ -585,6 +669,9 @@ class WoonaDatabaseTest {
         assertEquals("remote_only", database.recording(recording.id)?.artifacts?.single()?.localPresence)
         assertEquals(1, database.remoteArtifacts(recording.id).size)
 
+        val target = database.artifactDownloadTarget(database.remoteArtifacts(recording.id).single())
+        target.parentFile?.mkdirs()
+        target.writeBytes(downloadBytes)
         database.writableDatabase.execSQL(
             "UPDATE artifacts SET local_presence='local' WHERE id=?",
             arrayOf(recording.artifacts.single().id),

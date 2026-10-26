@@ -929,8 +929,51 @@ fun WoonaDatabase.restoreServerMetadata(
     return RestoreResult(restoredDogs, restoredRecordings, restoredArtifacts, conflicts, recordingConflicts)
 }
 
+/** Remove only verified uploaded files; retain metadata for history and re-download. */
+fun WoonaDatabase.removeLocalRecordingFiles(recordingId: String, remote: RemoteRecording): Long {
+    val local = requireNotNull(recording(recordingId)) { "local_copy_not_synced" }
+    require(local.endedAtUtc != null && local.status.value in setOf("completed", "failed", "interrupted") &&
+        local.serverSyncState == "synced") { "local_copy_not_synced" }
+    require(remote.id == local.id && remote.dogId == local.profileId &&
+        !remote.receiptSha256.isNullOrBlank() && !remote.verifiedAtUtc.isNullOrBlank()) { "server_copy_unverified" }
+    require(local.artifacts.isNotEmpty() && local.artifacts.all { artifact ->
+        remote.artifacts.any { saved -> saved.fileName == artifact.fileName && saved.type == artifact.type.value &&
+            saved.sizeBytes == artifact.sizeBytes && saved.sha256 == artifact.sha256 && saved.storageStatus == "available" }
+    }) { "server_copy_unverified" }
+    val directory = recordingDirectory(local.relativeDirectory).canonicalFile
+    require(directory != rootDirectory.canonicalFile && directory.toPath().startsWith(rootDirectory.canonicalFile.toPath())) { "local_copy_unsafe_path" }
+    val targets = local.artifacts.map { artifact -> artifact to resolveRelativePath(artifact.relativePath).canonicalFile }
+    // Validate every path and every existing file before deleting the first byte.
+    targets.forEach { (artifact, file) ->
+        require(file.toPath().startsWith(directory.toPath()) && file != directory) { "local_copy_unsafe_path" }
+        require(!file.exists() || (file.isFile && file.length() == artifact.sizeBytes && sha256(file) == artifact.sha256)) { "local_copy_changed" }
+    }
+    val modified = targets.associate { (_, file) -> file.path to file.lastModified() }
+    val restored = restoreServerMetadata(emptyList(), listOf(remote))
+    require(restored.conflicts == 0 && restored.recordingConflicts == 0) { "server_copy_unverified" }
+    var removedBytes = 0L
+    try {
+        targets.forEach { (artifact, file) ->
+            if (file.exists()) {
+                require(file.canonicalFile == file && file.length() == artifact.sizeBytes && file.lastModified() == modified[file.path]) { "local_copy_changed" }
+                check(file.delete()) { "local_copy_remove_failed: ${artifact.fileName}" }
+                removedBytes += artifact.sizeBytes
+            }
+        }
+    } finally {
+        // Preserve progress after a partial I/O failure; never claim absent files are local.
+        recording(recordingId)?.artifacts.orEmpty().forEach { artifact ->
+            val present = resolveRelativePath(artifact.relativePath).isFile
+            writableDatabase.update("artifacts", ContentValues().apply {
+                put("local_presence", if (present) "both" else "remote_only")
+            }, "id=?", arrayOf(artifact.id))
+        }
+    }
+    return removedBytes
+}
+
 fun WoonaDatabase.remoteArtifacts(recordingId: String): List<Artifact> =
-    recording(recordingId)?.artifacts.orEmpty().filter { it.localPresence == "remote_only" }
+    recording(recordingId)?.artifacts.orEmpty().filter { it.uploadState == "available" && (it.localPresence == "remote_only" || !resolveRelativePath(it.relativePath).isFile) }
 
 fun WoonaDatabase.artifactDownloadTarget(artifact: Artifact): File =
     resolveRelativePath(artifact.relativePath)

@@ -7,6 +7,45 @@ struct ServerConfiguration: Equatable {
     var accountID: String? = nil
 }
 
+struct ServerTransferStatus: Decodable {
+    struct Transfer: Decodable {
+        let status: String
+        let totalBytes: Int64
+        let uploadedBytes: Int64
+        let verifiedBytes: Int64
+        let totalFiles: Int
+        let verifiedFiles: Int
+        let receiptVerified: Bool
+        let lastProgressAtUtc: String?
+        let retryable: Bool
+        let nextAction: String
+    }
+    struct Artifact: Decodable, Identifiable {
+        let id: UUID
+        let fileName: String
+        let storageStatus: String
+        let verified: Bool?
+        let sizeBytes: Int64
+        let uploadedBytes: Int64
+        let errorCode: String?
+        let errorMessage: String?
+        let nextAction: String
+    }
+    struct Labeling: Decodable {
+        let eligible: Bool
+        let exclusionReasons: [String]
+        let taskStatus: String
+    }
+    let ingestStatus: String
+    let transfer: Transfer?
+    let artifacts: [Artifact]?
+    let labeling: Labeling?
+    var confirmsCurrentServerCopy: Bool {
+        transfer?.receiptVerified == true && artifacts?.isEmpty == false &&
+        artifacts?.allSatisfy { $0.storageStatus == "available" && $0.verified == true && $0.errorCode == nil } == true
+    }
+}
+
 struct ServerRecordingSummary: Codable, Identifiable, Equatable {
     let id: UUID
     let source: String
@@ -16,6 +55,8 @@ struct ServerRecordingSummary: Codable, Identifiable, Equatable {
     let endedAtUtc: String?
     let sessionLabel: String
     let videoRequested: Bool
+    var captureErrorCode: String? = nil
+    var captureErrorMessage: String? = nil
 }
 
 struct ServerArtifact: Decodable, Identifiable {
@@ -59,6 +100,10 @@ struct ServerRecordingDetail: Decodable {
     var appVersion: String? = nil
     var accountId: String? = nil
     var questionnaireRevision: Int? = nil
+    var captureErrorCode: String? = nil
+    var captureErrorMessage: String? = nil
+    var receiptSha256: String? = nil
+    var serverVerifiedAtUtc: String? = nil
 }
 
 enum JSONValue: Codable {
@@ -116,7 +161,9 @@ enum ServerSyncError: LocalizedError {
         let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         let detail = body?["detail"] as? [String: Any] ?? body
         if status == 409, detail?["code"] as? String == "animal_id_already_exists" { return .animalIDConflict }
-        return .requestFailed(status, detail?["message"] as? String ?? HTTPURLResponse.localizedString(forStatusCode: status))
+        let code = detail?["code"] as? String
+        let message = detail?["message"] as? String ?? body?["detail"] as? String ?? HTTPURLResponse.localizedString(forStatusCode: status)
+        return .requestFailed(status, code.map { "\($0): \(message)" } ?? message)
     }
 
     var errorDescription: String? {
@@ -218,6 +265,15 @@ final class WoonaServerClient {
         guard let accountID else { throw WoonaStoreError.invalidData("Select an account first") }
         _ = try await rawRequest(method: "PUT", path: "/v1/dogs/\(dogID.uuidString)/account",
                                  body: JSONSerialization.data(withJSONObject: ["accountId": accountID]), contentType: "application/json")
+    }
+
+    func checkConnection() async throws {
+        _ = try await rawRequest(method: "GET", path: "/health/ready", body: nil, contentType: "application/json")
+        _ = try await rawRequest(method: "GET", path: "/v1/dogs?limit=1", body: nil, contentType: "application/json")
+    }
+
+    func syncStatus(_ recordingID: UUID) async throws -> ServerTransferStatus {
+        try await json(method: "GET", path: "/v1/recordings/\(recordingID.uuidString)/sync-status", body: nil, as: ServerTransferStatus.self)
     }
 
     func recordingDetail(_ recordingID: UUID) async throws -> ServerRecordingDetail {
@@ -351,7 +407,7 @@ final class WoonaServerClient {
         return restored
     }
 
-    func upload(recording: WoonaRecording, profile: DogProfile, store: WoonaStore) async throws {
+    func upload(recording: WoonaRecording, profile: DogProfile, store: WoonaStore, onProgress: (() -> Void)? = nil) async throws {
         do {
             try store.applyServerDeletions(try await deletions(), accountID: accountID)
             guard try store.recording(id: recording.id) != nil else { return }
@@ -462,6 +518,7 @@ final class WoonaServerClient {
                 let offset = try await uploadOffset(artifact.id)
                 guard offset <= artifact.sizeBytes else { throw ServerSyncError.responseInvalid }
                 try store.updateArtifactProgress(artifact.id, uploadedBytes: offset, state: "uploading")
+                onProgress?()
                 let handle = try FileHandle(forReadingFrom: file)
                 defer { try? handle.close() }
                 try handle.seek(toOffset: UInt64(offset))
@@ -481,6 +538,7 @@ final class WoonaServerClient {
                     current = Int64(response.value(forHTTPHeaderField: "Upload-Offset") ?? "")
                         ?? current + Int64(chunk.count)
                     try store.updateArtifactProgress(artifact.id, uploadedBytes: current, state: "uploading")
+                    onProgress?()
                 }
                 _ = try await rawRequest(
                     method: "POST",
@@ -489,6 +547,7 @@ final class WoonaServerClient {
                     contentType: "application/json"
                 )
                 try store.updateArtifactProgress(artifact.id, uploadedBytes: artifact.sizeBytes, state: "available")
+                onProgress?()
             }
             if !alreadyComplete {
                 _ = try await rawRequest(

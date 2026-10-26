@@ -11,6 +11,36 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
     }
 
+    func testHistoryExplainsCaptureFailureSeparatelyAndRemovalCanBeCancelled() {
+        app.terminate()
+        app.launchArguments += ["--ui-testing-history"]
+        app.launch()
+        XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
+        app.buttons["tab.recordings"].tap()
+        let cause = app.staticTexts["Capture: interrupted — collar connection failed (GATT 8)"]
+        for _ in 0..<4 {
+            if cause.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(cause.exists)
+        XCTAssertTrue(app.staticTexts["Upload: files confirmed by the server"].exists)
+        let details = app.buttons["Error details"]
+        if !details.isHittable { app.swipeUp() }
+        details.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "GATT status 8")).firstMatch.exists)
+        let remove = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "recording.removeLocal.")).firstMatch
+        for _ in 0..<4 {
+            if remove.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(remove.isEnabled)
+        remove.tap()
+        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(remove.exists)
+        XCTAssertTrue(app.buttons["Share session ZIP"].isEnabled)
+    }
+
     func testAccountPrecedesDogsAndStaysOnOverview() {
         let account = app.textFields["account.input"]
         let newDog = app.buttons["dog.new"]
@@ -88,7 +118,7 @@ final class OverviewParityTests: XCTestCase {
         let russian = app.buttons["language.ru"]
         if !russian.isHittable { app.swipeUp() }
         russian.tap()
-        XCTAssertEqual(app.buttons["tab.overview"].label, "Обзор")
+        XCTAssertEqual(app.buttons["tab.overview"].label, "Животные")
         XCTAssertEqual(app.buttons["tab.settings"].label, "Настройки")
         if !app.segmentedControls.buttons["Светлая"].isHittable { app.swipeDown() }
         XCTAssertTrue(app.segmentedControls.buttons["Светлая"].isSelected)
@@ -110,6 +140,8 @@ final class OverviewParityTests: XCTestCase {
     }
 
     func testIdleDiscoveryActionsAppearTogether() {
+        app.buttons["tab.session"].tap()
+        app.buttons["devices.newConnection"].tap()
         let scan = app.buttons["devices.scan"]
         let replay = app.buttons["devices.replay"]
         for _ in 0..<4 {
@@ -123,8 +155,22 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertFalse(app.buttons["DISCONNECT"].exists)
     }
 
+    func testFiveTabsPreserveSelectionAndSeparateFunctions() {
+        let tabs = ["overview", "session", "video", "recordings", "settings"]
+        for tab in tabs { XCTAssertTrue(app.buttons["tab." + tab].exists) }
+        app.buttons["tab.video"].tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "No active video")).firstMatch.exists)
+        XCTAssertFalse(app.textFields["account.input"].exists)
+        app.buttons["tab.recordings"].tap()
+        XCTAssertTrue(app.staticTexts["No recordings for this dog"].exists)
+        app.buttons["tab.overview"].tap()
+        app.buttons["dog.edit"].tap()
+        XCTAssertEqual(app.textFields["dog.editor.name"].value as? String, "UI Dog 1")
+    }
+
     func testFullscreenKeepsChartSelection() {
-        app.buttons["tab.charts"].tap()
+        app.buttons["tab.session"].tap()
+        app.segmentedControls["session.section"].buttons["Charts"].tap()
         app.segmentedControls.buttons["AXL"].tap()
         app.segmentedControls.buttons["Channel 2"].tap()
         app.buttons["chart.fullscreen.open"].tap()

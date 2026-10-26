@@ -55,7 +55,22 @@ struct SettingsView: View {
                     }
                 }
 
+                CompleteArchiveCard()
+
                 AppCard(title: appState.selectedLanguage == .russian ? "Серверное хранилище" : "Server storage") {
+                    Text(appState.uploadQueueExplanation).font(.footnote)
+                    Text(russian ? "Аккаунт: \(appState.selectedAccountID ?? "без аккаунта")" : "Account: \(appState.selectedAccountID ?? "unassigned")").font(.footnote)
+                    Text(russian ? "Сессии: \(appState.uploadPending) ожидают · \(appState.uploadRunning) выгружаются · \(appState.uploadSynced) подтверждены · \(appState.uploadFailed) ошибок" : "Sessions: \(appState.uploadPending) pending · \(appState.uploadRunning) uploading · \(appState.uploadSynced) confirmed · \(appState.uploadFailed) failed").font(.footnote)
+                    if let error = appState.uploadLastError {
+                        DisclosureGroup(russian ? "Подробности последней ошибки" : "Last error details") { Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+                    }
+                    Text(connectionLabel).font(.footnote)
+                    if let date = appState.connectionCheckedAt { Text(recordingDisplayTime(date)).font(.caption) }
+                    if let error = appState.connectionCheckError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+                    Button(russian ? "Проверить соединение" : "Check connection") { appState.checkServerConnection() }
+                        .buttonStyle(.bordered)
+                        .disabled(!isServerConfigured || appState.connectionCheck == "checking")
+                        .accessibilityIdentifier("server.check")
                     HStack {
                         Text(isServerConfigured ? appState.serverBaseURL : (russian ? "Не настроено" : "Not configured"))
                             .font(.subheadline)
@@ -74,7 +89,7 @@ struct SettingsView: View {
                         .disabled(!isServerConfigured)
                     Button(russian ? "Восстановить с сервера" : "Restore from server") { appState.refreshFromServer() }
                         .buttonStyle(.bordered)
-                        .disabled(!isServerConfigured)
+                        .disabled(!isServerConfigured || appState.isAccountOperationRunning)
 
                 }
                 .disabled(!appState.canChangeAccount)
@@ -92,6 +107,15 @@ struct SettingsView: View {
             }
         }
     }
+    private var connectionLabel: String {
+        switch appState.connectionCheck {
+        case "checking": return russian ? "Проверяем сервер и доступ…" : "Checking server and access…"
+        case "verified": return russian ? "Последняя проверка успешна" : "Last connection check succeeded"
+        case "failed": return russian ? "Последняя проверка не прошла" : "Last connection check failed"
+        default: return russian ? "Соединение не проверено" : "Connection not checked"
+        }
+    }
+
     private func themeTitle(_ mode: AppThemeMode) -> String {
         guard russian else { return mode.rawValue }
         switch mode {

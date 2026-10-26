@@ -244,6 +244,19 @@ class ServerApiClient(
 
     fun fetchDog(dogId: String): RemoteDog = parseDog(jsonRequest("GET", "/v1/dogs/$dogId",null))
 
+    fun checkConnection() {
+        val connection = open("GET", "/health/ready", authenticated = false)
+        try {
+            val status = connection.responseCode
+            if (status !in 200..299) throw error(connection, status)
+        } finally { connection.disconnect() }
+        // Readiness is public; an authenticated read verifies the token and account too.
+        jsonRequest("GET", "/v1/dogs?limit=1", null)
+    }
+
+    fun syncStatus(recordingId: String): org.json.JSONObject =
+        jsonRequest("GET", "/v1/recordings/$recordingId/sync-status", null)
+
     fun readiness(): Boolean {
         val connection = open("GET", "/health/ready", authenticated = false)
         return try {

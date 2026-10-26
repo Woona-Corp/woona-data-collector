@@ -52,6 +52,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -79,6 +82,8 @@ import com.example.myapplication.ble.BleTransportProfile
 import com.example.myapplication.localization.AppLanguage
 import com.example.myapplication.localization.appStringResource
 import com.example.myapplication.protocol.ConnectionQuality
+import com.example.myapplication.sync.queueExplanation
+import com.example.myapplication.sync.label
 import com.example.myapplication.sync.ServerSyncStatus
 import com.example.myapplication.sync.ServerSyncUiState
 import com.example.myapplication.ui.theme.AppThemeMode
@@ -248,6 +253,7 @@ fun DeviceSettingsScreen(
     onServerWifiOnlyChange: (Boolean) -> Unit = {},
     onServerRetryPending: () -> Unit = {},
     onServerRestore: () -> Unit = {},
+    onServerCheck: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(
@@ -281,6 +287,14 @@ fun DeviceSettingsScreen(
         }
 
         item {
+            com.example.myapplication.storage.CompleteArchiveCard(
+                language = selectedLanguage,
+                captureActive = uiState.showCaptureUi || uiState.isReplayPreparing || uiState.isReplayRunning ||
+                    uiState.videoState == VideoCaptureState.STOPPING,
+            )
+        }
+
+        item {
             ServerSyncSettingsCard(
                 state = serverSyncState,
                 language = selectedLanguage,
@@ -288,6 +302,7 @@ fun DeviceSettingsScreen(
                 onWifiOnlyChange = onServerWifiOnlyChange,
                 onRetryPending = onServerRetryPending,
                 onRestore = onServerRestore,
+                onCheck = onServerCheck,
             )
         }
     }
@@ -442,6 +457,33 @@ private fun ConnectionQualityCard(uiState: DeviceUiState) {
 
 @Composable
 private fun DeviceDiscoverySection(
+    uiState: DeviceUiState,
+    onStartScan: () -> Unit,
+    onConnect: (String) -> Unit,
+    showReplayAction: Boolean,
+    onReplayRequest: () -> Unit,
+) {
+    var showConnectionDialog by rememberSaveable { mutableStateOf(false) }
+    OutlinedButton(onClick = { showConnectionDialog = true }, modifier = Modifier.fillMaxWidth()) {
+        Text(appStringResource(R.string.new_connection))
+    }
+    if (showConnectionDialog) {
+        androidx.compose.ui.window.Dialog(onDismissRequest = { showConnectionDialog = false }) {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                DeviceDiscoveryDialogContent(
+                    uiState, onStartScan,
+                    onConnect = { address -> showConnectionDialog = false; onConnect(address) },
+                    showReplayAction = showReplayAction,
+                    onReplayRequest = { showConnectionDialog = false; onReplayRequest() },
+                )
+                TextButton(onClick = { showConnectionDialog = false }) { Text(appStringResource(android.R.string.cancel)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceDiscoveryDialogContent(
     uiState: DeviceUiState,
     onStartScan: () -> Unit,
     onConnect: (String) -> Unit,
@@ -709,6 +751,7 @@ private fun ServerSyncSettingsCard(
     onWifiOnlyChange: (Boolean) -> Unit,
     onRetryPending: () -> Unit,
     onRestore: () -> Unit,
+    onCheck: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -724,15 +767,15 @@ private fun ServerSyncSettingsCard(
                 if (language == AppLanguage.RUSSIAN) "Серверное хранилище" else "Server storage",
                 style = MaterialTheme.typography.labelMedium,
             )
-            Text(
-                text = if (language == AppLanguage.RUSSIAN) {
-                    "Анкеты сохраняются в PostgreSQL, файлы — в файловой системе сервера."
-                } else {
-                    "Questionnaires are stored in PostgreSQL and artifacts in the server filesystem."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = supportingTextColor(),
-            )
+            Text(state.queueExplanation(language), style = MaterialTheme.typography.bodySmall)
+            Text((if (language == AppLanguage.RUSSIAN) "Аккаунт: " else "Account: ") + (state.accountId ?: (if (language == AppLanguage.RUSSIAN) "без аккаунта" else "unassigned")))
+            Text(state.connectionCheck.label(language), style = MaterialTheme.typography.bodySmall)
+            state.checkedAtUtc?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            state.connectionError?.let { androidx.compose.foundation.text.selection.SelectionContainer { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) } }
+            OutlinedButton(onClick = onCheck, enabled = state.isConfigured && state.connectionCheck != com.example.myapplication.sync.ConnectionCheck.CHECKING) {
+                Text(if (language == AppLanguage.RUSSIAN) "Проверить соединение" else "Check connection")
+            }
+            Text(if (language == AppLanguage.RUSSIAN) "Фоновые задачи: ${state.workersRunning} выполняются, ${state.workersQueued} ожидают. Счётчики ниже включают анкеты и сессии." else "Background jobs: ${state.workersRunning} running, ${state.workersQueued} queued. Counts below include profiles and sessions.", style = MaterialTheme.typography.bodySmall)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -2311,6 +2354,7 @@ object DeviceScreenEntryPoint {
         onServerWifiOnlyChange: (Boolean) -> Unit = {},
         onServerRetryPending: () -> Unit = {},
         onServerRestore: () -> Unit = {},
+    onServerCheck: () -> Unit = {},
         modifier: Modifier = Modifier,
     ) {
         DeviceSettingsScreen(
@@ -2325,6 +2369,7 @@ object DeviceScreenEntryPoint {
             onServerWifiOnlyChange = onServerWifiOnlyChange,
             onServerRetryPending = onServerRetryPending,
             onServerRestore = onServerRestore,
+            onServerCheck = onServerCheck,
             modifier = modifier,
         )
     }

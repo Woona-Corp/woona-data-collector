@@ -1,0 +1,29 @@
+package com.example.myapplication.sync
+
+import com.example.myapplication.localization.AppLanguage
+import org.junit.Assert.*
+import org.junit.Test
+
+class SyncPresentationTest {
+    @Test fun emptyQueueDoesNotClaimServerOrLabelingIsHealthy() {
+        val text = ServerSyncUiState(status = ServerSyncStatus.READY).queueExplanation(AppLanguage.ENGLISH)
+        assertTrue(text.contains("does not verify server"))
+        assertTrue(text.contains("Label Studio"))
+    }
+    @Test fun pendingQueueExplainsOfflineAndUnmeteredConstraintBeforeGenericWaiting() {
+        val state = ServerSyncUiState(status = ServerSyncStatus.READY, pending = 7, networkAvailable = false, wifiOnly = true, unmeteredNetwork = false)
+        assertTrue(state.queueExplanation(AppLanguage.ENGLISH).startsWith("No internet"))
+        assertTrue(state.copy(networkAvailable = true).queueExplanation(AppLanguage.ENGLISH).contains("unmetered"))
+        assertTrue(state.copy(networkAvailable = true, unmeteredNetwork = true).queueExplanation(AppLanguage.ENGLISH).contains("waiting for the system"))
+    }
+    @Test fun uploadedBytesDoNotClaimIntegrityOrCaptureSuccess() {
+        val text = ServerSyncUiState(status = ServerSyncStatus.UPLOADING, uploading = 1).queueExplanation(AppLanguage.RUSSIAN)
+        assertTrue(text.contains("ещё не означают"))
+        assertFalse(text.contains("успешная запись"))
+    }
+    @Test fun failureHasNextStepAndConfigurationHasLocalDataGuarantee() {
+        assertTrue(ServerSyncUiState().queueExplanation(AppLanguage.RUSSIAN).contains("на телефоне"))
+        assertTrue(ServerSyncUiState(status = ServerSyncStatus.NEEDS_ATTENTION, failed = 1).queueExplanation(AppLanguage.RUSSIAN).contains("причину в записи"))
+        assertEquals("Connection not checked", ConnectionCheck.NOT_CHECKED.label(AppLanguage.ENGLISH))
+    }
+}

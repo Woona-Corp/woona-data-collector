@@ -167,6 +167,7 @@ class RecordingSyncWorker(
                 },
                 onProgress = { artifactId, uploadedBytes, available ->
                     database.markArtifactProgress(artifactId, uploadedBytes, available)
+                    setProgressAsync(workDataOf("artifact_id" to artifactId, "uploaded_bytes" to uploadedBytes, "verified" to available))
                 },
             )
             database.acceptServerRecording(client.fetchRecording(recordingId))

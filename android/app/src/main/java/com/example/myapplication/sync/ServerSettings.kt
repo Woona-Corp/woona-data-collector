@@ -44,6 +44,15 @@ data class ServerSyncUiState(
     val failed: Int = 0,
     val lastErrorMessage: String? = null,
     val restoring: Boolean = false,
+    val networkAvailable: Boolean? = null,
+    val unmeteredNetwork: Boolean? = null,
+    val workersRunning: Int = 0,
+    val workersQueued: Int = 0,
+    val connectionCheck: ConnectionCheck = ConnectionCheck.NOT_CHECKED,
+    val checkedAtUtc: String? = null,
+    val connectionError: String? = null,
+    val operationMessage: String? = null,
+    val accountId: String? = null,
 ) {
     val isConfigured: Boolean get() = status != ServerSyncStatus.NOT_CONFIGURED
 }
