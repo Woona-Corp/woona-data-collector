@@ -2,6 +2,9 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppViewModel
+    @State private var isServerEditorPresented = false
+    private var russian: Bool { appState.selectedLanguage == .russian }
+    private var isServerConfigured: Bool { !appState.serverBaseURL.isEmpty && !appState.serverToken.isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -40,30 +43,26 @@ struct SettingsView: View {
                 }
 
                 AppCard(title: appState.selectedLanguage == .russian ? "Серверное хранилище" : "Server storage") {
-                    TextField("https://server.example", text: $appState.serverBaseURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    SecureField(appState.selectedLanguage == .russian ? "Токен устройства" : "Device token", text: $appState.serverToken)
-                        .textInputAutocapitalization(.never)
-                    Toggle(appState.selectedLanguage == .russian ? "Только Wi-Fi" : "Wi-Fi only", isOn: $appState.serverWifiOnly)
                     HStack {
-                        Button(appState.selectedLanguage == .russian ? "Сохранить" : "Save") {
-                            appState.saveServerSettings()
+                        Text(isServerConfigured ? appState.serverBaseURL : (russian ? "Не настроено" : "Not configured"))
+                            .font(.subheadline)
+                        Spacer()
+                        Button(isServerConfigured ? (russian ? "Переподключить" : "Reconnect") : (russian ? "Подключить" : "Connect")) {
+                            isServerEditorPresented = true
                         }
-                        Button(appState.selectedLanguage == .russian ? "Проверить и восстановить" : "Test and restore") {
-                            appState.refreshFromServer()
-                        }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("server.configure")
                     }
-                    Button(appState.selectedLanguage == .russian ? "Повторить ошибки синхронизации" : "Retry failed sync") {
-                        appState.retryFailedSync()
-                    }
-                    Text(appState.selectedLanguage == .russian
-                         ? "Данные собак и сессий доступны в выбранном аккаунте."
-                         : "Dogs and sessions are available within the selected account.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    Toggle(russian ? "Только по Wi‑Fi" : "Wi-Fi only", isOn: $appState.serverWifiOnly)
+                        .disabled(!isServerConfigured)
+                        .onChange(of: appState.serverWifiOnly) { _, _ in appState.saveServerSettings() }
+                    Button(russian ? "Повторить выгрузку" : "Retry uploads") { appState.retryFailedSync() }
+                        .buttonStyle(.bordered)
+                        .disabled(!isServerConfigured)
+                    Button(russian ? "Восстановить с сервера" : "Restore from server") { appState.refreshFromServer() }
+                        .buttonStyle(.bordered)
+                        .disabled(!isServerConfigured)
+
                 }
                 .disabled(!appState.canChangeAccount)
                 }.padding(12)
@@ -71,6 +70,59 @@ struct SettingsView: View {
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle(appState.text(.settings))
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $isServerEditorPresented) {
+                ServerConnectionEditor(baseURL: appState.serverBaseURL, russian: russian) { baseURL, token in
+                    appState.serverBaseURL = baseURL
+                    appState.serverToken = token
+                    appState.saveServerSettings()
+                }
+            }
+        }
+    }
+}
+
+private struct ServerConnectionEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var baseURL: String
+    @State private var token = ""
+    @State private var error: String?
+    let russian: Bool
+    let onSave: (String, String) -> Void
+
+    init(baseURL: String, russian: Bool, onSave: @escaping (String, String) -> Void) {
+        _baseURL = State(initialValue: baseURL)
+        self.russian = russian
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Server URL", text: $baseURL)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                    .accessibilityIdentifier("server.url")
+                SecureField(russian ? "Новый токен" : "New token", text: $token)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityIdentifier("server.token")
+                if let error { Text(error).foregroundStyle(.red) }
+            }
+            .navigationTitle(russian ? "Подключение сервера" : "Server connection")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(russian ? "Отмена" : "Cancel") { dismiss() }
+                        .accessibilityIdentifier("server.cancel")
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(russian ? "Сохранить" : "Save") {
+                        let cleanToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !cleanToken.isEmpty else { error = russian ? "Введите токен" : "Enter token"; return }
+                        onSave(baseURL, cleanToken)
+                        dismiss()
+                    }
+                    .accessibilityIdentifier("server.save")
+                }
+            }
         }
     }
 }

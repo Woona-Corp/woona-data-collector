@@ -3,6 +3,35 @@ import XCTest
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    func testRecordingTimeMatchesAndroidFormatAcrossISOInputs() {
+        let zone = TimeZone(secondsFromGMT: 3 * 3600)!
+        XCTAssertEqual(recordingDisplayTime("2026-10-26T11:32:00Z", timeZone: zone), "26.10.2026 14:32")
+        XCTAssertEqual(recordingDisplayTime("2026-10-26T11:32:00.123Z", timeZone: zone), "26.10.2026 14:32")
+        XCTAssertEqual(recordingDisplayTime("unknown", timeZone: zone), "unknown")
+    }
+
+    func testApplyingAccountWithoutServerFiltersLocalDogs() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try WoonaStore(rootDirectory: directory)
+        var questionnaire = DogQuestionnaire()
+        questionnaire.schemaVersion = 2
+        questionnaire.animalId = "local-1"
+        questionnaire.numberOrName = "Local dog"
+        questionnaire.species = "собака"
+        let dog = try store.saveProfile(questionnaire)
+        let model = AppViewModel(store: store, uiTesting: true)
+        XCTAssertEqual(model.selectedDogProfile?.id, dog.id)
+        model.accountInput = "operator-1"
+        model.applyAccount()
+        XCTAssertEqual(model.selectedAccountID, "operator-1")
+        XCTAssertTrue(model.dogProfiles.isEmpty)
+        XCTAssertEqual(model.unassignedDogProfiles.map(\.id), [dog.id])
+        model.accountInput = ""
+        model.applyAccount()
+        XCTAssertEqual(model.selectedDogProfile?.id, dog.id)
+    }
+
     func testFirstEditAfterReloadPreservesProfileAndUpdatesExistingDog() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

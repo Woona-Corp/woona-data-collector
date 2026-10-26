@@ -50,6 +50,19 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertEqual(app.textFields["dog.editor.animalID"].value as? String, "ui-dog-2")
     }
 
+    func testServerConnectionRequiresTokenAndCancelDoesNotConfigure() {
+        app.tabBars.buttons["Settings"].tap()
+        let configure = app.buttons["server.configure"]
+        if !configure.isHittable { app.swipeUp() }
+        configure.tap()
+        XCTAssertTrue(app.textFields["server.url"].waitForExistence(timeout: 5))
+        app.buttons["server.save"].tap()
+        XCTAssertTrue(app.staticTexts["Enter token"].exists)
+        app.buttons["server.cancel"].tap()
+        XCTAssertTrue(configure.waitForExistence(timeout: 5))
+        XCTAssertEqual(configure.label, "Connect")
+    }
+
     func testFullscreenKeepsChartSelection() {
         app.tabBars.buttons["Charts"].tap()
         app.segmentedControls.buttons["AXL"].tap()
