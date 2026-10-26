@@ -157,6 +157,51 @@ final class PacketCaptureProcessorTests: XCTestCase {
         XCTAssertEqual(Array(rawBytes.suffix(packet.count)), packet)
     }
 
+    func testCorruptHeaderIsQuarantinedWithoutPoisoningNormalPacketsAndRawIsPreserved() async throws {
+        let harness = try makeHarness()
+        let block = makeSensorBlock(sensorType: 1, channelSamples: [[]])
+        let first = makeTestPacket(counter: 644, timerMillis: 658674, measurementCount: 1, blocks: [block])
+        let corrupt = makeTestPacket(counter: 3_222_815_366, timerMillis: 974731800, measurementCount: 1, blocks: [block])
+        let normal = makeTestPacket(counter: 648, timerMillis: 662678, measurementCount: 1, blocks: [block])
+        await harness.processor.submit(first)
+        await harness.processor.submit(corrupt)
+        await harness.processor.submit(normal)
+        await harness.processor.flush()
+        let lastUpdate = try XCTUnwrap(harness.updates.last)
+        XCTAssertEqual(lastUpdate.packetsReceived, 2)
+        XCTAssertEqual(lastUpdate.packetsLost, 3)
+        XCTAssertEqual(lastUpdate.packetsRejected, 1)
+        XCTAssertEqual(lastUpdate.timerRegressionRejects, 0)
+        let packetURL = await harness.processor.currentPacketFile()
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(packetURL)), Data(first + normal))
+        let rawURL = await harness.processor.currentRawFile()
+        XCTAssertNotNil(try Data(contentsOf: XCTUnwrap(rawURL)).range(of: Data(corrupt)))
+        XCTAssertTrue(harness.updates.contains { $0.lastPacketIssue?.contains("quarantined") == true })
+    }
+
+    func testRolloverAndConfirmedResetPreserveCaptureAndExposeNewClockSegment() async throws {
+        let cases: [([(UInt32, UInt32)], UInt64, String)] = [
+            ([(4_294_967_294, 4_294_967_290), (1, 5)], 2, "rollover"),
+            ([(100, 1000), (1, 5), (2, 6)], 0, "continuity unknown"),
+            ([(10, 100), (100010, 200), (100011, 201)], 100000, "confirmed")
+        ]
+        for (headers, expectedLost, issue) in cases {
+            let harness = try makeHarness()
+            let block = makeSensorBlock(sensorType: 2, channelSamples: [[10, 20]])
+            for (counter, timer) in headers {
+                await harness.processor.submit(makeTestPacket(counter: counter, timerMillis: timer,
+                                                             measurementCount: 1, blocks: [block]))
+            }
+            await harness.processor.flush()
+            let last = try XCTUnwrap(harness.updates.last)
+            XCTAssertEqual(last.packetsReceived, 2)
+            XCTAssertEqual(last.packetsLost, expectedLost)
+            XCTAssertEqual(last.packetsRejected, headers.count == 2 ? 0 : 1)
+            XCTAssertTrue(try XCTUnwrap(last.lastPacketIssue).contains(issue))
+            XCTAssertTrue(try XCTUnwrap(last.chartSamplesByStream.values.first?.first).startsNewSegment)
+        }
+    }
+
     func testTimerRegressionRejectsPacketAndDoesNotWriteIt() async throws {
         let harness = try makeHarness()
         let first = makeTestPacket(
@@ -582,7 +627,7 @@ final class PacketCaptureProcessorTests: XCTestCase {
         XCTAssertEqual(updates.map(\.packetsReceived), [1, 2])
     }
 
-    func testStorageWritesAreSerializedByCaptureActor() async throws {
+    func testConcurrentSubmissionsPreserveAllRawAndSerializeValidatedWrites() async throws {
         let harness = try makeHarness()
         let packets = (1...20).map { counter in
             makeTestPacket(
@@ -605,8 +650,15 @@ final class PacketCaptureProcessorTests: XCTestCase {
         let packetFileURL = await harness.processor.currentPacketFile()
         let packetFile = try XCTUnwrap(packetFileURL)
         let writtenBytes = try [UInt8](Data(contentsOf: packetFile))
-        XCTAssertEqual(writtenBytes.count, packets.reduce(0) { $0 + $1.count })
-        XCTAssertEqual(harness.updates.last?.fragmentsReceived, UInt64(packets.count))
+        // Concurrent tasks do not promise counter order. Sequence validation may
+        // quarantine out-of-order headers, but every original byte must survive.
+        let last = try XCTUnwrap(harness.updates.last)
+        XCTAssertEqual(UInt64(writtenBytes.count), last.packetsReceived * UInt64(packets[0].count))
+        XCTAssertEqual(last.packetsReceived + last.packetsRejected, UInt64(packets.count))
+        XCTAssertEqual(last.fragmentsReceived, UInt64(packets.count))
+        let rawURL = await harness.processor.currentRawFile()
+        let raw = try Data(contentsOf: XCTUnwrap(rawURL))
+        for packet in packets { XCTAssertNotNil(raw.range(of: Data(packet))) }
     }
 
     private func makeHarness(

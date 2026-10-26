@@ -6,6 +6,8 @@ import com.example.myapplication.localization.TextResolver
 import com.example.myapplication.protocol.PacketAssembler
 import com.example.myapplication.protocol.PacketAssemblyFailureReason
 import com.example.myapplication.protocol.PacketAssemblyResult
+import com.example.myapplication.protocol.PacketSequenceGuard
+import com.example.myapplication.protocol.PacketSequenceIssue
 import com.example.myapplication.protocol.PacketStatsTracker
 import com.example.myapplication.protocol.PacketValidationFailureReason
 import com.example.myapplication.protocol.PacketValidationResult
@@ -119,6 +121,7 @@ class PacketCaptureProcessor(
 
     @Volatile
     private var lastAcceptedTimerMillis = UNINITIALIZED_TIMER_MILLIS
+    private val packetSequenceGuard = PacketSequenceGuard()
 
     @Volatile
     private var timerRegressionRejects = 0L
@@ -240,6 +243,7 @@ class PacketCaptureProcessor(
                 }
                 packetAssembler.reset()
                 packetStats.reset()
+                packetSequenceGuard.reset()
                 rejectedPackets = 0L
                 lastAcceptedTimerMillis = UNINITIALIZED_TIMER_MILLIS
                 timerRegressionRejects = 0L
@@ -455,12 +459,16 @@ class PacketCaptureProcessor(
                     is PacketAssemblyResult.Completed -> {
                         when (val validation = packetValidator.validate(packet.packet.bytes)) {
                             is PacketValidationResult.Accepted -> {
-                                if (lastAcceptedTimerMillis != UNINITIALIZED_TIMER_MILLIS &&
-                                    validation.packet.timerMillis < lastAcceptedTimerMillis
-                                ) {
-                                    val timerRegressionMessage = appTextResolver.getString(R.string.packet_timer_regressed)
+                                val sequenceDecision = packetSequenceGuard.evaluate(
+                                    validation.packet.counter, validation.packet.timerMillis,
+                                )
+                                if (!sequenceDecision.accepted) {
+                                    val timerRegressionMessage = when (sequenceDecision.issue) {
+                                        PacketSequenceIssue.TIMER_REGRESSION -> appTextResolver.getString(R.string.packet_timer_regressed)
+                                        else -> "Packet counter/timer discontinuity; header quarantined, raw data preserved"
+                                    }
                                     registerRejection(timerRegressionMessage)
-                                    timerRegressionRejects++
+                                    if (sequenceDecision.issue == PacketSequenceIssue.TIMER_REGRESSION) timerRegressionRejects++
                                     val statsSnapshot = packetStats.snapshot()
                                     updates += PacketProcessingUpdate(
                                         packetsReceived = statsSnapshot.packetsReceived,
@@ -543,7 +551,20 @@ class PacketCaptureProcessor(
                                     validation.packet.timerMillis,
                                 )
                                 lastAcceptedTimerMillis = validation.packet.timerMillis
-                                val recordResult = packetStats.record(validation.packet.counter)
+                                packetSequenceGuard.accept(validation.packet.counter, validation.packet.timerMillis)
+                                val recordResult = packetStats.record(
+                                    validation.packet.counter,
+                                    confirmedDiscontinuity = sequenceDecision.confirmedDiscontinuity,
+                                )
+                                val continuityMessage = when {
+                                    recordResult.lossCountUnknown -> "Counter continuity unknown; packet loss cannot be measured across this reset/discontinuity"
+                                    sequenceDecision.confirmedDiscontinuity -> "Counter/timer discontinuity confirmed by consecutive packets; new clock segment, raw data preserved"
+                                    sequenceDecision.rolledOver -> "Unsigned 32-bit counter/timer rollover; new clock segment"
+                                    else -> null
+                                }
+                                if (continuityMessage != null) {
+                                    diagnosticEvents += createDiagnosticEvent(PacketDiagnosticType.INFO, continuityMessage)
+                                }
                                 if (recordResult.gapCount > 0) {
                                     diagnosticEvents += createDiagnosticEvent(
                                         type = PacketDiagnosticType.GAP,
@@ -570,9 +591,10 @@ class PacketCaptureProcessor(
                                     fragmentsDropped = droppedFragmentCount.get(),
                                     chartSamplesByStream = buildChartSamplesByStream(
                                         packet = validation.packet,
-                                        previousTimerMillis = if (recordResult.gapCount > 0) null else previousTimerMillis,
-                                        startsNewSegment = recordResult.gapCount > 0,
+                                        previousTimerMillis = if (recordResult.gapCount > 0 || sequenceDecision.startsNewSegment) null else previousTimerMillis,
+                                        startsNewSegment = recordResult.gapCount > 0 || sequenceDecision.startsNewSegment,
                                     ),
+                                    lastPacketIssue = continuityMessage,
                                     rejectionBreakdown = buildRejectionBreakdown(),
                                     diagnosticEvents = diagnosticEvents,
                                 )

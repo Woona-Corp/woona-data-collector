@@ -6,6 +6,7 @@ actor PacketCaptureProcessor {
     private let packetTimelineFileStore: PacketTimelineFileStore?
     private let diagnosticLogFileStore: DiagnosticLogFileStore
     private let packetAssembler: PacketAssembler
+    private let packetSequenceGuard = PacketSequenceGuard()
     private let packetStats: PacketStatsTracker
     private let packetValidator: PacketValidator
     private let wallClockMillisProvider: () -> Int64
@@ -167,6 +168,7 @@ actor PacketCaptureProcessor {
 
         do {
             packetStats.reset()
+            packetSequenceGuard.reset()
             packetsRejected = 0
             timerRegressionRejects = 0
             receivedFragmentCount = 0
@@ -376,10 +378,13 @@ actor PacketCaptureProcessor {
             ]
 
         case .accepted(let packet):
-            if let lastAcceptedTimerMillis, packet.timerMillis < lastAcceptedTimerMillis {
-                let message = "Packet timer regressed"
+            let sequenceDecision = packetSequenceGuard.evaluate(counter: packet.counter, timerMillis: packet.timerMillis)
+            if !sequenceDecision.accepted {
+                let message = sequenceDecision.issue == .timerRegression
+                    ? "Packet timer regressed"
+                    : "Packet counter/timer discontinuity; header quarantined, raw data preserved"
                 registerRejection(message)
-                timerRegressionRejects += 1
+                if sequenceDecision.issue == .timerRegression { timerRegressionRejects += 1 }
                 return [
                     createStatsUpdate(
                         lastPacketIssue: message,
@@ -439,8 +444,22 @@ actor PacketCaptureProcessor {
 
             let previousTimer = lastAcceptedTimerMillis
             lastAcceptedTimerMillis = packet.timerMillis
-            let recordResult = packetStats.record(counter: packet.counter)
+            packetSequenceGuard.accept(counter: packet.counter, timerMillis: packet.timerMillis)
+            let recordResult = packetStats.record(counter: packet.counter, confirmedDiscontinuity: sequenceDecision.confirmedDiscontinuity)
             var events: [PacketDiagnosticEvent] = []
+            let continuityMessage: String?
+            if recordResult.lossCountUnknown {
+                continuityMessage = "Counter continuity unknown; packet loss cannot be measured across this reset/discontinuity"
+            } else if sequenceDecision.confirmedDiscontinuity {
+                continuityMessage = "Counter/timer discontinuity confirmed by consecutive packets; new clock segment, raw data preserved"
+            } else if sequenceDecision.rolledOver {
+                continuityMessage = "Unsigned 32-bit counter/timer rollover; new clock segment"
+            } else {
+                continuityMessage = nil
+            }
+            if let continuityMessage {
+                events.append(createDiagnosticEvent(type: .info, message: continuityMessage))
+            }
 
             if recordResult.gapCount > 0 {
                 events.append(
@@ -472,9 +491,10 @@ actor PacketCaptureProcessor {
                     rawBytesReceived: receivedRawBytes,
                     chartSamplesByStream: buildChartSamplesByStream(
                         packet: packet,
-                        previousTimerMillis: recordResult.gapCount > 0 ? nil : previousTimer,
-                        startsNewSegment: recordResult.gapCount > 0
+                        previousTimerMillis: recordResult.gapCount > 0 || sequenceDecision.startsNewSegment ? nil : previousTimer,
+                        startsNewSegment: recordResult.gapCount > 0 || sequenceDecision.startsNewSegment
                     ),
+                    lastPacketIssue: continuityMessage,
                     rejectionBreakdown: buildRejectionBreakdown(),
                     diagnosticEvents: events
                 )
