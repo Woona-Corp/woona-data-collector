@@ -50,7 +50,6 @@ struct AppRootView: View {
             .background(Color.woonaSurface)
         }
         .tint(usesDarkPalette ? WoonaPalette.color(0x7ACCC5) : WoonaPalette.color(0x146B74))
-        .foregroundStyle(Color.woonaInk)
         .preferredColorScheme(preferredColorScheme)
         .sheet(item: Binding(
             get: { appState.preparedExport },
@@ -154,6 +153,7 @@ enum WoonaPalette {
     }
 }
 extension Color {
+    static var woonaOnPrimary: Color { WoonaPalette.adaptive(light: 0xFFFFFF, dark: 0x0B3B40) }
     static var woonaSurface: Color { WoonaPalette.adaptive(light: 0xFFFFFF, dark: 0x182C38) }
     static var woonaBackground: Color { WoonaPalette.adaptive(light: 0xF4F7FA, dark: 0x101E27) }
     static var woonaInk: Color { WoonaPalette.adaptive(light: 0x172B3C, dark: 0xE3EDF1) }

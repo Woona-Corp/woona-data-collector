@@ -39,7 +39,7 @@ struct AccountControls: View {
             Text(russian ? "Уникальный идентификатор без пароля. Пустое поле — данные без аккаунта." : "Unique identifier without a password. Leave empty to show unassigned data.")
                 .font(.footnote).foregroundStyle(.secondary)
             Button(russian ? "Применить аккаунт" : "Apply account") { appState.applyAccount() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary)
                 .accessibilityIdentifier("account.apply")
                 .disabled(!appState.canChangeAccount)
             if appState.isAccountOperationRunning { ProgressView() }
@@ -448,7 +448,7 @@ struct OverviewView: View {
                             if appState.isRecording { appState.stopActiveCapture() }
                             else { appState.startActiveCapture() }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary)
                     }
                     }
                 }
@@ -484,7 +484,7 @@ struct OverviewView: View {
                         Button(appState.selectedLanguage == .russian ? "Новая собака" : "New dog") {
                             dogEditorPresentation = DogProfileEditorPresentation(profile: nil)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary)
                         .disabled(!appState.canSelectAnimal)
                         .accessibilityIdentifier("dog.new")
                         Button(appState.selectedLanguage == .russian ? "Изменить" : "Edit") {
@@ -627,7 +627,7 @@ struct OverviewView: View {
                             Button(russian ? "ОТКЛЮЧИТЬ" : "DISCONNECT") { appState.disconnect() }.buttonStyle(.bordered)
                         } else {
                             Button(russian ? "Новое соединение" : "New connection") { pendingDevice = nil; pendingReplaySelection = false; pendingReplayURL = nil; isBLESelectionPresented = true }
-                                .buttonStyle(.borderedProminent).accessibilityIdentifier("devices.newConnection")
+                                .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary).accessibilityIdentifier("devices.newConnection")
                                 .disabled(appState.selectedDogProfile == nil)
                             if appState.selectedDogProfile == nil {
                                 Text(russian ? "Сначала выберите или создайте анкету во вкладке «Животные»." : "First select or create an animal in Animals.").font(.footnote)
@@ -795,7 +795,7 @@ struct OverviewView: View {
                     Text(russian ? "Запустите сканирование, выберите найденное устройство или воспроизведите сохраненный дамп." : "Start a scan, pick a discovered device, or replay a captured dump.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Button(appState.isScanning ? (russian ? "ИДЕТ СКАНИРОВАНИЕ..." : "SCANNING...") : (russian ? "НАЧАТЬ ПОИСК" : "START SCAN")) { appState.startScanning() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary)
                         .frame(maxWidth: .infinity)
                         .disabled(appState.isScanning || appState.selectedDogProfile == nil)
                         .accessibilityIdentifier("devices.scan")
