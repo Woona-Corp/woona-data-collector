@@ -54,3 +54,11 @@ XCUITest OverviewParityTests проверяет положение аккаун�
 Скриншоты английского светлого и русского тёмного Overview просмотрены.
 На физическом iPhone этот UI ещё не проверен. Указанные выше расхождения
 не закрываются этим результатом.
+
+
+iOS 1.3.9 (12201) с этим изменением загружен в TestFlight:
+[release run](https://github.com/ashromanov/woona-data-collector/actions/runs/40362142464)
+success. Apple VALID; Internal Testing — IN_BETA_TESTING (2 тестера).
+External Testing (6 тестеров) пока без новой сборки: Apple API отклонил
+назначение группы с 403 (недостаточно прав текущего ключа).
+Внешнее beta review не отправлено; физическая установка iPhone не подтверждена.
