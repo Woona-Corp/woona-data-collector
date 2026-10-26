@@ -166,12 +166,12 @@ struct CompleteDataArchive: Sendable {
         deinit { sqlite3_close(handle) }
         func query(_ sql: String, _ body: (OpaquePointer) throws -> Void) throws {
             var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw error() }
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw error("prepare: " + sql) }
             defer { sqlite3_finalize(statement) }
             while true {
                 let status = sqlite3_step(statement)
                 if status == SQLITE_DONE { break }
-                guard status == SQLITE_ROW else { throw error() }
+                guard status == SQLITE_ROW else { throw error("step: " + sql) }
                 try body(statement)
             }
         }
@@ -182,17 +182,25 @@ struct CompleteDataArchive: Sendable {
         }
         func snapshot(to url: URL, checkCancelled: () throws -> Void) throws {
             let target = try Database(url, writable: true)
-            guard let backup = sqlite3_backup_init(target.handle, "main", handle, "main") else { throw target.error() }
-            defer { sqlite3_backup_finish(backup) }
-            let deadline = Date().addingTimeInterval(30)
-            while true {
-                try checkCancelled()
-                let result = sqlite3_backup_step(backup, 256)
-                if result == SQLITE_DONE { break }
-                guard result == SQLITE_OK || result == SQLITE_BUSY || result == SQLITE_LOCKED else { throw target.error() }
-                guard Date() < deadline else { throw completeArchiveError("Database is busy. Wait for synchronization to finish, then retry export.") }
-                if result != SQLITE_OK { sqlite3_sleep(20) }
+            // Keep the owning connection alive until the C backup handle is finished.
+            // The backup copies the WAL journal flags from the source database header;
+            // finalize it before making a standalone, rollback-journal snapshot.
+            try withExtendedLifetime(target) {
+                guard let backup = sqlite3_backup_init(target.handle, "main", handle, "main") else { throw target.error("backup_init") }
+                defer { sqlite3_backup_finish(backup) }
+                let deadline = Date().addingTimeInterval(30)
+                while true {
+                    try checkCancelled()
+                    let result = sqlite3_backup_step(backup, 256)
+                    if result == SQLITE_DONE { break }
+                    guard result == SQLITE_OK || result == SQLITE_BUSY || result == SQLITE_LOCKED else { throw target.error("backup_step") }
+                    guard Date() < deadline else { throw completeArchiveError("Database is busy. Wait for synchronization to finish, then retry export.") }
+                    if result != SQLITE_OK { sqlite3_sleep(20) }
+                }
             }
+            var journalMode = ""
+            try target.query("PRAGMA journal_mode=DELETE") { journalMode = String(cString: sqlite3_column_text($0, 0)) }
+            guard journalMode.lowercased() == "delete" else { throw completeArchiveError("SQLite snapshot could not be made self-contained; original data is unchanged") }
         }
         func metadata(root: URL) throws -> [String: Any] {
             var integrity = ""
@@ -219,7 +227,7 @@ struct CompleteDataArchive: Sendable {
             }
             return ["snapshot": "data/Woona/woona.sqlite", "integrityCheck": "ok", "counts": counts, "unavailableLocalArtifacts": missing, "unavailableLocalArtifactCount": missing.count, "unfinalizedRecordings": unfinished, "unfinalizedRecordingCount": unfinished.count]
         }
-        private func error() -> WoonaStoreError { .sqlite(String(cString: sqlite3_errmsg(handle))) }
+        private func error(_ operation: String) -> WoonaStoreError { .sqlite("SQLite archive " + operation + " failed: " + String(cString: sqlite3_errmsg(handle))) }
     }
 }
 
