@@ -84,6 +84,15 @@ def inspect_guard(base, project, token):
     if api_env.get('WOONA_DEBUG_TOKEN') != token:
         raise SafetyError('Supplied token does not match isolated API environment')
     db_env = dict(value.split('=', 1) for value in database['Config']['Env'] if '=' in value)
+    database_target = urlsplit(api_env.get('DATABASE_URL', ''))
+    if (database_target.scheme != 'postgresql+psycopg' or database_target.hostname != 'postgres'
+            or database_target.port not in (None, 5432)
+            or database_target.path != '/' + db_env['POSTGRES_DB']
+            or database_target.username != db_env['POSTGRES_USER']
+            or database_target.password != db_env['POSTGRES_PASSWORD']
+            or database_target.query or database_target.fragment
+            or api_env.get('WOONA_STORAGE_ROOT') != '/srv/woona'):
+        raise SafetyError('API database or storage does not match the isolated service')
     for mount in database['Mounts']:
         if mount.get('Name') and not mount['Name'].startswith(project + '_'):
             raise SafetyError('Database volume is outside the isolated project')
@@ -272,6 +281,10 @@ def fuzz(client, fixture):
     case('missing_or_invalid_token', 'GET', '/v1/me', token='invalid-secret-canary', expected=(401,))
     for target in [path, path + '/sync-status', resource, '/v1/dogs/' + fixture['manifest']['dog']['id']]:
         case('cross_account_' + target.rsplit('/', 1)[-1], 'GET', target, account=client.account + '-other', expected=(404,))
+    case('cross_account_recording_write', 'PUT', path, fixture['manifest'], account=client.account + '-other', expected=(404,))
+    case('cross_account_profile_write', 'PUT', profile_path(fixture), fixture['profile'], account=client.account + '-other', expected=(404,))
+    case('cross_account_complete', 'POST', path + '/complete', {}, account=client.account + '-other', expected=(404,))
+    case('cross_account_file_write', 'PATCH', resource, b'x', headers={'Upload-Offset':'0'}, account=client.account + '-other', binary=True, expected=(404,))
     foreign = json.loads(client.request('GET', '/v1/dogs', account=client.account + '-other', expected={200}, phase='negative-fuzz')[2])
     assert not foreign['items']
     for value in ['bad id', 'x' * 1000]:
