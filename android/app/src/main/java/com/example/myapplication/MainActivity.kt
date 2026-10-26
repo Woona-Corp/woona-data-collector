@@ -271,11 +271,13 @@ class MainActivity : ComponentActivity() {
             ) {
                 val uiState = deviceFeatureController.uiState
                 AppThemeEntryPoint.Render(themeMode = selectedThemeMode) {
+                    val serverMutationBlock = serverMutationBlockReason(serverSyncState.uploading)
                     AppShellEntryPoint.Render(
                         uiState = uiState,
                         selectedLanguage = selectedLanguage,
                         selectedThemeMode = selectedThemeMode,
-                        serverSyncState = serverSyncState,
+                        serverSyncState = serverSyncState.copy(mutationsAllowed = serverMutationBlock == null, mutationBlockReason = serverMutationBlock,
+                            networkPolicyAllowed = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && serverSyncState.workersRunning == 0),
                         onStartScan = {
                             if (accountBusy || isServerRestoreInProgress) {
                                 deviceFeatureController.showErrorOnMainThread(if (selectedLanguage == AppLanguage.RUSSIAN) "Дождитесь завершения операции с аккаунтом или восстановления" else "Wait for the account or restore operation to finish", null)
@@ -308,7 +310,9 @@ class MainActivity : ComponentActivity() {
                             selectedThemeMode = it
                             applyAppThemeMode(this, it)
                         },
-                        onServerConfigure = { isServerSettingsVisible = true },
+                        onServerConfigure = {
+                            if (!accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && woonaDatabase.serverSyncCounts().uploading == 0) isServerSettingsVisible = true
+                        },
                         onServerWifiOnlyChange = {
                             if (!accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && serverSyncState.workersRunning == 0) {
                                 serverSettingsStore.setWifiOnly(it)
@@ -319,7 +323,8 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         },
-                        onServerRetryPending = {
+                        onServerRetryPending = retryPending@{
+                            if (accountBusy || isServerRestoreInProgress || deviceFeatureController.isCaptureActive() || woonaDatabase.serverSyncCounts().uploading > 0) return@retryPending
                             woonaDatabase.resetFailedSync()
                             ServerSyncScheduler.enqueuePending(applicationContext)
                             refreshServerState()
@@ -466,8 +471,9 @@ class MainActivity : ComponentActivity() {
                                     profileId = editingProfile?.id,
                                     accountId = serverSettingsStore.get().accountId,
                                 ) }.getOrElse { error ->
-                                    deviceFeatureController.showErrorOnMainThread(if (selectedLanguage == AppLanguage.RUSSIAN) "Анкета животного не сохранена; черновик остается открытым" else "Animal questionnaire was not saved; the draft stays open", error)
-                                    return@DogQuestionnaireDialog
+                                    throw IllegalStateException(if (selectedLanguage == AppLanguage.RUSSIAN)
+                                        "Анкета не сохранена на устройстве. Черновик остаётся открытым; устраните причину и повторите сохранение.\n${error.message ?: error.javaClass.simpleName}"
+                                        else "The questionnaire was not saved on this device. Your draft remains open; correct the cause and retry.\n${error.message ?: error.javaClass.simpleName}", error)
                                 }
                                 editingProfile = null
                                 isDogQuestionnaireVisible = false
@@ -728,6 +734,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun serverMutationBlockReason(uploading: Int): String? = when {
+        deviceFeatureController.isCaptureActive() -> "capture"
+        isServerRestoreInProgress -> "restore"
+        uploading > 0 -> "upload"
+        accountBusy -> "account"
+        else -> null
+    }
+
     private fun refreshServerState() {
         val settings = serverSettingsStore.get()
         if (reportConfiguration != null && reportConfiguration != settings) {
@@ -743,7 +757,8 @@ class MainActivity : ComponentActivity() {
             status = when {
                 !settings.isConfigured -> ServerSyncStatus.NOT_CONFIGURED
                 counts.failed > 0 -> ServerSyncStatus.NEEDS_ATTENTION
-                counts.uploading > 0 -> ServerSyncStatus.UPLOADING
+                workersRunning > 0 -> ServerSyncStatus.UPLOADING
+                counts.uploading > 0 || counts.pending > 0 -> ServerSyncStatus.WAITING
                 else -> ServerSyncStatus.READY
             },
             baseUrl = settings.baseUrl,
@@ -754,6 +769,9 @@ class MainActivity : ComponentActivity() {
             failed = counts.failed,
             lastErrorMessage = counts.lastErrorMessage,
             restoring = isServerRestoreInProgress,
+            mutationsAllowed = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && counts.uploading == 0,
+            networkPolicyAllowed = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && workersRunning == 0,
+            mutationBlockReason = serverMutationBlockReason(counts.uploading),
             networkAvailable = networkCapabilities()?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true,
             unmeteredNetwork = networkCapabilities()?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true,
             workersRunning = workersRunning,

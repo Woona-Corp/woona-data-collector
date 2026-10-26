@@ -17,8 +17,8 @@ import org.junit.Test
 class RecordingHistoryActionsTest {
     @get:Rule val compose = createComposeRule()
 
-    private fun show(state: String, onRemove: (String) -> Unit = {}) {
-        val record = Recording("session", "dog", "dog-v1", RecordingSource.LIVE, RecordingStatus.FAILED,
+    private fun show(state: String, source: RecordingSource = RecordingSource.LIVE, onRemove: (String) -> Unit = {}) {
+        val record = Recording("session", "dog", "dog-v1", source, RecordingStatus.FAILED,
             "5", true, "2026-10-25T12:06:00Z", "2026-10-25T12:16:00Z", "UTC", null, "session",
             artifacts = listOf(Artifact("file", "session", ArtifactType.PACKET, "packets.bin", "application/octet-stream", "session/packets.bin", 1, "hash", "both", "available", 1, "2026-10-25T12:06:00Z")),
             serverSyncState = state, captureErrorCode = "gatt_error", captureErrorMessage = "Ошибка GATT-подключения: 8")
@@ -36,9 +36,14 @@ class RecordingHistoryActionsTest {
     @Test fun captureCauseAndSuccessfulUploadAreIndependentAndDetailsExpand() {
         show("synced")
         compose.onNodeWithText("GATT 8", substring = true).performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Загрузка: файлы подтверждены сервером").assertExists()
+        compose.onNodeWithText("Загрузка: загрузка была подтверждена; актуальную копию проверьте ниже").assertExists()
         compose.onNodeWithText("Подробности ошибки").performScrollTo().performClick()
         compose.onNodeWithText("Ошибка GATT-подключения: 8", substring = true).assertExists()
+    }
+
+    @Test fun replayHistoryExplicitlyIdentifiesItsSource() {
+        show("synced", source = RecordingSource.REPLAY)
+        compose.onNodeWithText("Источник: воспроизведение файла").performScrollTo().assertIsDisplayed()
     }
 
     @Test fun removalRequiresConfirmationAndCancelDoesNothing() {

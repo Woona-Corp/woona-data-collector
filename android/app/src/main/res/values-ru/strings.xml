@@ -62,7 +62,7 @@
     <string name="ble_devices_desc">Запустите сканирование, выберите найденное устройство или воспроизведите сохраненный дамп.</string>
     <string name="action_start_scan">НАЧАТЬ ПОИСК</string>
     <string name="action_scanning">ИДЕТ СКАНИРОВАНИЕ...</string>
-    <string name="action_replay_bin_debug">Загрузить файл (debug)</string>
+    <string name="action_replay_bin_debug">Воспроизвести локальный файл (отладка)</string>
     <string name="action_cancel_replay_preparation">Отменить подготовку реплея</string>
     <string name="ble_devices_scanning_empty">Идет поиск ближайших BLE-устройств...</string>
     <string name="ble_devices_empty">Устройства еще не найдены.</string>
@@ -219,4 +219,5 @@
     <string name="nav_video">Видео</string>
     <string name="nav_records">Записи</string>
     <string name="new_connection">Новое соединение</string>
+    <string name="server_sync_waiting">Ожидает выгрузки</string>
 </resources>

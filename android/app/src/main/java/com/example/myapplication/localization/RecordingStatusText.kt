@@ -135,11 +135,20 @@ internal fun recordingUploadText(state: String, message: String?, language: AppL
     val reason = when (state) {
         "pending" -> errorText(language, "ожидает отправки на сервер", "waiting to upload to the server")
         "uploading" -> errorText(language, "отправляется на сервер", "uploading to the server")
-        "synced", "complete" -> errorText(language, "файлы подтверждены сервером", "files confirmed by the server")
+        "synced", "complete" -> errorText(language, "загрузка была подтверждена; актуальную копию проверьте ниже", "upload was confirmed; check the current server copy below")
         "remote" -> errorText(language, "сессия получена с сервера", "session restored from the server")
         "retryable_error" -> errorText(language, "не завершена, запланирован повтор. ", "incomplete; a retry is scheduled. ") + recordingUploadErrorText(message, language)
         "permanent_error" -> errorText(language, "остановлена, требуется исправление. ", "stopped; action is required. ") + recordingUploadErrorText(message, language)
         else -> errorText(language, "неизвестный статус", "unknown status") + " ($state)"
     }
     return errorText(language, "Загрузка: ", "Upload: ") + reason
+}
+
+internal fun recordingSourceText(source: String, language: AppLanguage): String {
+    val value = when (source) {
+        "live" -> errorText(language, "запись с датчика", "sensor recording")
+        "replay" -> errorText(language, "воспроизведение файла", "local file replay")
+        else -> errorText(language, "неизвестен", "unknown") + " ($source)"
+    }
+    return errorText(language, "Источник: ", "Source: ") + value
 }

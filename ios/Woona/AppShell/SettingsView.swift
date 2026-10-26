@@ -80,19 +80,27 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.bordered)
                         .accessibilityIdentifier("server.configure")
+                        .disabled(!appState.canChangeAccount)
                     }
-                    Toggle(russian ? "Только по Wi‑Fi" : "Wi-Fi only", isOn: $appState.serverWifiOnly)
-                        .disabled(!isServerConfigured)
-                        .onChange(of: appState.serverWifiOnly) { _, _ in appState.saveServerSettings() }
+                    Toggle(russian ? "Только по Wi‑Fi" : "Wi-Fi only", isOn: Binding(
+                        get: { appState.serverWifiOnly },
+                        set: { value in
+                            _ = appState.updateNetworkPolicy(wifiOnly: value)
+                        }
+                    ))
+                        .disabled(!isServerConfigured || !appState.canChangeNetworkPolicy)
                     Button(russian ? "Повторить выгрузку" : "Retry uploads") { appState.retryFailedSync() }
                         .buttonStyle(.bordered)
-                        .disabled(!isServerConfigured)
+                        .disabled(!isServerConfigured || !appState.canChangeAccount)
                     Button(russian ? "Восстановить с сервера" : "Restore from server") { appState.refreshFromServer() }
                         .buttonStyle(.bordered)
-                        .disabled(!isServerConfigured || appState.isAccountOperationRunning)
+                        .disabled(!isServerConfigured || !appState.canChangeAccount)
 
+                    if let reason = appState.serverMutationBlockedReason {
+                        Text(reason).font(.footnote).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("server.mutationBlockReason")
+                    }
                 }
-                .disabled(!appState.canChangeAccount)
                 }.padding(12)
             }
             .background(Color(uiColor: .systemGroupedBackground))
@@ -100,9 +108,16 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $isServerEditorPresented) {
                 ServerConnectionEditor(baseURL: appState.serverBaseURL, russian: russian) { baseURL, token in
-                    appState.serverBaseURL = baseURL
+                    guard appState.canChangeAccount else { throw WoonaStoreError.invalidData(appState.serverMutationBlockedReason ?? "Server settings are busy") }
+                    let normalizedURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    _ = try WoonaServerClient(configuration: ServerConfiguration(baseURL: normalizedURL, wifiOnly: appState.serverWifiOnly, accountID: appState.selectedAccountID), token: token)
+                    let oldURL = appState.serverBaseURL, oldToken = appState.serverToken
+                    appState.serverBaseURL = normalizedURL
                     appState.serverToken = token
-                    appState.saveServerSettings()
+                    if !appState.saveServerSettings() {
+                        appState.serverBaseURL = oldURL; appState.serverToken = oldToken
+                        throw WoonaStoreError.invalidData(appState.errorMessage ?? "Server settings could not be saved")
+                    }
                 }
             }
         }
@@ -133,9 +148,9 @@ private struct ServerConnectionEditor: View {
     @State private var token = ""
     @State private var error: String?
     let russian: Bool
-    let onSave: (String, String) -> Void
+    let onSave: (String, String) throws -> Void
 
-    init(baseURL: String, russian: Bool, onSave: @escaping (String, String) -> Void) {
+    init(baseURL: String, russian: Bool, onSave: @escaping (String, String) throws -> Void) {
         _baseURL = State(initialValue: baseURL)
         self.russian = russian
         self.onSave = onSave
@@ -163,8 +178,8 @@ private struct ServerConnectionEditor: View {
                     Button(russian ? "Сохранить" : "Save") {
                         let cleanToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !cleanToken.isEmpty else { error = russian ? "Введите токен" : "Enter token"; return }
-                        onSave(baseURL, cleanToken)
-                        dismiss()
+                        do { try onSave(baseURL, cleanToken); dismiss() }
+                        catch { self.error = (russian ? "Настройки сервера не сохранены. Исправьте причину и повторите.\n" : "Server settings were not saved. Correct the cause and retry.\n") + error.localizedDescription }
                     }
                     .accessibilityIdentifier("server.save")
                 }

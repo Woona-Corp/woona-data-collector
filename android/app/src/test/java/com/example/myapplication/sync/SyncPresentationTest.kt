@@ -24,7 +24,7 @@ class SyncPresentationTest {
         assertTrue(state.copy(networkAvailable = true, unmeteredNetwork = true).queueExplanation(AppLanguage.ENGLISH).contains("waiting for the system"))
     }
     @Test fun uploadedBytesDoNotClaimIntegrityOrCaptureSuccess() {
-        val text = ServerSyncUiState(status = ServerSyncStatus.UPLOADING, uploading = 1).queueExplanation(AppLanguage.RUSSIAN)
+        val text = ServerSyncUiState(status = ServerSyncStatus.UPLOADING, uploading = 1, workersRunning = 1).queueExplanation(AppLanguage.RUSSIAN)
         assertTrue(text.contains("ещё не означают"))
         assertFalse(text.contains("успешная запись"))
     }
@@ -33,4 +33,20 @@ class SyncPresentationTest {
         assertTrue(ServerSyncUiState(status = ServerSyncStatus.NEEDS_ATTENTION, failed = 1).queueExplanation(AppLanguage.RUSSIAN).contains("причину в записи"))
         assertEquals("Connection not checked", ConnectionCheck.NOT_CHECKED.label(AppLanguage.ENGLISH))
     }
+    @Test fun mutationBlockExplainsWhyReadOnlyChecksStillRemainAvailable() {
+        val state = ServerSyncUiState(status = ServerSyncStatus.READY, mutationsAllowed = false, mutationBlockReason = "capture")
+        assertTrue(state.isConfigured)
+        assertEquals(ConnectionCheck.NOT_CHECKED, state.connectionCheck)
+        assertTrue(state.mutationBlockExplanation(AppLanguage.RUSSIAN).contains("Завершите текущую сессию"))
+        assertTrue(state.copy(mutationBlockReason = "upload").mutationBlockExplanation(AppLanguage.ENGLISH).contains("current upload"))
+    }
+
+    @Test fun savedUploadingWithoutRunningWorkerIsWaitingAndPolicyCanBeChanged() {
+        val state = ServerSyncUiState(status = ServerSyncStatus.WAITING, uploading = 1,
+            workersRunning = 0, mutationsAllowed = false, networkPolicyAllowed = true)
+        assertTrue(state.queueExplanation(AppLanguage.ENGLISH).contains("No background job is currently running"))
+        assertFalse(state.queueExplanation(AppLanguage.ENGLISH).contains("Processing the queue"))
+        assertTrue(state.networkPolicyAllowed)
+    }
+
 }

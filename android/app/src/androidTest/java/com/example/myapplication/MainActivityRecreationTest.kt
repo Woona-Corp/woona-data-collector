@@ -62,7 +62,7 @@ class MainActivityRecreationTest {
             ).performClick()
             composeRule.onNodeWithText("New connection").performClick()
             composeRule
-                .onNodeWithText("Upload binary (debug)")
+                .onNodeWithText("Replay local file (debug)")
                 .performScrollTo()
                 .performClick()
             composeRule

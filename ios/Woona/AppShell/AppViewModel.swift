@@ -92,6 +92,7 @@ final class AppViewModel: ObservableObject {
         if serverWifiOnly && networkUnmetered == false { return ru ? "Отправка ждёт Wi-Fi или сети без тарификации. Подключите её либо отключите ограничение." : "Uploads are waiting for Wi-Fi or an unmetered network. Connect or disable the restriction." }
         if uploadFailed > 0 { return ru ? "Есть ошибки доставки. Откройте причину в записи; повторите отправку после устранения причины." : "Some transfers failed. Open the recording for its cause; retry after correcting it." }
         if !syncingRecordingIDs.isEmpty || uploadingProfileCount > 0 { return ru ? "Обрабатываем очередь: подготовка, передача и проверка целостности. Переданные байты ещё не подтверждают копию." : "Processing the queue: preparation, transfer and integrity checks. Transferred bytes alone do not confirm a verified copy." }
+        if uploadRunning > 0 { return ru ? "Сохранены незавершённые передачи. Фоновая задача сейчас не выполняется; проверьте ограничения сети. Данные не считаются загруженными." : "Unfinished transfers are saved. No background job is currently running; check network restrictions. Data is not marked uploaded." }
         if uploadPending > 0 { return ru ? "Сессии ожидают запуска, анкеты или повтора. Нажмите «Повторить выгрузку». Незавершённая анкета сессии должна быть заполнена." : "Sessions are waiting for their questionnaire, a start or a retry. Use Retry uploads. Complete any unfinished session questionnaire." }
         return ru ? "Локальная очередь пуста. Это не проверка доступности сервера и не статус разметки Label Studio." : "The local queue is empty. This does not verify server availability or Label Studio annotation status."
     }
@@ -154,6 +155,33 @@ final class AppViewModel: ObservableObject {
         uploadingProfileCount == 0 && scheduledSyncCount == 0 && downloadingRecordingID == nil && removingLocalRecordingID == nil
     }
 
+    var canChangeNetworkPolicy: Bool {
+        completeArchiveTask == nil && !isAccountOperationRunning && !isRecording && activeRecording == nil &&
+        !captureStopInProgress && !isReplayRunning && syncingRecordingIDs.isEmpty && uploadingProfileCount == 0 &&
+        downloadingRecordingID == nil && removingLocalRecordingID == nil
+    }
+
+    @discardableResult
+    func updateNetworkPolicy(wifiOnly: Bool) -> Bool {
+        guard canChangeNetworkPolicy else {
+            errorMessage = selectedLanguage == .russian ? "Дождитесь завершения текущей записи, передачи или операции с данными перед изменением ограничения сети." : "Wait for the current recording, transfer or data operation before changing the network restriction."
+            return false
+        }
+        serverWifiOnly = wifiOnly
+        UserDefaults.standard.set(wifiOnly, forKey: "serverWifiOnly")
+        if networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting { schedulePendingSync() }
+        return true
+    }
+
+    var serverMutationBlockedReason: String? {
+        guard !canChangeAccount else { return nil }
+        let ru = selectedLanguage == .russian
+        if completeArchiveTask != nil { return ru ? "Дождитесь завершения экспорта архива или отмените его." : "Wait for the archive export to finish or cancel it." }
+        if isRecording || activeRecording != nil || captureStopInProgress { return ru ? "Завершите текущую сессию и сохранение файлов перед изменением сервера." : "Finish the current session and file finalization before changing server data." }
+        if isConnectionActive || isReplayRunning { return ru ? "Отключите устройство или завершите воспроизведение перед изменением сервера." : "Disconnect the device or finish replay before changing server data." }
+        return ru ? "Дождитесь завершения текущей выгрузки, восстановления или операции с аккаунтом." : "Wait for the current upload, restore or account operation to finish."
+    }
+
     let cameraRecorder = CameraRecorder()
 
     private lazy var packetProcessor = makePacketProcessor()
@@ -164,6 +192,9 @@ final class AppViewModel: ObservableObject {
     private let packetIngressGate = PacketIngressGate()
     private let keychainTokenStore = KeychainTokenStore()
     private let store: WoonaStore?
+    #if DEBUG
+    private var didInjectProfileSaveFailure = false
+    #endif
     private var currentSessionWallClockStartMillis: Int64?
     private var chartHistory: [ChartStreamKey: [ChartPoint]] = [:]
     private var sessionStartMillis: UInt64?
@@ -248,18 +279,26 @@ final class AppViewModel: ObservableObject {
         selectedTransportProfile.title
     }
 
-    func saveDogProfile(_ questionnaire: DogQuestionnaire, replacing profile: DogProfile? = nil) {
-        guard canSelectAnimal, let store else { return }
-        guard profile == nil || profile?.accountID == selectedAccountID else { return }
-        do {
-            let saved = try store.saveProfile(questionnaire, replacing: profile, accountID: selectedAccountID)
-            reloadProfiles(selecting: saved.id)
-            uploadingProfileCount += 1
-            Task {
-                defer { uploadingProfileCount -= 1 }
-                await uploadProfile(saved)
-            }
-        } catch { showError("Failed to save dog profile", error: error) }
+    func saveDogProfile(_ questionnaire: DogQuestionnaire, replacing profile: DogProfile? = nil) throws {
+        guard canSelectAnimal else { throw WoonaStoreError.invalidData("Finish the active recording, archive or account operation before saving a profile") }
+        guard let store else { throw WoonaStoreError.invalidData("The local Woona database is unavailable") }
+        guard profile == nil || profile?.accountID == selectedAccountID else {
+            throw WoonaStoreError.invalidData("The profile belongs to another account; select its account before editing")
+        }
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--ui-testing"),
+           ProcessInfo.processInfo.arguments.contains("--ui-testing-fail-profile-save"), !didInjectProfileSaveFailure {
+            didInjectProfileSaveFailure = true
+            throw WoonaStoreError.invalidData("Injected local database write failure")
+        }
+        #endif
+        let saved = try store.saveProfile(questionnaire, replacing: profile, accountID: selectedAccountID)
+        reloadProfiles(selecting: saved.id)
+        uploadingProfileCount += 1
+        Task {
+            defer { uploadingProfileCount -= 1 }
+            await uploadProfile(saved)
+        }
     }
 
     func selectDogProfile(_ profile: DogProfile) {
@@ -272,16 +311,19 @@ final class AppViewModel: ObservableObject {
         Task { await reloadServerRecordings() }
     }
 
-    func saveServerSettings() {
-        guard canChangeAccount else { return }
+    @discardableResult
+    func saveServerSettings() -> Bool {
+        guard canChangeAccount else { errorMessage = serverMutationBlockedReason; return false }
         connectionCheck = "not_checked"; connectionCheckedAt = nil; connectionCheckError = nil
         serverTransferStatuses = [:]; transferStatusErrors = [:]; transferCheckedAt = [:]
         serverBaseURL = serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         serverToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        do { try keychainTokenStore.save(serverToken) }
+        catch { showError("Failed to store server token", error: error); return false }
         UserDefaults.standard.set(serverBaseURL, forKey: "serverBaseURL")
         UserDefaults.standard.set(serverWifiOnly, forKey: "serverWifiOnly")
-        do { try keychainTokenStore.save(serverToken) }
-        catch { showError("Failed to store server token", error: error) }
+        if networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting { schedulePendingSync() }
+        return true
     }
 
     func applyAccount() {
@@ -431,6 +473,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func retryFailedSync() {
+        guard canChangeAccount else { errorMessage = serverMutationBlockedReason; return }
         guard let store else { return }
         do {
             try store.resetFailedSync()
@@ -2176,7 +2219,7 @@ enum AppTextKey {
         case .captureControls: "Capture Controls"
         case .scan: "Scan"
         case .stopScan: "Stop Scan"
-        case .uploadBinary: "Upload Binary"
+        case .uploadBinary: "Replay local file (debug)"
         case .stopReplay: "Stop Replay"
         case .disconnect: "Disconnect"
         case .devices: "Devices"
@@ -2222,7 +2265,7 @@ enum AppTextKey {
         case .captureControls: "Управление захватом"
         case .scan: "Сканировать"
         case .stopScan: "Стоп скан"
-        case .uploadBinary: "Загрузить бинарник"
+        case .uploadBinary: "Воспроизвести локальный файл (отладка)"
         case .stopReplay: "Остановить повтор"
         case .disconnect: "Отключиться"
         case .devices: "Устройства"

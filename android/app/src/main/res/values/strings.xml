@@ -62,7 +62,7 @@
     <string name="ble_devices_desc">Start a scan, pick a discovered device, or replay a captured dump.</string>
     <string name="action_start_scan">START SCAN</string>
     <string name="action_scanning">SCANNING...</string>
-    <string name="action_replay_bin_debug">Upload binary (debug)</string>
+    <string name="action_replay_bin_debug">Replay local file (debug)</string>
     <string name="action_cancel_replay_preparation">Cancel replay preparation</string>
     <string name="ble_devices_scanning_empty">Scanning for nearby BLE devices...</string>
     <string name="ble_devices_empty">No discovered devices yet.</string>
@@ -219,4 +219,5 @@
     <string name="nav_video">Video</string>
     <string name="nav_records">Recordings</string>
     <string name="new_connection">New connection</string>
+    <string name="server_sync_waiting">Waiting to upload</string>
 </resources>

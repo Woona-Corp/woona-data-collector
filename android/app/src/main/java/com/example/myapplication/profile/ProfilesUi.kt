@@ -2,6 +2,7 @@ package com.example.myapplication.profile
 
 import com.example.myapplication.localization.recordingCaptureText
 import com.example.myapplication.localization.recordingUploadText
+import com.example.myapplication.localization.recordingSourceText
 import com.example.myapplication.localization.recordingUploadErrorText
 
 import androidx.compose.foundation.clickable
@@ -257,6 +258,7 @@ fun ProfilesOverview(
                     style = MaterialTheme.typography.bodySmall,
                     color = if (recording.status.value in setOf("failed", "interrupted") || recording.captureErrorCode != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Text(recordingSourceText(recording.source.value, language), style = MaterialTheme.typography.bodySmall)
                 Text(
                     recordingUploadText(recording.serverSyncState, recording.serverSyncError, language),
                     style = MaterialTheme.typography.bodySmall,
@@ -944,7 +946,7 @@ private fun QuestionnaireDialog(
     onSave: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-    var operationError by remember { mutableStateOf<String?>(null) }
+    var operationError by rememberSaveable { mutableStateOf<String?>(null) }
     Dialog(
         onDismissRequest = { if (canDismiss) onDismiss() },
         properties = DialogProperties(
@@ -1013,7 +1015,12 @@ private fun QuestionnaireDialog(
                             Text(tr(language, "Validate and save", "Проверить и сохранить"))
                         }
                     }
-                    operationError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    operationError?.let { error ->
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text(error, color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.testTag("questionnaire.saveError"))
+                        }
+                    }
                 }
                 LazyColumn(
                     modifier = Modifier.fillMaxWidth().weight(1f),

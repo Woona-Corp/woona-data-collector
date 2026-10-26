@@ -236,7 +236,7 @@ func recordingUploadText(state: String, message: String?, language: AppLanguage)
     switch state {
     case "pending": reason = errorText(language, "ожидает отправки на сервер", "waiting to upload to the server")
     case "uploading": reason = errorText(language, "отправляется на сервер", "uploading to the server")
-    case "synced", "complete": reason = errorText(language, "файлы подтверждены сервером", "files confirmed by the server")
+    case "synced", "complete": reason = errorText(language, "загрузка была подтверждена; актуальную копию проверьте ниже", "upload was confirmed; check the current server copy below")
     case "remote": reason = errorText(language, "сессия получена с сервера", "session restored from the server")
     case "retryable_error": reason = errorText(language, "не завершена, запланирован повтор. ", "incomplete; a retry is scheduled. ") + recordingUploadErrorText(message, language: language)
     case "permanent_error": reason = errorText(language, "остановлена, требуется исправление. ", "stopped; action is required. ") + recordingUploadErrorText(message, language: language)
@@ -333,6 +333,16 @@ func transferNextAction(_ value: String, ru: Bool) -> String {
     case "retry_later": return ru ? "повторите позже" : "retry later"
     default: return value
     }
+}
+
+func recordingSourceText(_ source: String, language: AppLanguage) -> String {
+    let value: String
+    switch source {
+    case "live": value = errorText(language, "запись с датчика", "sensor recording")
+    case "replay": value = errorText(language, "воспроизведение файла", "local file replay")
+    default: value = errorText(language, "неизвестен", "unknown") + " (" + source + ")"
+    }
+    return errorText(language, "Источник: ", "Source: ") + value
 }
 
 enum OverviewSection { case animals, session, video, recordings }
@@ -479,6 +489,7 @@ struct OverviewView: View {
                                     Text(recording.sessionLabel)
                                     Text(recordingDisplayTime(recording.startedAtUTC)).font(.caption)
                                     Text(profile.numberOrName).font(.caption)
+                                    Text(recordingSourceText(recording.source, language: appState.selectedLanguage)).font(.caption)
                                     Text(recordingCaptureText(status: recording.status, code: captureCode, message: captureMessage, language: appState.selectedLanguage))
                                         .font(.caption)
                                         .foregroundStyle(["failed", "interrupted"].contains(recording.status) || captureCode != nil ? Color.red : Color.secondary)
@@ -535,6 +546,7 @@ struct OverviewView: View {
                         ForEach(appState.serverRecordings.filter { remote in !appState.recentRecordings.contains(where: { $0.id == remote.id }) }) { recording in
                             VStack(alignment: .leading) {
                                 Text(recording.sessionLabel)
+                                Text(recordingSourceText(recording.source, language: appState.selectedLanguage)).font(.caption)
                                 Text(recordingCaptureText(status: recording.captureStatus, code: recording.captureErrorCode, message: recording.captureErrorMessage, language: appState.selectedLanguage)).font(.caption)
                                 Text(recordingUploadText(state: recording.ingestStatus == "uploading" ? "uploading" : recording.ingestStatus, message: nil, language: appState.selectedLanguage))
                                     .font(.caption).foregroundStyle(.secondary)
@@ -703,7 +715,7 @@ struct OverviewView: View {
                     initial: presentation.profile?.questionnaire,
                     language: appState.selectedLanguage
                 ) { questionnaire in
-                    appState.saveDogProfile(questionnaire, replacing: presentation.profile)
+                    try appState.saveDogProfile(questionnaire, replacing: presentation.profile)
                 }
                 .id(presentation.id)
             }
@@ -742,7 +754,7 @@ struct OverviewView: View {
                         .frame(maxWidth: .infinity)
                         .disabled(appState.isScanning || appState.selectedDogProfile == nil)
                         .accessibilityIdentifier("devices.scan")
-                    Button(russian ? "Загрузить файл (debug)" : "Upload binary (debug)") { pendingReplaySelection = true; isBLESelectionPresented = false }
+                    Button(russian ? "Воспроизвести локальный файл (отладка)" : "Replay local file (debug)") { pendingReplaySelection = true; isBLESelectionPresented = false }
                         .buttonStyle(.bordered)
                         .frame(maxWidth: .infinity)
                         .disabled(appState.selectedDogProfile == nil)
