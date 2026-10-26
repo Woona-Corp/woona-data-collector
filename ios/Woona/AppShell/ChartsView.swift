@@ -19,6 +19,7 @@ struct ChartsView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .padding(12)
+            .background(Color.woonaBackground)
             .accessibilityHidden(isFullscreen)
             .safeAreaInset(edge: .top, spacing: 0) { SessionSectionPicker() }
             .navigationTitle(appState.selectedLanguage == .russian ? "Сессия" : "Session")
@@ -35,7 +36,7 @@ struct ChartsView: View {
                     DeviceChartView()
                 }
                 .padding(12)
-                .background(Color(uiColor: .systemBackground))
+                .background(Color.woonaBackground)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("chart.fullscreen")
             }
