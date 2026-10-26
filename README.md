@@ -4,6 +4,8 @@
 
 Native Android 12+ and iOS 17+ apps for dog profiles, questionnaires, BLE sensor recordings, optional synchronized video, offline storage, and resumable server sync. The shared FastAPI service stores metadata in PostgreSQL and recording files on disk. See [Architecture](ARCHITECTURE.md) for the data flow and [the shared contracts](shared/docs/target-server-plan/README.md) for schemas and API details.
 
+Android and iOS share the same UI/UX requirements; independent releases do not permit different user workflows. See [UI/UX contract and remaining gaps](shared/UI_UX_CONTRACT.md).
+
 Heart sessions, the separate post-recording questionnaire, and manual ECG/HR/reference uploads are documented in [Heart recordings](shared/HEART_RECORDINGS.md).
 
 Operator accounts and post-recording questionnaire edits in 1.3.5 are documented in [Accounts](shared/ACCOUNTS.md).
