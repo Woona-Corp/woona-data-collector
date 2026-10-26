@@ -1077,3 +1077,37 @@ private val SYNC_COLUMNS = arrayOf(
     "video_first_frame_callback_monotonic_ns",
     "video_first_sample_pts_us",
 )
+
+/** Caller holds serverOperationLock; only orphaned upload states are recovered.
+ * Confirmed offsets, receipt fields, hashes and local files remain untouched. */
+fun WoonaDatabase.recoverOrphanedUploads(hasUnfinishedWork: (String) -> Boolean): Pair<Int, Int> {
+    fun ids(sql: String): List<String> = readableDatabase.rawQuery(sql, null).use { cursor ->
+        buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+    }
+    val profiles = ids("SELECT id FROM dog_profile_versions WHERE server_sync_state='uploading'")
+        .filterNot { hasUnfinishedWork("server-profile-$it") }
+    val recordings = ids("SELECT recording_id FROM server_sync_state WHERE state='uploading'")
+        .filterNot { hasUnfinishedWork("server-sync-$it") }
+    if (profiles.isEmpty() && recordings.isEmpty()) return 0 to 0
+    var profileCount = 0
+    var recordingCount = 0
+    writableDatabase.beginTransaction()
+    try {
+        val values = ContentValues().apply {
+            put("last_error_code", "orphaned_upload_recovered")
+            put("last_error_message", "orphaned_upload_recovered: Previous uploading state had no unfinished background task. Retry resumes from confirmed progress; local files are preserved.")
+        }
+        profiles.forEach { id ->
+            values.put("server_sync_state", "pending")
+            profileCount += writableDatabase.update("dog_profile_versions", values, "id=? AND server_sync_state='uploading'", arrayOf(id))
+            values.remove("server_sync_state")
+        }
+        recordings.forEach { id ->
+            values.put("state", "pending")
+            values.put("updated_at_utc", Instant.now().toString())
+            recordingCount += writableDatabase.update("server_sync_state", values, "recording_id=? AND state='uploading'", arrayOf(id))
+        }
+        writableDatabase.setTransactionSuccessful()
+    } finally { writableDatabase.endTransaction() }
+    return profileCount to recordingCount
+}

@@ -1316,6 +1316,32 @@ final class WoonaStore {
         }
     }
 
+    @discardableResult
+    func recoverInterruptedUploads(excluding activeRecordings: Set<UUID>) throws -> Int {
+        let statement = try prepare("SELECT id FROM recordings WHERE server_sync_state='uploading' UNION SELECT recording_id FROM server_sync_state WHERE state='uploading'")
+        var ids: [UUID] = []
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
+            if let id = UUID(uuidString: columnText(statement, 0)), !activeRecordings.contains(id) { ids.append(id) }
+            result = sqlite3_step(statement)
+        }
+        sqlite3_finalize(statement)
+        guard result == SQLITE_DONE else { throw sqliteError() }
+        guard !ids.isEmpty else { return 0 }
+        let now = Self.iso8601(Date())
+        try transaction {
+            for id in ids {
+                try execute("UPDATE recordings SET server_sync_state='pending' WHERE id=? AND server_sync_state='uploading'", [.text(id.uuidString)])
+                try execute("""
+                    UPDATE server_sync_state SET state='pending',updated_at_utc=?,last_error_code='orphaned_upload_recovered',
+                        last_error_message='orphaned_upload_recovered: Previous upload was interrupted and has no live operation. Retry resumes from confirmed progress; local files are preserved.'
+                    WHERE recording_id=? AND state='uploading'
+                    """, [.text(now), .text(id.uuidString)])
+            }
+        }
+        return ids.count
+    }
+
     func resetFailedSync() throws {
         let now = Self.iso8601(Date())
         try transaction {

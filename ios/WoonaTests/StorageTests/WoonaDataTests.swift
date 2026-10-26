@@ -40,6 +40,30 @@ final class WoonaDataTests: XCTestCase {
     }
 
     @MainActor
+    func testRestartRecoversOrphanedUploadButPreservesActiveLeaseOffsetsAndFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        let record = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+        try store.finalize(recording: record, status: "completed", files: [], syncJSON: Data("{}".utf8))
+        let artifact = try XCTUnwrap(store.artifacts(recordingID: record.id).first)
+        try store.updateArtifactProgress(artifact.id, uploadedBytes: 1, state: "uploading")
+        try store.updateRecordingSync(record.id, state: "uploading")
+        let files = try store.artifacts(recordingID: record.id)
+        XCTAssertEqual(try store.recoverInterruptedUploads(excluding: [record.id]), 0)
+        XCTAssertEqual(try store.recording(id: record.id)?.serverSyncState, "uploading")
+        let model = AppViewModel(store: store, uiTesting: true)
+        XCTAssertNil(model.networkAvailable)
+        XCTAssertEqual(try store.recording(id: record.id)?.serverSyncState, "pending")
+        XCTAssertTrue(try store.pendingRecordings().contains { $0.id == record.id })
+        let after = try store.artifacts(recordingID: record.id)
+        XCTAssertEqual(after.map(\.uploadedBytes), files.map(\.uploadedBytes))
+        XCTAssertEqual(after.map(\.sha256), files.map(\.sha256))
+        XCTAssertEqual(try Data(contentsOf: store.rootDirectory.appendingPathComponent(artifact.relativePath)), Data("{}".utf8))
+    }
+
+    @MainActor
     func testProtocolFailureIsPersistedAsActionablePermanentErrorWithoutDeletingRecording() async throws {
         try await networkSource { root, _ in
             let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))

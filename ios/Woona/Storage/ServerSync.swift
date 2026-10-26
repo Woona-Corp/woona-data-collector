@@ -430,7 +430,22 @@ final class WoonaServerClient {
         return restored
     }
 
+    private static var liveUploads: [String: [UUID: Int]] = [:]
+
+    static func liveRecordingUploadIDs(root: URL) -> Set<UUID> {
+        let key = root.resolvingSymlinksInPath().standardizedFileURL.path
+        return Set(liveUploads[key]?.keys.map { $0 } ?? [])
+    }
+
     func upload(recording: WoonaRecording, profile: DogProfile, store: WoonaStore, onProgress: (() -> Void)? = nil) async throws {
+        let rootKey = store.rootDirectory.resolvingSymlinksInPath().standardizedFileURL.path
+        Self.liveUploads[rootKey, default: [:]][recording.id, default: 0] += 1
+        defer {
+            let count = Self.liveUploads[rootKey]?[recording.id] ?? 1
+            if count <= 1 { Self.liveUploads[rootKey]?[recording.id] = nil }
+            else { Self.liveUploads[rootKey]?[recording.id] = count - 1 }
+            if Self.liveUploads[rootKey]?.isEmpty == true { Self.liveUploads[rootKey] = nil }
+        }
         do {
             try store.applyServerDeletions(try await deletions(), accountID: accountID)
             guard try store.recording(id: recording.id) != nil else { return }

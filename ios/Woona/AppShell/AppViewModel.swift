@@ -137,6 +137,16 @@ final class AppViewModel: ObservableObject {
     }
 
     var canSelectAnimal: Bool { activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
+    var transferNetworkAllowsWork: Bool {
+        networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting
+    }
+
+    func updateTransferNetworkPath(available: Bool, unmetered: Bool) {
+        let wasAllowed = transferNetworkAllowsWork
+        networkAvailable = available
+        networkUnmetered = unmetered
+        if !wasAllowed && transferNetworkAllowsWork { schedulePendingSync() }
+    }
 
     var canChangeAccount: Bool {
         completeArchiveTask == nil && !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
@@ -200,6 +210,12 @@ final class AppViewModel: ObservableObject {
         cameraRecorder.onRecordingFailure = { [weak self] message in
             Task { @MainActor in self?.handleCameraFailure(message) }
         }
+        if let store {
+            do {
+                let recovered = try store.recoverInterruptedUploads(excluding: WoonaServerClient.liveRecordingUploadIDs(root: store.rootDirectory))
+                if recovered > 0 { appendDiagnostic("Recovered \(recovered) interrupted upload states; local files and confirmed progress are preserved") }
+            } catch { errorMessage = "Unable to recover interrupted upload queue: \(error.localizedDescription)" }
+        }
         reloadProfiles(selecting: defaults.string(forKey: "selectedDogID").flatMap(UUID.init(uuidString:)))
         if uiTesting, let profile = dogProfiles.first(where: { $0.numberOrName == "UI Dog 1" }) { selectDogProfile(profile) }
         if store == nil { errorMessage = "Unable to open local Woona database" }
@@ -209,10 +225,7 @@ final class AppViewModel: ObservableObject {
             monitor.pathUpdateHandler = { [weak self] path in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    let wasBlocked = self.networkAvailable == false || (self.serverWifiOnly && self.networkUnmetered == false)
-                    self.networkAvailable = path.status == .satisfied
-                    self.networkUnmetered = !path.isExpensive
-                    if wasBlocked && self.networkAvailable == true && (!self.serverWifiOnly || self.networkUnmetered == true) { self.schedulePendingSync() }
+                    self.updateTransferNetworkPath(available: path.status == .satisfied, unmetered: !path.isExpensive)
                 }
             }
             monitor.start(queue: DispatchQueue(label: "woona.network-status"))
@@ -359,7 +372,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func resumePendingSync() async {
-        guard !serverToken.isEmpty, let store else { return }
+        guard transferNetworkAllowsWork, !serverToken.isEmpty, let store else { return }
         do {
             for recording in try store.pendingRecordings() {
                 await sync(recording: recording)
@@ -867,6 +880,7 @@ final class AppViewModel: ObservableObject {
             completeArchiveProgress = nil
             completeArchiveWorker = nil
             completeArchiveTask = nil
+            if transferNetworkAllowsWork { schedulePendingSync() }
         }
     }
 
@@ -1238,7 +1252,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func sync(recording: WoonaRecording) async {
-        guard networkAvailable != false, !(serverWifiOnly && networkUnmetered == false), removingLocalRecordingID == nil, !isAccountOperationRunning, !serverToken.isEmpty, let store, recording.questionnaire?.readyForSync != false, !syncingRecordingIDs.contains(recording.id) else { return }
+        guard transferNetworkAllowsWork, removingLocalRecordingID == nil, !isAccountOperationRunning, !serverToken.isEmpty, let store, recording.questionnaire?.readyForSync != false, !syncingRecordingIDs.contains(recording.id) else { return }
         syncingRecordingIDs.insert(recording.id)
         reloadRecentRecordings()
         defer { syncingRecordingIDs.remove(recording.id); reloadRecentRecordings() }

@@ -41,6 +41,28 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(error.localizedDescription.contains("Changed on server"))
     }
 
+    func testTransferPolicyWaitsForFirstRealPathAndWifiPermissionWithoutInventingConnectivity() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppViewModel(store: try WoonaStore(rootDirectory: root), uiTesting: true)
+        XCTAssertNil(model.networkAvailable)
+        XCTAssertNil(model.networkUnmetered)
+        XCTAssertFalse(model.transferNetworkAllowsWork)
+        model.serverWifiOnly = true
+        model.updateTransferNetworkPath(available: false, unmetered: false)
+        XCTAssertFalse(model.transferNetworkAllowsWork)
+        model.updateTransferNetworkPath(available: true, unmetered: false)
+        XCTAssertFalse(model.transferNetworkAllowsWork)
+        model.updateTransferNetworkPath(available: true, unmetered: true)
+        XCTAssertTrue(model.transferNetworkAllowsWork)
+        // The first allowed callback schedules pending work, but UI-test configuration
+        // has no token and therefore never sends a network request.
+        await Task.yield()
+        model.serverWifiOnly = false
+        model.updateTransferNetworkPath(available: true, unmetered: false)
+        XCTAssertTrue(model.transferNetworkAllowsWork)
+    }
+
     func testRecordingTimeMatchesAndroidFormatAcrossISOInputs() {
         let zone = TimeZone(secondsFromGMT: 3 * 3600)!
         XCTAssertEqual(recordingDisplayTime("2026-10-26T11:32:00Z", timeZone: zone), "26.10.2026 14:32")
