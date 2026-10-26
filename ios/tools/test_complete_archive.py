@@ -78,7 +78,8 @@ do {
         })
     }
     print("OK")
-} catch { print("FAILED: \(error.localizedDescription)"); exit(3) }
+} catch is CancellationError { print("FAILED: CancellationError"); exit(3) }
+catch { print("FAILED: \(error.localizedDescription)"); exit(3) }
 '''
 
 
@@ -120,9 +121,11 @@ class CompleteArchiveCompatibilityTests(unittest.TestCase):
         self.db.close()
         self.directory.cleanup()
 
-    def run_export(self, mode="normal", success=True):
+    def run_export(self, mode="normal", success=True, reason=None):
         result = subprocess.run([str(self.binary), mode, str(self.base)], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0 if success else 3, result.stdout + result.stderr)
+        if reason is not None:
+            self.assertIn(reason, result.stdout + result.stderr)
         if not success:
             self.assertFalse((self.base / "out.zip").exists())
             self.assertFalse((self.base / "out.zip.part").exists())
@@ -168,19 +171,19 @@ class CompleteArchiveCompatibilityTests(unittest.TestCase):
 
     def test_cancellation_removes_partial_and_preserves_sources(self):
         (self.root / "video.mp4").write_bytes(b"v" * 2_000_000)
-        self.run_export("cancel", success=False)
+        self.run_export("cancel", success=False, reason="CancellationError")
         self.assertEqual((self.root / "video.mp4").stat().st_size, 2_000_000)
 
     def test_concurrent_files_fail_instead_of_publishing_partial_history(self):
-        self.run_export("mutate-file", success=False)
+        self.run_export("mutate-file", success=False, reason="Files changed during export")
 
     def test_database_change_after_snapshot_fails(self):
-        self.run_export("mutate-db", success=False)
+        self.run_export("mutate-db", success=False, reason="Local database changed during export")
 
     def test_symlink_cannot_escape_export_roots(self):
         (self.root / "unsafe").symlink_to(self.base / "outside")
         (self.base / "outside").write_text("secret outside data root")
-        self.run_export(success=False)
+        self.run_export(success=False, reason="Symbolic link")
 
     @unittest.skipUnless(os.environ.get("WOONA_TEST_ZIP64_LARGE") == "1", "Set WOONA_TEST_ZIP64_LARGE=1 for a 4+ GiB streaming fixture")
     def test_file_larger_than_4_gib_is_readable(self):
