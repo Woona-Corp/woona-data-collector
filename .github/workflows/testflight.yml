@@ -6,11 +6,12 @@ on:
         type: boolean
         default: false
       version:
+        required: true
         type: string
         default: '1.4.0'
       build:
+        required: true
         type: string
-        default: ''
 permissions:
   contents: read
 jobs:
@@ -31,6 +32,7 @@ jobs:
           python3 ios/tools/check_testflight_status.py
           python3 ios/tools/distribute_testflight.py
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: testflight-status
           path: |

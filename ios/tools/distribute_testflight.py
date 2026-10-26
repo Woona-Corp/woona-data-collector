@@ -47,9 +47,13 @@ def main():
         if not descriptions or not all(item['has_description'] for item in descriptions):
             raise RuntimeError('Existing beta app descriptions are incomplete; no metadata invented')
         build_id = report['build_id']
-        notes = ('Account is now at the top of Overview. Dog selection and separate New dog / Edit actions '
-                 'follow the Android workflow. Please check Edit immediately after launch, creating a new '
-                 'dog without changing existing profiles, account selection, language, and fullscreen charts.')
+        notes = ('Woona 1.4.0: the same five native tabs on iOS and Android: Animals, Session, Video, '
+                 'Recordings, Settings. Explicit capture, server connection, upload queue and per-file verification '
+                 'states; questionnaire drafts survive failed saves. Complete data archive in Settings includes '
+                 'all available local animals, accounts, recordings, video and diagnostics, with integrity checks. '
+                 'Please test first Edit after launch, creating a separate animal, offline/retry, account selection, '
+                 'camera plus sensor capture, safe local file removal and exporting the complete archive. '
+                 'Original files are preserved; V2/SD sensor support is not enabled by this update.')
         existing = request('/v1/builds/' + build_id + '/betaBuildLocalizations')['data']
         if not existing:
             request('/v1/betaBuildLocalizations', 'POST', {'data': {'type': 'betaBuildLocalizations',

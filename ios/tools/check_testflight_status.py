@@ -49,7 +49,9 @@ def token(key_path, key_id, issuer, now=None):
 
 def main():
     version = os.environ['CHECK_VERSION']
-    build_number = os.environ['CHECK_BUILD']
+    build_number = os.environ['CHECK_BUILD'].strip()
+    if not build_number.isdecimal():
+        raise ValueError('An explicit numeric build number is required')
     with tempfile.TemporaryDirectory() as directory:
         key = Path(directory) / 'key.p8'
         key.write_text(os.environ['ASC_PRIVATE_KEY'])
