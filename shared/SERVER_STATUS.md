@@ -64,3 +64,31 @@ Error codes and existing fields are preserved. Responses add safe, actionable
 upload offset, incomplete bytes, checksum mismatch, database/storage outage and
 unexpected 500 failures have distinct recovery guidance. Unexpected exception
 strings and connection credentials are never included in API responses.
+
+## Capture quality and unknown calibration
+
+The optional top-level `quality` object carries `status` (`warnings`, `audited`,
+`not_audited`), `warnings: [{code, count}]`, a diagnostic SHA when available,
+and explicit `continuousSensorCoverageVerified: false` /
+`medicalQualityVerified: false`. Packet rejection/loss counters from source logs
+are warnings, not proof of measured loss, complete coverage or medical quality.
+Recovery gap intervals remain visible even for fully transferred recordings.
+
+Recording detail adds `sync.calibration` with `measured`, `offsetNs`, `reason`
+and `compatibilityPlaceholder`. PostgreSQL NULL represents source calibration
+that was not measured. The legacy `calibrationOffsetNs` wire key remains numeric
+(compatibility0 for NULL), preserving installed Android decoders. A numeric
+legacy value is not declared measured without verified, hash-bound alignment.
+Original profiles, capture manifests and receipts are not rewritten by this
+additive response metadata.
+
+Reviewed native Share archive recovery is implemented by
+`python -m server.archive_import`; dry-run is the default. It validates complete
+ZIP/source hashes, source clocks, V2 snapshots and exact existing animal UUIDs.
+It never creates an animal, changes a current profile/account/revision or
+silently overwrites an existing recording. Original archives remain outside
+canonical storage; the import preserves source provenance and explicitly
+unknown calibration/device/end-time metadata. Start versus finished questionnaire
+snapshots may differ only in `endTime` / `durationMinutes`; all other differences
+require review. ZIP path traversal, duplicate entries, size/CRC/hash conflicts,
+insufficient extraction space and missing source clocks are rejected.
