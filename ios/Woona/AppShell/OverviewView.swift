@@ -69,6 +69,11 @@ struct OverviewView: View {
                         Text(errorMessage)
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
+                        if appState.hasDogIdentityConflict {
+                            Button(appState.selectedLanguage == .russian ? "Проверить и восстановить анкеты" : "Check and restore profiles") { appState.refreshFromServer() }
+                                .disabled(!appState.canChangeAccount)
+                            Button(appState.selectedLanguage == .russian ? "Проверить аккаунт" : "Check account") { appState.selectedTab = .settings }
+                        }
                     }
                 }
 

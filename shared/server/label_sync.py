@@ -14,6 +14,8 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
+from server.eligibility import activity_exclusion_reasons
+
 def file_url(relative: str) -> str:
     return "/data/local-files/?d=" + quote(relative, safe="/")
 
@@ -52,6 +54,7 @@ def app_tasks(database_url: str) -> list[dict]:
     with engine.connect() as connection:
         rows = connection.execute(text("""
             SELECT r.id, r.started_at, r.dog_id, r.dog_profile_version_id,
+                   r.ingest_status, r.capture_status, r.capture_error_code,
                    r.session_questionnaire, v.questionnaire AS dog_questionnaire,
                    d.number_or_name, rs.alignment, a.artifact_type, a.file_name,
                    a.server_relative_path, a.expected_size_bytes, a.sha256
@@ -72,10 +75,9 @@ def app_tasks(database_url: str) -> list[dict]:
     for recording_id, members in groups.items():
         first = members[0]
         questionnaire = first["session_questionnaire"]
-        if questionnaire.get("sessionKind") == "heart" or questionnaire.get("schemaVersion") != 2 or not set(questionnaire.get("plannedActivities", [])) & {"Аллюр/движение", "Активность"}:
-            continue
         kinds = {row["artifact_type"] for row in members}
-        if not {'packet','packet_timeline','raw','diagnostic','sync','video'} <= kinds:
+        if activity_exclusion_reasons(first['ingest_status'], first['capture_status'],
+                                      first['capture_error_code'], questionnaire, kinds):
             continue
         files = [{"name": row["file_name"], "relative": "woona/" + row["server_relative_path"],
                   "size": row["expected_size_bytes"], "sha256": row["sha256"]} for row in members]

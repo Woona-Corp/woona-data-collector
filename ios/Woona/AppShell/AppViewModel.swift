@@ -19,6 +19,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var lastPacketIssue: String?
     @Published private(set) var rejectionBreakdown: String?
     @Published private(set) var diagnosticMessages: [String] = []
+    @Published private(set) var hasDogIdentityConflict = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var selectedTransportProfile: BleTransportProfile = .iosManaged
     @Published var selectedThemeMode: AppThemeMode = .system {
@@ -1271,6 +1272,14 @@ final class AppViewModel: ObservableObject {
     }
 
     private func showError(_ message: String, error: Error?) {
+        hasDogIdentityConflict = false
+        if let syncError = error as? ServerSyncError, case .animalIDConflict = syncError {
+            hasDogIdentityConflict = true
+            errorMessage = selectedLanguage == .russian
+                ? "Этот ID животного уже закреплён за другой карточкой. Проверьте аккаунт, восстановите анкеты и выберите существующую собаку. Локальные записи сохранены. Смена клички не освобождает ID. Если карточка не найдена, сохраните экспорт для сверки."
+                : syncError.localizedDescription
+            return
+        }
         if let error {
             errorMessage = "\(message): \(error.localizedDescription)"
         } else {

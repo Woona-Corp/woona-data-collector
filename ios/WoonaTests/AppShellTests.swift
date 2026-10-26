@@ -58,6 +58,25 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(try store.profile(dogID: original.id, versionID: original.profileVersionID), original)
     }
 
+    func testIdentityConflictParsesCodeAndPreservesOther409Errors() throws {
+        for body in [#"{"code":"animal_id_already_exists","dogId":"unavailable"}"#,
+                     #"{"detail":{"code":"animal_id_already_exists"}}"#] {
+            guard case .animalIDConflict = ServerSyncError.responseError(status: 409, data: Data(body.utf8)) else {
+                return XCTFail("Identity conflict must provide recovery guidance")
+            }
+        }
+        let body = Data(#"{"code":"revision_conflict","message":"Reload revision"}"#.utf8)
+        guard case .requestFailed(let status, let message) = ServerSyncError.responseError(status: 409, data: body) else {
+            return XCTFail("Revision conflicts must retain their own recovery path")
+        }
+        XCTAssertEqual(status, 409)
+        XCTAssertEqual(message, "Reload revision")
+        guard case .requestFailed(500, _) = ServerSyncError.responseError(status: 500,
+                data: Data(#"{"code":"animal_id_already_exists"}"#.utf8)) else {
+            return XCTFail("Server failures must not be treated as identity conflicts")
+        }
+    }
+
     func testInitialTabIsOverview() {
         let viewModel = AppViewModel()
 

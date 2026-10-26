@@ -88,6 +88,7 @@ class AndroidVideoRecorder(
     private var startGeneration = 0L
     private var sessionGeneration = 0L
     private var cameraOpening = false
+    private var cameraGeneration = 0L
     private var onStarted: ((AndroidVideoStartInfo) -> Unit)? = null
     private var onError: ((String, Throwable?) -> Unit)? = null
 
@@ -176,12 +177,14 @@ class AndroidVideoRecorder(
     private fun openCamera() {
         if (cameraOpening || camera != null) return
         cameraOpening = true
+        val generation = ++cameraGeneration
         try {
             val cameraId = selectCameraId()
             cameraManager.openCamera(
                 cameraId,
                 object : CameraDevice.StateCallback() {
                     override fun onOpened(device: CameraDevice) {
+                        if (generation != cameraGeneration) { device.close(); return }
                         cameraOpening = false
                         if (stopRequested) {
                             device.close()
@@ -200,12 +203,14 @@ class AndroidVideoRecorder(
                     }
 
                     override fun onDisconnected(device: CameraDevice) {
+                        if (generation != cameraGeneration) { device.close(); return }
                         cameraOpening = false
                         device.close()
                         fail("Camera disconnected", null)
                     }
 
                     override fun onError(device: CameraDevice, error: Int) {
+                        if (generation != cameraGeneration) { device.close(); return }
                         cameraOpening = false
                         device.close()
                         fail("Camera error $error", null)
@@ -269,7 +274,7 @@ class AndroidVideoRecorder(
             val frameRate = selectFrameRate(characteristics)
             val rotation = videoRotation(characteristics)
             val mediaRecorder = if (startRecorder) {
-                MediaRecorder(appContext).apply {
+                MediaRecorder(appContext).also { recorder = it }.apply {
                     setVideoSource(MediaRecorder.VideoSource.SURFACE)
                     setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                     setOutputFile(requireNotNull(outputFile).absolutePath)
@@ -279,7 +284,7 @@ class AndroidVideoRecorder(
                     setVideoEncoder(MediaRecorder.VideoEncoder.H264)
                     setOrientationHint(rotation)
                     prepare()
-                }.also { recorder = it }
+                }
             } else {
                 recorder ?: return
             }
@@ -407,17 +412,21 @@ class AndroidVideoRecorder(
     }
 
     private fun fail(message: String, throwable: Throwable?) {
+        val failedGeneration = startGeneration
+        val errorCallback = onError
         releaseSession()
         synchronized(lock) {
             active = false
             stopRequested = false
             recorderStarted = false
         }
-        mainHandler.post { onError?.invoke(message, throwable) }
+        mainHandler.post { if (startGeneration == failedGeneration) errorCallback?.invoke(message, throwable) }
     }
 
     private fun releaseSession() {
         sessionGeneration++
+        cameraGeneration++
+        cameraOpening = false
         try {
             session?.close()
         } catch (_: Exception) {

@@ -110,12 +110,21 @@ enum ServerSyncError: LocalizedError {
     case tokenMissing
     case responseInvalid
     case requestFailed(Int, String)
+    case animalIDConflict
+
+    static func responseError(status: Int, data: Data) -> ServerSyncError {
+        let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let detail = body?["detail"] as? [String: Any] ?? body
+        if status == 409, detail?["code"] as? String == "animal_id_already_exists" { return .animalIDConflict }
+        return .requestFailed(status, detail?["message"] as? String ?? HTTPURLResponse.localizedString(forStatusCode: status))
+    }
 
     var errorDescription: String? {
         switch self {
         case .invalidURL: "Server URL is invalid"
         case .tokenMissing: "Server token is missing"
         case .responseInvalid: "Server response is invalid"
+        case .animalIDConflict: "This animal ID already belongs to another profile. Check the account, restore profiles and select the existing dog. Local recordings are preserved; changing the name does not release the ID."
         case .requestFailed(let status, let message): "Server returned \(status): \(message)"
         }
     }
@@ -598,8 +607,7 @@ final class WoonaServerClient {
     private func validate(response: URLResponse, data: Data) throws {
         guard let response = response as? HTTPURLResponse else { throw ServerSyncError.responseInvalid }
         guard (200...299).contains(response.statusCode) else {
-            let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String
-            throw ServerSyncError.requestFailed(response.statusCode, message ?? HTTPURLResponse.localizedString(forStatusCode: response.statusCode))
+            throw ServerSyncError.responseError(status: response.statusCode, data: data)
         }
     }
 }

@@ -206,13 +206,15 @@ class BleSessionManager(
                     val wasRecovering = recoveryInProgress
                     clearGattReference(gatt)
                     safeCloseGatt(gatt)
-                    if (manualDisconnectRequested) {
-                        transition(BleSessionEvent.Disconnected)
-                    } else if (wasRecovering) {
-                        scheduleNextRecoveryAttempt()
-                    } else {
-                        transition(BleSessionEvent.Failure)
-                        listener.onError(appTextResolver.getString(R.string.ble_gatt_connection_error, status))
+                    when (bleDisconnectAction(manualDisconnectRequested, wasRecovering,
+                        captureActive && activeDeviceAddress != null)) {
+                        BleDisconnectAction.DISCONNECTED -> transition(BleSessionEvent.Disconnected)
+                        BleDisconnectAction.RETRY -> scheduleNextRecoveryAttempt()
+                        BleDisconnectAction.RECOVER -> beginTransportRecovery(0, "GATT error $status")
+                        BleDisconnectAction.FAIL -> {
+                            transition(BleSessionEvent.Failure)
+                            listener.onError(appTextResolver.getString(R.string.ble_gatt_connection_error, status))
+                        }
                     }
                 }
 
@@ -309,10 +311,11 @@ class BleSessionManager(
                     val wasRecovering = recoveryInProgress
                     clearGattReference(gatt)
                     safeCloseGatt(gatt)
-                    if (wasRecovering) {
-                        scheduleNextRecoveryAttempt()
-                    } else {
-                        transition(BleSessionEvent.Disconnected)
+                    when (bleDisconnectAction(manualDisconnectRequested, wasRecovering,
+                        captureActive && activeDeviceAddress != null)) {
+                        BleDisconnectAction.RETRY -> scheduleNextRecoveryAttempt()
+                        BleDisconnectAction.RECOVER -> beginTransportRecovery(0, "Unexpected GATT disconnect")
+                        else -> transition(BleSessionEvent.Disconnected)
                     }
                 }
             }
@@ -908,7 +911,7 @@ class BleSessionManager(
         scanHandler.postDelayed(recoveryConfirmationRunnable, RECOVERY_CONFIRMATION_TIMEOUT_MS)
     }
 
-    private fun beginTransportRecovery(silenceMillis: Long) {
+    private fun beginTransportRecovery(silenceMillis: Long, reason: String = "Notification silence: $silenceMillis ms") {
         if (manualDisconnectRequested || recoveryInProgress || activeDeviceAddress == null) return
 
         recoveryInProgress = true
@@ -918,7 +921,7 @@ class BleSessionManager(
         stopTransportSummaryLoop()
         stopNotificationWatchdog()
         emitDiagnostic(
-            message = "BLE notification silence detected: ${silenceMillis} ms; starting transport recovery",
+            message = "$reason; starting bounded BLE transport recovery",
             level = DiagnosticLevel.WARNING,
         )
 
@@ -939,7 +942,7 @@ class BleSessionManager(
             recoveryInProgress = false
             awaitingRecoveryNotification = false
             transition(BleSessionEvent.Failure)
-            listener.onError("BLE transport recovery exhausted after notification silence")
+            listener.onError("BLE transport recovery exhausted")
             return
         }
 

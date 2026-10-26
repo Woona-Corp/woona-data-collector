@@ -118,6 +118,37 @@ class AndroidVideoRecorderDeviceTest {
     }
 
     @Test
+    fun prepareFailureThenRetry_releasesCameraAndRecorder() {
+        val visiblePreview = attachPreview()
+        recorder.setPreviewSurface(visiblePreview.holder.surface)
+        val failed = CountDownLatch(1)
+        val unexpectedStart = AtomicReference<AndroidVideoStartInfo?>()
+        recorder.start(File("/proc/woona-prepare-failure.mp4"),
+            onStarted = { unexpectedStart.set(it); failed.countDown() },
+            onError = { _, _ -> failed.countDown() })
+        assertTrue("Expected an unwritable output failure", failed.await(15, TimeUnit.SECONDS))
+        assertNull(unexpectedStart.get())
+        assertTrue("Failed recorder must release its active state", !recorder.isActive())
+        val started = CountDownLatch(1)
+        val error = AtomicReference<String?>()
+        assertTrue(recorder.start(output,
+            onStarted = { started.countDown() },
+            onError = { message, _ -> error.set(message); started.countDown() }))
+        assertTrue(started.await(15, TimeUnit.SECONDS))
+        assertNull(error.get())
+        Thread.sleep(1_000)
+        assertNotNull(recorder.stop(8_000))
+        assertVideoMatchesPreviewAspectRatio(output)
+    }
+
+    @Test
+    fun consecutiveCaptures_produceTwoReadableVideos() {
+        previewStartStop_producesReadableMp4()
+        output.delete()
+        previewStartStop_producesReadableMp4()
+    }
+
+    @Test
     fun replacingPreviewSurface_whileRecording_restoresVisiblePreview() {
         val firstPreview = attachPreview()
         val started = CountDownLatch(1)

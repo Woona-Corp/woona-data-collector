@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
+from server.eligibility import activity_exclusion_reasons
 from server.label_sync import active_project, file_url, paged, request_json
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -62,7 +63,7 @@ def records_from_sources() -> tuple[list[dict], dict]:
     with engine.connect() as connection:
         rows = connection.execute(text("""
             SELECT r.id, r.started_at, r.ingest_status, r.capture_status,
-                   r.questionnaire_validation_state, r.session_questionnaire,
+                   r.questionnaire_validation_state, r.session_questionnaire, r.capture_error_code,
                    d.number_or_name, v.id AS profile_id, v.validation_state AS profile_state,
                    v.questionnaire AS profile_questionnaire,
                    a.artifact_type, a.file_name, a.expected_size_bytes,
@@ -70,8 +71,6 @@ def records_from_sources() -> tuple[list[dict], dict]:
             FROM recordings r JOIN dogs d ON d.id=r.dog_id
             JOIN dog_profile_versions v ON v.id=r.dog_profile_version_id
             LEFT JOIN artifacts a ON a.recording_id=r.id
-            WHERE r.session_questionnaire->>'schemaVersion'='2'
-              AND ((r.session_questionnaire->'plannedActivities') ?| ARRAY['Аллюр/движение','Активность'] OR r.session_questionnaire->>'sessionKind'='heart')
             ORDER BY r.started_at DESC, a.id
         """)).mappings().all()
         survey_counts = {
@@ -89,6 +88,7 @@ def records_from_sources() -> tuple[list[dict], dict]:
             "date": row["started_at"].date().isoformat(), "files": [],
             "recording_id": str(row["id"]), "session_kind": row["session_questionnaire"].get("sessionKind", "activity"),
             "ingest_status": row["ingest_status"], "capture_status": row["capture_status"],
+            "capture_error_code": row["capture_error_code"],
             "profile": {"version_id": str(row["profile_id"]), "state": row["profile_state"],
                         "answers": row["profile_questionnaire"]},
             "session_questionnaire": {"state": row["questionnaire_validation_state"],
@@ -123,6 +123,8 @@ def summarize(records: list[dict], projects: list[dict], tasks_by_kind: dict, an
                 continue
             full = annotation_tasks[(kind, task["id"])]
             for annotation in full.get("annotations", []):
+                if annotation.get('was_cancelled'):
+                    continue
                 for result in annotation.get("result", []):
                     values = result.get("value", {})
                     labels = values.get("timelinelabels", [])
@@ -153,6 +155,12 @@ def summarize(records: list[dict], projects: list[dict], tasks_by_kind: dict, an
                                       for kind in VIDEO_KINDS)
         record["annotated_all"] = all(record["tasks"][kind] and record["tasks"][kind]["labeled"]
                                       for kind in VIDEO_KINDS)
+        record["exclusion_reasons"] = activity_exclusion_reasons(
+            record['ingest_status'], record.get('capture_status'), record.get('capture_error_code'),
+            (record.get('session_questionnaire') or {}).get('answers') or {},
+            {f.get('type') for f in files})
+        record['eligible'] = not record['exclusion_reasons']
+
     records.sort(key=lambda r: (r["date"], r["source_id"]), reverse=True)
     video_ble = [r for r in records if r["video"] and r["ble"] and r.get("session_kind") != "heart"]
     return {"updated_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(timespec="seconds"),
@@ -163,8 +171,16 @@ def summarize(records: list[dict], projects: list[dict], tasks_by_kind: dict, an
                        "files": sum(len(r["files"]) for r in records),
                        "available_files": sum(f["available"] for r in records for f in r["files"]),
                        "bytes": sum(r["bytes"] for r in records),
-                        "pending_import": sum(not r["tasks"]["activity"] and r.get("session_kind") != "heart" for r in records),
+                        "pending_import": sum(r["eligible"] and not r["tasks"]["activity"] for r in records),
                        **extra},
+            "funnel": {
+                "attempts": len(records),
+                "capture_ok": sum(r.get('capture_status') == 'completed' and not r.get('capture_error_code') for r in records),
+                "uploaded": sum(r['ingest_status'] == 'complete' for r in records),
+                "eligible": sum(r['eligible'] for r in records),
+                "in_label_studio": sum(bool(r['tasks']['activity']) for r in records),
+                "with_annotations": sum(bool(r['annotated_any']) for r in records),
+            },
             "ingest": dict(Counter(r["ingest_status"] for r in records)),
             "categories": category, "records": records}
 
@@ -191,6 +207,13 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
         ("Размечено", totals["annotated_any"], "видеозаписей"),
         ("Готово к разметке", totals["video_ble"] - totals["annotated_all"], f'из {totals["video_ble"]}'),
     ]
+    funnel = data['funnel']
+    cards = [("Попытки записи", funnel['attempts'], "серверные записи; локальные очереди не учтены"),
+             ("Записано без ошибок", funnel['capture_ok'], "успешный capture"),
+             ("Передано полностью", funnel['uploaded'], "включая ошибочные capture"),
+             ("Допущено к разметке", funnel['eligible'], "полный комплект и успешный capture"),
+             ("В Label Studio", funnel['in_label_studio'], "созданные задачи"),
+             ("Есть разметка", funnel['with_annotations'], "не означает покрытие всех кадров")]
     card_html = "".join(f'<div class="metric"><span>{name}</span><div><strong>{value}</strong><small>{hint}</small></div></div>'
                         for name, value, hint in cards)
     card_html += (f'<div class="metric"><span>Анкеты собак / сессий</span><div><strong>{totals["profile_versions"]}'
@@ -222,7 +245,7 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
             return False
         if ble != "all" and record["ble"] != (ble == "present"):
             return False
-        if status == "ready" and not (record["video"] and record["ble"] and
+        if status == "ready" and not (record['eligible'] and record["video"] and record["ble"] and
                                       all(record["tasks"][kind] for kind in VIDEO_KINDS) and
                                       not record["annotated_any"]):
             return False
@@ -276,6 +299,8 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
                  "Нет пары видео + BLE" if not (record["video"] and record["ble"]) else
                  "Видео размечено" if record["annotated_all"] else "В процессе" if record["annotated_any"] else
                  "Ожидает разметки")
+        if record.get('exclusion_reasons'):
+            state = '; '.join(record['exclusion_reasons'])
         if record.get("session_kind") == "heart":
             state = "Сердцебиение · хранение без разметки"
             dots = ""
@@ -286,7 +311,7 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
                     f'<td><span class="pill {"ok" if record["video"] else "neutral"}">Видео: {"есть" if record["video"] else "нет"}</span> '
                     f'<span class="pill {"ok" if record["ble"] else "neutral"}">BLE: {"есть" if record["ble"] else "нет"}</span></td>'
                     f'<td>{file_details}<div class="sub">{escape(record["ingest_status"])} · референсы: {record["reference_files"]}</div></td>'
-                    f'<td><div class="dots">{dots}</div><span class="state">{state} ({done}/{len(KINDS)})</span></td>'
+                    f'<td><div class="dots">{dots}</div><span class="state">{escape(state)} ({done}/{len(KINDS)})</span></td>'
                     f'<td>{questionnaire}</td><td>{action}</td></tr>')
 
     selected = lambda value, current: ' selected' if value == current else ''

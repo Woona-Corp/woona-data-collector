@@ -783,7 +783,7 @@ private fun ServerSyncSettingsCard(
                     color = MaterialTheme.colorScheme.error,
                 )
                 state.lastErrorMessage?.let { message ->
-                    ErrorCard(message)
+                    ErrorCard(com.example.myapplication.sync.serverSyncErrorText(message, language))
                 }
             }
             if (state.status == ServerSyncStatus.UPLOADING) {

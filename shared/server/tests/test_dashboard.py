@@ -54,12 +54,12 @@ class DashboardTest(unittest.TestCase):
         self.assertIn('Найдено 1 из 2 групп', render(data, "", status="incomplete"))
         self.assertIn('Найдено 0 из 2 групп', render(data, "", ble="absent"))
         self.assertIn('Показано 1–2 из 2', render(data, "", page=100))
-        self.assertIn('Ожидает импорта', render(data, ""))
+        self.assertIn('Анкета старого формата', render(data, ""))
         self.assertIn('Открыть ↗', render(data, ""))
         pending = deepcopy(data)
         pending["records"][0]["tasks"] = {kind: None for kind in KINDS}
         pending["records"][0]["annotated_any"] = False
-        self.assertIn('Ожидает импорта', render(pending, ""))
+        self.assertIn('Анкета старого формата', render(pending, ""))
         self.assertIn('Найдено 0 из 2 групп', render(pending, "", status="ready"))
 
     def test_anonymous_user_cannot_read_dashboard(self):
