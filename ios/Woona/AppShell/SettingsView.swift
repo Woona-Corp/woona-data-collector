@@ -58,6 +58,7 @@ struct SettingsView: View {
                 CompleteArchiveCard()
 
                 AppCard(title: appState.selectedLanguage == .russian ? "Серверное хранилище" : "Server storage") {
+                    Text(russian ? "Очередь всех локальных аккаунтов. Каждая анкета и запись отправляется в свой аккаунт." : "Queue for all local accounts. Each profile and recording uploads to its own account.").font(.footnote)
                     Text(appState.uploadQueueExplanation).font(.footnote)
                     Text(russian ? "Анкеты: \(appState.profileUploadPending) ожидают · \(appState.profileUploadFailed) ошибок" : "Profiles: \(appState.profileUploadPending) waiting · \(appState.profileUploadFailed) failed").font(.footnote)
                     if let error = appState.profileUploadLastError {
