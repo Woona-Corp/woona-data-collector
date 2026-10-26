@@ -37,6 +37,13 @@ struct ServerTransferStatus: Decodable {
         let exclusionReasons: [String]
         let taskStatus: String
     }
+    struct Quality: Decodable {
+        struct Warning: Decodable { let code: String; let count: Int? }
+        let status: String
+        let warnings: [Warning]
+        let continuousSensorCoverageVerified: Bool
+    }
+    let quality: Quality?
     let ingestStatus: String
     let transfer: Transfer?
     let artifacts: [Artifact]?

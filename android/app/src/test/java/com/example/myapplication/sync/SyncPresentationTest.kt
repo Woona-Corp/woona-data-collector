@@ -5,6 +5,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SyncPresentationTest {
+    @Test fun receivedBytesAndVerifiedFilesHaveDifferentHumanStates() {
+        assertTrue(transferStateText("awaiting_verification", true).contains("проверка"))
+        assertTrue(transferStateText("verified", false).contains("at the time"))
+        assertTrue(nextTransferActionText("contact_support_preserve_local_data", true).contains("сохраните"))
+        assertEquals("future_server_code", transferStateText("future_server_code", true))
+    }
+
     @Test fun emptyQueueDoesNotClaimServerOrLabelingIsHealthy() {
         val text = ServerSyncUiState(status = ServerSyncStatus.READY).queueExplanation(AppLanguage.ENGLISH)
         assertTrue(text.contains("does not verify server"))

@@ -262,7 +262,7 @@ struct ServerRecordingTransferView: View {
                     Text((ru ? "Проверено: " : "Checked: ") + recordingDisplayTime(date) + " · " + appState.serverBaseURL).font(.caption)
                 }
                 if let transfer = status.transfer {
-                    Text((ru ? "Доставка: " : "Transfer: ") + transfer.status).font(.caption)
+                    Text((ru ? "Доставка: " : "Transfer: ") + transferStateText(transfer.status, ru: ru)).font(.caption)
                     Text(ru ? "Передано \(transfer.uploadedBytes) из \(transfer.totalBytes) байт; проверено \(transfer.verifiedFiles) из \(transfer.totalFiles) файлов." : "Transferred \(transfer.uploadedBytes) of \(transfer.totalBytes) bytes; verified \(transfer.verifiedFiles) of \(transfer.totalFiles) files.").font(.caption)
                     ProgressView(value: Double(transfer.uploadedBytes), total: max(1, Double(transfer.totalBytes)))
                     Text(transfer.receiptVerified ? (ru ? "Серверная копия подтверждена по receipt и наличию файлов." : "Server copy confirmed by receipt and file availability.") : (ru ? "Полная серверная копия пока не подтверждена. Сохраняйте локальные данные." : "The full server copy is not confirmed. Preserve local data."))
@@ -270,6 +270,16 @@ struct ServerRecordingTransferView: View {
                     if let date = transfer.lastProgressAtUtc { Text((ru ? "Последнее продвижение: " : "Last progress: ") + recordingDisplayTime(date)).font(.caption) }
                     Text((ru ? "Следующее действие: " : "Next action: ") + transferNextAction(transfer.nextAction, ru: ru)).font(.caption)
                 } else { Text((ru ? "Сервер вернул прежний формат статуса: " : "Server returned the earlier status format: ") + status.ingestStatus).font(.caption) }
+                if let quality = status.quality {
+                    Text(quality.status == "warnings" ? (ru ? "Качество потока: есть предупреждения" : "Stream quality: warnings present") : (ru ? "Качество потока: " : "Stream quality: ") + (quality.status == "not_audited" ? (ru ? "не проверено" : "not checked") : (ru ? "диагностика проверена" : "diagnostics checked")))
+                        .font(.caption).foregroundStyle(quality.status == "warnings" ? Color.orange : Color.secondary)
+                    ForEach(Array(quality.warnings.enumerated()), id: \.offset) { _, warning in
+                        Text(qualityWarningText(warning.code, count: warning.count, ru: ru)).font(.caption)
+                    }
+                    if !quality.continuousSensorCoverageVerified {
+                        Text(ru ? "Непрерывное покрытие датчиком не подтверждено. Успешная загрузка файлов не проверяет полноту измерений." : "Continuous sensor coverage is not verified. A successful file transfer does not verify measurement completeness.").font(.caption)
+                    }
+                }
                 if let labeling = status.labeling {
                     Text(labeling.eligible ? (ru ? "Подходит для разметки. Наличие и выполнение задачи Label Studio этой проверкой не подтверждаются." : "Eligible for labeling. This check does not confirm a Label Studio task or its completion.") : (ru ? "Пока не подходит для разметки: " : "Not yet eligible for labeling: ") + labeling.exclusionReasons.joined(separator: "; ")).font(.caption)
                 }
@@ -285,6 +295,29 @@ struct ServerRecordingTransferView: View {
                 }
             }
         }
+    }
+}
+
+func qualityWarningText(_ code: String, count: Int?, ru: Bool) -> String {
+    let label: String
+    switch code {
+    case "packet_rejections_observed": label = ru ? "Зафиксированы отклонённые пакеты" : "Rejected packets were recorded"
+    case "reported_packet_loss_requires_validation": label = ru ? "Счётчик сообщал о потерях; число требует проверки и не является доказанной потерей" : "Reported packet loss requires validation; the counter is not proof of actual loss"
+    case "excluded_sensor_intervals": label = ru ? "При восстановлении исключены участки потока" : "Stream intervals were excluded during recovery"
+    default: label = code
+    }
+    return label + (count.map { ": \($0)" } ?? "")
+}
+
+func transferStateText(_ value: String, ru: Bool) -> String {
+    switch value {
+    case "metadata_pending": return ru ? "ожидаются метаданные и список файлов" : "waiting for metadata and file manifest"
+    case "uploading": return ru ? "передача файлов не завершена" : "file transfer is incomplete"
+    case "awaiting_verification": return ru ? "байты получены; проверка файлов или завершение ещё ожидается" : "bytes received; verification or finalization is pending"
+    case "verified": return ru ? "копия подтверждена на момент проверки" : "copy confirmed at the time of this check"
+    case "integrity_problem": return ru ? "обнаружена проблема целостности; сохраните локальные оригиналы" : "integrity problem; preserve local originals"
+    case "rejected": return ru ? "файл отклонён; требуется исправление причины" : "file rejected; the cause needs correction"
+    default: return value
     }
 }
 
