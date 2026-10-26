@@ -1072,7 +1072,10 @@ final class WoonaStore {
         var finalFiles: [(String, URL, String)] = []
         for file in files where FileManager.default.fileExists(atPath: file.source.path) {
             let target = directory.appendingPathComponent(file.name)
-            if file.source.standardizedFileURL != target.standardizedFileURL {
+            // Different URL spellings can name this same file (/var aliases or symlinks).
+            // Resolve before removing a destination, otherwise copying onto itself can
+            // delete the only original packet/video file.
+            if file.source.resolvingSymlinksInPath().standardizedFileURL != target.resolvingSymlinksInPath().standardizedFileURL {
                 try? FileManager.default.removeItem(at: target)
                 try FileManager.default.copyItem(at: file.source, to: target)
             }

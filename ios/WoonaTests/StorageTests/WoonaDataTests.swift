@@ -337,6 +337,26 @@ final class WoonaDataTests: XCTestCase {
         return (saved, remote)
     }
 
+    func testFinalizeDoesNotDeleteItsOwnFileThroughAStoragePathAlias() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let real = base.appendingPathComponent("real", isDirectory: true)
+        let alias = base.appendingPathComponent("alias", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: real)
+        let store = try WoonaStore(rootDirectory: alias)
+        let profile = try store.saveProfile(completeDog())
+        let record = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+        let packet = store.directory(for: record).appendingPathComponent("packets.bin")
+        let original = Data("original packet bytes".utf8)
+        try original.write(to: packet)
+        try store.finalize(recording: record, status: "completed",
+                           files: [("packet", packet.resolvingSymlinksInPath(), "packets.bin", "application/octet-stream")],
+                           syncJSON: Data("{}".utf8))
+        XCTAssertEqual(try Data(contentsOf: packet), original)
+        XCTAssertEqual(try store.artifacts(recordingID: record.id).first { $0.type == "packet" }?.sha256, WoonaStore.sha256(original))
+    }
+
     @MainActor
     func testTerminalImportedSessionWithoutMachineEndCanRemoveVerifiedFilesButNotAnActiveSession() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
