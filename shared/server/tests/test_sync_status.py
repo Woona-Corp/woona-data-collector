@@ -193,3 +193,16 @@ class CalibrationWireCompatibilityTest(unittest.TestCase):
             self.assertIsNone(result['offsetNs'])
             self.assertEqual(result['compatibilityPlaceholder'], offset is None)
         self.assertFalse(calibration_status({'calibration_offset_ns': 0, 'sensor_clock_quality': 'calibrated'})['measured'])
+
+
+class QualityStatusTest(unittest.TestCase):
+    def test_unknown_diagnostic_warnings_and_recovered_intervals_do_not_become_medical_acceptance(self):
+        from server.sync_status import quality_status
+        self.assertEqual(quality_status(None)['status'], 'not_audited')
+        result = quality_status({'data_quality': {'excluded_sensor_intervals': [{'start': 1, 'end': 2}]},
+            'archive_import': {'capture_quality': {'rejected_log_events': 115,
+                'reported_lost_max': 177, 'diagnostic_sha256': 'a' * 64}}})
+        self.assertEqual(result['status'], 'warnings')
+        self.assertEqual(len(result['warnings']), 3)
+        self.assertFalse(result['continuousSensorCoverageVerified'])
+        self.assertFalse(result['medicalQualityVerified'])

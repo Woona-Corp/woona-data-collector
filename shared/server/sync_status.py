@@ -29,6 +29,28 @@ def calibration_status(sync, artifacts=()) -> dict:
             'compatibilityPlaceholder': value is None}
 
 
+def quality_status(alignment) -> dict:
+    alignment = alignment if isinstance(alignment, dict) else {}
+    source = alignment.get('archive_import', {}).get('capture_quality') or {}
+    quality = alignment.get('data_quality') or {}
+    warnings = []
+    if source.get('rejected_log_events'):
+        warnings.append({'code': 'packet_rejections_observed',
+                         'count': source['rejected_log_events']})
+    if source.get('reported_lost_max'):
+        warnings.append({'code': 'reported_packet_loss_requires_validation',
+                         'count': source['reported_lost_max']})
+    if quality.get('excluded_sensor_intervals'):
+        warnings.append({'code': 'excluded_sensor_intervals',
+                         'count': len(quality['excluded_sensor_intervals'])})
+    if quality.get('invalid_structure_packets'):
+        warnings.append({'code': 'invalid_sensor_packets', 'count': quality['invalid_structure_packets']})
+    return {'status': 'warnings' if warnings else 'audited' if quality or source.get('status') == 'diagnostics_checked' else 'not_audited',
+            'warnings': warnings, 'diagnosticSha256': source.get('diagnostic_sha256'),
+            'continuousSensorCoverageVerified': False,
+            'medicalQualityVerified': False}
+
+
 def artifact_status(row, storage_root: Path) -> dict:
     """HEAD-compatible acknowledged offset, without hashing large files on every poll."""
     expected = row['expected_size_bytes']
@@ -155,6 +177,7 @@ def recording_status(recording, artifact_rows, storage_root: Path, *, now=None) 
             'stalled': stale, 'staleAfterSeconds': STALE_AFTER_SECONDS, 'retryable': retryable,
             'nextAction': action, 'lastError': last_error},
         'artifacts': artifacts,
+        'quality': quality_status(recording.get('alignment')),
         'labeling': {'eligible': not reasons, 'exclusionReasons': reasons,
                      'status': 'excluded' if reasons else 'eligible', 'taskStatus': 'not_checked'},
     }

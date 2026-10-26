@@ -66,6 +66,7 @@ def records_from_sources() -> tuple[list[dict], dict]:
             SELECT r.id, r.started_at, r.ingest_status, r.capture_status,
                    r.questionnaire_validation_state, r.session_questionnaire, r.capture_error_code,
                    r.capture_error_message,r.server_verified_at,r.receipt_sha256,r.server_updated_at,
+                   (SELECT alignment FROM recording_sync WHERE recording_id=r.id) AS alignment,
                    d.number_or_name, v.id AS profile_id, v.validation_state AS profile_state,
                    v.questionnaire AS profile_questionnaire,
                    a.artifact_type, a.file_name, a.expected_size_bytes,
@@ -375,6 +376,13 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
                 f"{transfer['uploadedBytes']:,} / {transfer['totalBytes']:,} B · проверено файлов: " +
                 f"{transfer['verifiedFiles']}/{transfer['totalFiles']}" +
                 (f"<br>Нет прогресса с {escape(transfer['lastProgressAtUtc'] or 'неизвестного времени')}" if transfer['stalled'] else ''))
+        quality = record.get('server_status', {}).get('quality', {})
+        if quality.get('warnings'):
+            quality_names = {'packet_rejections_observed': 'Отброшенные пакеты в исходном журнале',
+                'reported_packet_loss_requires_validation': 'Счётчик потерь требует перепроверки',
+                'excluded_sensor_intervals': 'Исключённые интервалы датчиков', 'invalid_sensor_packets': 'Некорректные пакеты датчиков'}
+            transfer_html += '<details><summary>Качество данных: есть замечания</summary><ul>' + ''.join(
+                '<li>' + escape(quality_names.get(item['code'], item['code'])) + ': ' + str(item.get('count', 0)) + '</li>' for item in quality['warnings']) + '</ul></details>'
         capture_message = record.get('capture_error_message')
         if capture_message:
             transfer_html += '<details><summary>Ошибка записи</summary><pre>' + escape(capture_message) + '</pre></details>'
