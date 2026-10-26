@@ -1,4 +1,5 @@
 import XCTest
+import SQLite3
 @testable import Woona
 
 @MainActor
@@ -8,7 +9,7 @@ final class AppShellTests: XCTestCase {
                        "Запись: прервана — сбой связи с ошейником (GATT 8)")
         XCTAssertEqual(recordingCaptureText(status: "failed", code: "gatt_error", message: "GATT status 133", language: .english),
                        "Capture: interrupted — collar connection failed (GATT 133)")
-        XCTAssertEqual(recordingUploadText(state: "synced", message: nil, language: .russian), "Загрузка: файлы подтверждены сервером")
+        XCTAssertEqual(recordingUploadText(state: "synced", message: nil, language: .russian), "Загрузка: загрузка была подтверждена; актуальную копию проверьте ниже")
         XCTAssertTrue(recordingCaptureText(status: "completed", code: "camera_failed", message: "Broken pipe", language: .russian).contains("завершена с проблемой"))
     }
 
@@ -46,6 +47,42 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(recordingDisplayTime("2026-10-26T11:32:00Z", timeZone: zone), "26.10.2026 14:32")
         XCTAssertEqual(recordingDisplayTime("2026-10-26T11:32:00.123Z", timeZone: zone), "26.10.2026 14:32")
         XCTAssertEqual(recordingDisplayTime("unknown", timeZone: zone), "unknown")
+    }
+
+    func testProfileDatabaseFailureIsThrownAndRetryKeepsOriginalDraft() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try WoonaStore(rootDirectory: directory)
+        let model = AppViewModel(store: store, uiTesting: true)
+        var draft = DogQuestionnaire()
+        draft.schemaVersion = 2; draft.animalId = "retained-draft"; draft.numberOrName = "Unsaved animal"
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        XCTAssertEqual(sqlite3_exec(database, "CREATE TRIGGER fail_profile_save BEFORE INSERT ON dogs BEGIN SELECT RAISE(ABORT, 'Injected database save failure'); END", nil, nil, nil), SQLITE_OK)
+        XCTAssertThrowsError(try model.saveDogProfile(draft)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Injected database save failure"))
+            XCTAssertTrue(questionnaireSaveError(error, language: .english).contains("Your draft remains open"))
+        }
+        XCTAssertEqual(draft.numberOrName, "Unsaved animal")
+        XCTAssertTrue(try store.profiles().isEmpty)
+        XCTAssertEqual(sqlite3_exec(database, "DROP TRIGGER fail_profile_save", nil, nil, nil), SQLITE_OK)
+        try model.saveDogProfile(draft)
+        XCTAssertEqual(try store.profiles().first?.questionnaire.animalId, "retained-draft")
+        XCTAssertEqual(model.selectedDogProfile?.numberOrName, "Unsaved animal")
+    }
+
+    func testReplaySourceCannotBePresentedAsLiveSensorCapture() {
+        XCTAssertEqual(recordingSourceText("live", language: .russian), "Источник: запись с датчика")
+        XCTAssertEqual(recordingSourceText("replay", language: .english), "Source: local file replay")
+        XCTAssertTrue(recordingSourceText("future_source", language: .russian).contains("неизвестен (future_source)"))
+    }
+
+    func testUnavailableDatabaseCannotReportProfileSaveSuccess() {
+        let model = AppViewModel(store: nil, uiTesting: true)
+        XCTAssertThrowsError(try model.saveDogProfile(DogQuestionnaire())) { error in
+            XCTAssertTrue(error.localizedDescription.contains("database is unavailable"))
+        }
     }
 
     func testApplyingAccountWithoutServerFiltersLocalDogs() throws {

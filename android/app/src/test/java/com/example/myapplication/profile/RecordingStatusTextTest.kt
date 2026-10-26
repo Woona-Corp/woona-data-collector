@@ -2,6 +2,7 @@ package com.example.myapplication.profile
 
 import com.example.myapplication.localization.recordingCaptureText
 import com.example.myapplication.localization.recordingUploadText
+import com.example.myapplication.localization.recordingSourceText
 import com.example.myapplication.localization.recordingUploadErrorText
 
 import com.example.myapplication.localization.AppLanguage
@@ -15,7 +16,7 @@ class RecordingStatusTextTest {
     @Test fun failedCaptureStaysExplicitWhenUploadSucceeded() {
         assertEquals("Запись: прервана — сбой связи с ошейником (GATT 8)",
             recordingCaptureText("failed", "gatt_error", "Ошибка GATT-подключения: 8", ru))
-        assertEquals("Загрузка: файлы подтверждены сервером", recordingUploadText("synced", null, ru))
+        assertEquals("Загрузка: загрузка была подтверждена; актуальную копию проверьте ниже", recordingUploadText("synced", null, ru))
         assertEquals("Capture: interrupted — collar connection failed (GATT 133)",
             recordingCaptureText("failed", "gatt_error", "GATT status 133", en))
     }
@@ -59,4 +60,10 @@ class RecordingStatusTextTest {
         assertTrue(recordingUploadErrorText("local_copy_changed", ru).contains("Удаление отменено"))
         assertEquals("Unexpected future failure", recordingUploadErrorText("Unexpected future failure", en))
     }
+    @Test fun replaySourceCannotBePresentedAsLiveSensorCapture() {
+        assertEquals("Источник: запись с датчика", recordingSourceText("live", AppLanguage.RUSSIAN))
+        assertEquals("Source: local file replay", recordingSourceText("replay", AppLanguage.ENGLISH))
+        assertTrue(recordingSourceText("future_source", AppLanguage.RUSSIAN).contains("неизвестен (future_source)"))
+    }
+
 }

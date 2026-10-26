@@ -30,6 +30,7 @@ internal val serverOperationLock = java.util.concurrent.locks.ReentrantLock()
 enum class ServerSyncStatus {
     NOT_CONFIGURED,
     READY,
+    WAITING,
     UPLOADING,
     NEEDS_ATTENTION,
 }
@@ -44,6 +45,9 @@ data class ServerSyncUiState(
     val failed: Int = 0,
     val lastErrorMessage: String? = null,
     val restoring: Boolean = false,
+    val mutationsAllowed: Boolean = true,
+    val networkPolicyAllowed: Boolean = true,
+    val mutationBlockReason: String? = null,
     val networkAvailable: Boolean? = null,
     val unmeteredNetwork: Boolean? = null,
     val workersRunning: Int = 0,

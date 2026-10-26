@@ -298,6 +298,52 @@ class AppShellNavigationTest {
     }
 
     @Test
+    fun failedProfileSaveShowsInlineCauseAndPreservesDraftForRetry() {
+        var attempts = 0
+        var savedName: String? = null
+        composeRule.setContent {
+            MaterialTheme {
+                DogQuestionnaireDialog(initial = null, required = false, language = AppLanguage.ENGLISH,
+                    onDismiss = {}, onSave = { profile ->
+                        attempts++
+                        if (attempts == 1) error("Injected database save failure")
+                        savedName = profile.numberOrName
+                    })
+            }
+        }
+        composeRule.onNodeWithText("Номер/ID животного *").performTextInput("retained-id")
+        composeRule.onNodeWithText("Кличка *").performTextInput("Retained draft")
+        composeRule.onNodeWithText("Validate and save").performClick()
+        composeRule.onNodeWithText("Injected database save failure", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Retained draft").assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(null, savedName) }
+        composeRule.onNodeWithText("Validate and save").performClick()
+        composeRule.runOnIdle { assertEquals("Retained draft", savedName); assertEquals(2, attempts) }
+    }
+
+    @Test
+    fun busyServerSettingsKeepReadOnlyConnectionCheckAvailable() {
+        setShellContent(serverSyncState = ServerSyncUiState(
+            status = ServerSyncStatus.READY, pending = 1, mutationsAllowed = false, mutationBlockReason = "capture"))
+        navTab("Settings").performClick()
+        composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
+        composeRule.onNodeWithText("Check connection").performScrollTo().assertIsEnabled()
+        composeRule.onNodeWithText("Reconnect").performScrollTo().assertIsNotEnabled()
+        composeRule.onNodeWithText("Retry uploads").performScrollTo().assertIsNotEnabled()
+        composeRule.onNodeWithText("Restore from server").performScrollTo().assertIsNotEnabled()
+    }
+
+    @Test
+    fun queuedUploadDoesNotPreventChangingWifiOnlyPolicy() {
+        setShellContent(serverSyncState = ServerSyncUiState(status = ServerSyncStatus.WAITING,
+            uploading = 1, workersRunning = 0, mutationsAllowed = false, networkPolicyAllowed = true))
+        navTab("Settings").performClick()
+        composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
+        composeRule.onNodeWithText("Wi-Fi only").performScrollTo()
+        composeRule.onNode(isToggleable() and hasAnySibling(hasText("Wi-Fi only")), useUnmergedTree = true).assertIsEnabled()
+    }
+
+    @Test
     fun requiredDogProfile_cannotBeSkipped() {
         var savedProfiles = 0
         composeRule.setContent {

@@ -23,7 +23,7 @@ final class OverviewParityTests: XCTestCase {
             app.swipeUp()
         }
         XCTAssertTrue(cause.exists)
-        XCTAssertTrue(app.staticTexts["Upload: files confirmed by the server"].exists)
+        XCTAssertTrue(app.staticTexts["Upload: upload was confirmed; check the current server copy below"].exists)
         let details = app.buttons["Error details"]
         if !details.isHittable { app.swipeUp() }
         details.tap()
@@ -80,6 +80,27 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertEqual(app.textFields["dog.editor.animalID"].value as? String, "ui-dog-2")
     }
 
+    func testProfileSaveFailureKeepsEditorAndDraftUntilSuccessfulRetry() {
+        app.terminate()
+        app.launchArguments += ["--ui-testing-fail-profile-save"]
+        app.launch()
+        XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
+        app.buttons["dog.edit"].tap()
+        let name = app.textFields["dog.editor.name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap(); name.typeText(" retained")
+        let draftName = name.value as? String
+        app.buttons["dog.editor.save"].tap()
+        XCTAssertTrue(app.staticTexts["dog.editor.saveError"].waitForExistence(timeout: 5))
+        XCTAssertEqual(name.value as? String, draftName)
+        XCTAssertTrue(app.buttons["dog.editor.save"].exists)
+        XCTAssertFalse(app.buttons["dog.new"].isHittable)
+        app.buttons["dog.editor.save"].tap()
+        XCTAssertTrue(app.buttons["dog.new"].waitForExistence(timeout: 5))
+        app.buttons["dog.edit"].tap()
+        XCTAssertEqual(name.value as? String, draftName)
+    }
+
     func testNewSavesSeparateDogAndKeepsExistingProfile() {
         app.buttons["dog.new"].tap()
         let id = app.textFields["dog.editor.animalID"]
@@ -111,6 +132,10 @@ final class OverviewParityTests: XCTestCase {
         screenshot.name = "Overview-Russian-dark"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+        for (tab, name) in [("overview", "Animals"), ("session", "Session"), ("video", "Video"), ("recordings", "Recordings"), ("settings", "Settings")] {
+            app.buttons["tab." + tab].tap()
+            attachScreen(name + "-RussianDark")
+        }
     }
 
     func testLanguageChangeUpdatesNavigationAndThemeLabels() {
@@ -151,6 +176,7 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(scan.isHittable)
         XCTAssertEqual(scan.label, "START SCAN")
         XCTAssertTrue(replay.isHittable)
+        XCTAssertEqual(replay.label, "Replay local file (debug)")
         XCTAssertLessThan(scan.frame.minY, replay.frame.minY)
         XCTAssertFalse(app.buttons["DISCONNECT"].exists)
     }
@@ -158,11 +184,20 @@ final class OverviewParityTests: XCTestCase {
     func testFiveTabsPreserveSelectionAndSeparateFunctions() {
         let tabs = ["overview", "session", "video", "recordings", "settings"]
         for tab in tabs { XCTAssertTrue(app.buttons["tab." + tab].exists) }
+        attachScreen("Animals-EnglishLight")
         app.buttons["tab.video"].tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "No active video")).firstMatch.exists)
         XCTAssertFalse(app.textFields["account.input"].exists)
+        attachScreen("Video-EnglishLight")
         app.buttons["tab.recordings"].tap()
         XCTAssertTrue(app.staticTexts["No recordings for this dog"].exists)
+        attachScreen("Recordings-EnglishLight")
+        app.buttons["tab.session"].tap()
+        XCTAssertFalse(app.textFields["account.input"].exists)
+        attachScreen("Session-EnglishLight")
+        app.buttons["tab.settings"].tap()
+        XCTAssertTrue(app.buttons["server.configure"].exists)
+        attachScreen("Settings-EnglishLight")
         app.buttons["tab.overview"].tap()
         app.buttons["dog.edit"].tap()
         XCTAssertEqual(app.textFields["dog.editor.name"].value as? String, "UI Dog 1")
@@ -182,4 +217,11 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.buttons["chart.fullscreen.open"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.segmentedControls.buttons["Channel 2"].isSelected)
     }
+    private func attachScreen(_ name: String) {
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
 }

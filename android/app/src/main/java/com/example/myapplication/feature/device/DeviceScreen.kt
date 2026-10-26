@@ -85,6 +85,7 @@ import com.example.myapplication.protocol.ConnectionQuality
 import com.example.myapplication.sync.queueExplanation
 import com.example.myapplication.sync.label
 import com.example.myapplication.sync.ServerSyncStatus
+import com.example.myapplication.sync.mutationBlockExplanation
 import com.example.myapplication.sync.ServerSyncUiState
 import com.example.myapplication.ui.theme.AppThemeMode
 import androidx.core.view.WindowCompat
@@ -767,6 +768,7 @@ private fun ServerSyncSettingsCard(
                 if (language == AppLanguage.RUSSIAN) "Серверное хранилище" else "Server storage",
                 style = MaterialTheme.typography.labelMedium,
             )
+            if (!state.mutationsAllowed) Text(state.mutationBlockExplanation(language), style = MaterialTheme.typography.bodySmall)
             Text(state.queueExplanation(language), style = MaterialTheme.typography.bodySmall)
             Text((if (language == AppLanguage.RUSSIAN) "Аккаунт: " else "Account: ") + (state.accountId ?: (if (language == AppLanguage.RUSSIAN) "без аккаунта" else "unassigned")))
             Text(state.connectionCheck.label(language), style = MaterialTheme.typography.bodySmall)
@@ -790,6 +792,7 @@ private fun ServerSyncSettingsCard(
                 )
                 OutlinedButton(
                     onClick = onConfigure,
+                    enabled = state.mutationsAllowed,
                 ) {
                     Text(
                         if (state.isConfigured) {
@@ -803,7 +806,7 @@ private fun ServerSyncSettingsCard(
             ServerSyncSwitchRow(
                 title = if (language == AppLanguage.RUSSIAN) "Только по Wi‑Fi" else "Wi-Fi only",
                 checked = state.wifiOnly,
-                enabled = state.isConfigured,
+                enabled = state.isConfigured && state.networkPolicyAllowed,
                 onCheckedChange = onWifiOnlyChange,
             )
             Text(
@@ -834,14 +837,14 @@ private fun ServerSyncSettingsCard(
             }
             OutlinedButton(
                 onClick = onRetryPending,
-                enabled = state.isConfigured && state.pending + state.failed > 0,
+                enabled = state.isConfigured && state.mutationsAllowed && state.pending + state.failed > 0,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (language == AppLanguage.RUSSIAN) "Повторить выгрузку" else "Retry uploads")
             }
             OutlinedButton(
                 onClick = onRestore,
-                enabled = state.isConfigured && !state.restoring,
+                enabled = state.isConfigured && state.mutationsAllowed && !state.restoring,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(

@@ -13,7 +13,8 @@ fun ServerSyncUiState.queueExplanation(language: AppLanguage): String {
         networkAvailable == false -> text("Нет подключения к интернету. Очередь сохранена; отправка продолжится после подключения.", "No internet connection. The queue is saved and will resume when connected.")
         wifiOnly && unmeteredNetwork == false -> text("Отправка ждёт Wi-Fi или сети без тарификации. Подключите её либо отключите ограничение ниже.", "Uploads are waiting for Wi-Fi or an unmetered network. Connect or disable the restriction below.")
         failed > 0 -> text("Есть ошибки доставки. Откройте причину в записи; повторите отправку после устранения причины.", "Some transfers failed. Open the recording for its cause; retry after correcting it.")
-        uploading > 0 || workersRunning > 0 -> text("Обрабатываем очередь: подготовка, передача файлов и проверка целостности. Полученные байты ещё не означают подтверждённую копию.", "Processing the queue: preparation, transfer and integrity verification. Received bytes alone do not confirm a verified copy.")
+        workersRunning > 0 -> text("Обрабатываем очередь: подготовка, передача файлов и проверка целостности. Полученные байты ещё не означают подтверждённую копию.", "Processing the queue: preparation, transfer and integrity verification. Received bytes alone do not confirm a verified copy.")
+        uploading > 0 -> text("Сохранены незавершённые передачи. Фоновая задача сейчас не выполняется; проверьте ограничения сети. Данные не считаются загруженными.", "Unfinished transfers are saved. No background job is currently running; check network restrictions. Data is not marked uploaded.")
         pending > 0 -> text("Задачи ожидают запуска или повтора системой. Приложение не считает их загруженными; нажмите «Повторить выгрузку» для постановки в очередь.", "Tasks are waiting for the system to start or retry them. They are not marked uploaded; use Retry uploads to enqueue them.")
         else -> text("Локальная очередь пуста. Это не проверка доступности сервера и не статус разметки Label Studio.", "The local queue is empty. This does not verify server availability or Label Studio annotation status.")
     }
@@ -53,4 +54,14 @@ fun recordingServerReport(status: org.json.JSONObject, language: AppLanguage): S
             }
         }
     }.trim()
+}
+
+fun ServerSyncUiState.mutationBlockExplanation(language: AppLanguage): String {
+    val ru = language == AppLanguage.RUSSIAN
+    return when (mutationBlockReason) {
+        "capture" -> if (ru) "Завершите текущую сессию и сохранение файлов перед изменением сервера." else "Finish the current session and file finalization before changing server data."
+        "restore" -> if (ru) "Дождитесь завершения восстановления данных." else "Wait for the data restore to finish."
+        "upload" -> if (ru) "Дождитесь завершения текущей выгрузки." else "Wait for the current upload to finish."
+        else -> if (ru) "Дождитесь завершения текущей операции с аккаунтом или файлами." else "Wait for the current account or file operation to finish."
+    }
 }

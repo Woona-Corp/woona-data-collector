@@ -1,14 +1,22 @@
 import SwiftUI
 import UIKit
 
+func questionnaireSaveError(_ error: Error, language: AppLanguage) -> String {
+    let prefix = language == .russian
+        ? "Анкета не сохранена на устройстве. Черновик остаётся открытым; устраните причину и повторите сохранение."
+        : "The questionnaire was not saved on this device. Your draft remains open; correct the cause and retry."
+    return prefix + "\n" + error.localizedDescription
+}
+
 private struct LegacyDogQuestionnaireEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft: DogQuestionnaire
     @State private var errors: [String: String] = [:]
+    @State private var saveError: String?
     let language: AppLanguage
-    let onSave: (DogQuestionnaire) -> Void
+    let onSave: (DogQuestionnaire) throws -> Void
 
-    init(initial: DogQuestionnaire?, language: AppLanguage, onSave: @escaping (DogQuestionnaire) -> Void) {
+    init(initial: DogQuestionnaire?, language: AppLanguage, onSave: @escaping (DogQuestionnaire) throws -> Void) {
         _draft = State(initialValue: initial ?? DogQuestionnaire())
         self.language = language
         self.onSave = onSave
@@ -18,6 +26,7 @@ private struct LegacyDogQuestionnaireEditor: View {
         NavigationStack {
             ScrollViewReader { proxy in
                 Form {
+                    if let saveError { Text(saveError).foregroundStyle(.red).textSelection(.enabled).accessibilityIdentifier("dog.editor.saveError") }
                     Section {
                         ProgressView(value: progress)
                         Text(language == .russian ? "Заполнено \(Int(progress * 100))%" : "Completed \(Int(progress * 100))%")
@@ -118,8 +127,9 @@ private struct LegacyDogQuestionnaireEditor: View {
                                 return
                             }
                             draft = candidate
-                            onSave(candidate)
-                            dismiss()
+                            saveError = nil
+                            do { try onSave(candidate); dismiss() }
+                            catch { saveError = questionnaireSaveError(error, language: language) }
                         }
                     }
                 }
@@ -349,10 +359,11 @@ struct DogQuestionnaireEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft: DogQuestionnaire
     @State private var errors: [String: String] = [:]
+    @State private var saveError: String?
     let language: AppLanguage
-    let onSave: (DogQuestionnaire) -> Void
+    let onSave: (DogQuestionnaire) throws -> Void
 
-    init(initial: DogQuestionnaire?, language: AppLanguage, onSave: @escaping (DogQuestionnaire) -> Void) {
+    init(initial: DogQuestionnaire?, language: AppLanguage, onSave: @escaping (DogQuestionnaire) throws -> Void) {
         var value = initial ?? DogQuestionnaire()
         value.schemaVersion = 2
         value.species = value.species ?? "собака"
@@ -364,6 +375,7 @@ struct DogQuestionnaireEditor: View {
     var body: some View {
         NavigationStack {
             Form {
+                    if let saveError { Text(saveError).foregroundStyle(.red).textSelection(.enabled).accessibilityIdentifier("dog.editor.saveError") }
                 Section("Идентификация") {
                     Text("ID и кличка обязательны. Неизвестные ответы оставьте пустыми.")
                     TextField("Номер/ID животного *", text: text(\.animalId))
@@ -422,7 +434,9 @@ struct DogQuestionnaireEditor: View {
                     errors = draft.validate().errors
                     guard errors.isEmpty else { return }
                     draft.savedAtLocal = sheetSavedAt()
-                    onSave(draft); dismiss()
+                    saveError = nil
+                    do { try onSave(draft); dismiss() }
+                    catch { saveError = questionnaireSaveError(error, language: language) }
                 }.accessibilityIdentifier("dog.editor.save") }
             }
         }

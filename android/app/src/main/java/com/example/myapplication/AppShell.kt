@@ -385,6 +385,7 @@ private fun serverSyncStatusLabelRes(status: ServerSyncStatus): Int {
     return when (status) {
         ServerSyncStatus.NOT_CONFIGURED -> R.string.server_sync_not_configured
         ServerSyncStatus.READY -> R.string.server_sync_ready
+        ServerSyncStatus.WAITING -> R.string.server_sync_waiting
         ServerSyncStatus.UPLOADING -> R.string.server_sync_uploading
         ServerSyncStatus.NEEDS_ATTENTION -> R.string.server_sync_needs_attention
     }
