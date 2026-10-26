@@ -26,10 +26,11 @@
 - Treat client/server contract updates as one release: deploy and verify the
   compatible production API and migrations before distributing dependent mobile
   builds; update affected clients when a server change requires it.
-- Release Android and iOS together with matching functionality and marketing
-  versions, including platform-specific fixes. Build and distribute both clients
-  for every mobile release; verify TestFlight upload separately from simulator
-  artifacts and do not claim tester availability without checking Apple processing.
+- Release Android and iOS independently using `android-v*` and `ios-v*` tags.
+  Platform-specific fixes and marketing/build versions may ship separately.
+  Maintain functional parity and compatible shared contracts across both clients;
+  track any temporary feature gaps explicitly. Verify TestFlight upload and Apple
+  processing before claiming tester availability.
 
 ## Agent workflow
 
@@ -43,6 +44,7 @@
    instrumentation areas above. For server/Compose work, run `docker compose
    config -q` and the relevant tests from `shared/`. iOS tests run only on
    macOS/Xcode. State the exact checks and limitations in the final report.
-4. The single `.github/workflows/mobile.yml` workflow owns CI and tagged
-   releases. Keep GitHub Actions permissions minimal and release artifacts
-   clearly labeled as debug, signed Android release, or iOS simulator build.
+4. `.github/workflows/mobile.yml` owns cross-platform CI and Android releases
+   (`android-v*`); `.github/workflows/testflight.yml` owns iOS distribution
+   (`ios-v*` or a manual run). Keep GitHub Actions permissions minimal and
+   distinguish debug artifacts from signed releases and TestFlight builds.

@@ -2,7 +2,7 @@ name: Upload iOS to TestFlight
 
 on:
   push:
-    tags: ['v*']
+    tags: ['ios-v*']
   workflow_dispatch:
     inputs:
       upload:

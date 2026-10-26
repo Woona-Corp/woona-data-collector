@@ -86,17 +86,31 @@ The Android emulator reaches the host at `10.0.2.2`; a phone needs a reachable H
 
 ## Checks and releases
 
-Every push to `main` and every pull request runs Android unit tests, lint, a signed debug APK build, iOS simulator tests, and the Docker-backed server/API suite. The [workflow](.github/workflows/mobile.yml) also runs for `v*` tags. It publishes a GitHub Release only after all three jobs pass:
+Every push to `main` and every pull request runs Android unit tests, lint, a debug APK build, iOS simulator tests, and the Docker-backed server/API suite. Releases are independent; a platform-specific fix does not require releasing the other client. Keep functionality and shared contracts compatible across Android and iOS, and track temporary feature gaps explicitly. Marketing and build versions may differ.
 
-- `Woona-Android-release.apk` is signed with the field release key and can update an existing field installation. Tagged builds require the four Android signing secrets below. Branch builds publish a debug APK for development.
-- `Woona-iOS-simulator.zip` contains the tested simulator `.app`. It is **not** an iPhone IPA; distributing an iPhone build requires Apple signing and an Xcode archive.
-- SHA-256 files accompany both artifacts. Local APKs in `android/dist/`, `.env`, and server data are ignored by Git.
+| Release | Trigger | Checks and delivery |
+| --- | --- | --- |
+| Android | `android-v*` tag | Android tests/lint and server tests; signed APK and SHA-256 in a GitHub Release |
+| iOS | `ios-v*` tag, or manual `Upload iOS to TestFlight` workflow | iOS simulator tests; signed archive uploaded to App Store Connect |
 
-Before tagging, update Android `versionCode`/`versionName` and iOS `CURRENT_PROJECT_VERSION`/`MARKETING_VERSION`, then push a `v*` tag. Configure `ANDROID_KEYSTORE_BASE64`, `ANDROID_SIGNING_STORE_PASSWORD`, `ANDROID_SIGNING_KEY_ALIAS`, and `ANDROID_SIGNING_KEY_PASSWORD` as GitHub Actions secrets for a signed Android release. Do not embed a server token in a distributable APK; users enter it in app settings.
+For Android, update only `versionCode` and `versionName` in `android/app/build.gradle.kts`, then push the matching tag:
 
 ```bash
-git tag -a v1.3.0 -m 'Woona 1.3.0'
-git push origin v1.3.0
+git tag -a android-v1.3.8 -m 'Woona Android 1.3.8'
+git push origin android-v1.3.8
 ```
+
+For iOS, update only the app's `MARKETING_VERSION` in `ios/Woona.xcodeproj/project.pbxproj`, then push the matching tag. CI generates the build number automatically:
+
+```bash
+git tag -a ios-v1.3.8 -m 'Woona iOS 1.3.8'
+git push origin ios-v1.3.8
+```
+
+Commit and push version changes before tagging. Legacy `v*` tags no longer trigger releases. A push to `main` runs CI without distributing a new mobile build. For shared API/schema changes, deploy and verify a compatible server before distributing dependent clients; support clients already installed during a staged rollout.
+
+Android releases require `ANDROID_KEYSTORE_BASE64`, `ANDROID_SIGNING_STORE_PASSWORD`, `ANDROID_SIGNING_KEY_ALIAS`, and `ANDROID_SIGNING_KEY_PASSWORD`. `Woona-Android-release.apk` uses the field release key and can update an existing field installation; branch builds publish `Woona-Android-debug.apk`. Do not embed a server token in a distributable APK.
+
+iOS distribution requires Apple signing and App Store Connect secrets listed in [the iOS guide](ios/README.md). Simulator test success does not prove TestFlight availability: verify Apple processing and assignment to the tester group separately.
 
 Emulator and simulator checks cover software behavior. Real BLE, camera capture, `video.mp4` quality, and hardware synchronization still require tests with the target sensor and physical phones. Prior local acceptance notes are in the [acceptance report](shared/docs/target-server-plan/acceptance-report.md); they are historical results, not proof of a new release.
