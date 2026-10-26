@@ -17,7 +17,6 @@ import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 
 data class ProfileServerReceipt(
     val dogRevision: Long,
@@ -42,11 +41,28 @@ class ServerHttpException(
     val responseHeaders: Map<String, List<String>>,
 ) : IOException("Server returned HTTP $status: ${responseBody.take(500)}")
 
+class ServerTransferException(val code: String, message: String, val retryable: Boolean = false) : IOException("$code: $message")
+
+internal class TransferCursorGuard {
+    private val seen = HashSet<String>()
+    fun next(cursor: String?): String? {
+        if (cursor == null) return null
+        val parsed = runCatching { java.util.UUID.fromString(cursor).toString() }.getOrNull()
+        if (parsed == null || !parsed.equals(cursor, ignoreCase = true)) throw ServerTransferException("pagination_cursor_invalid", "Server returned an invalid restore cursor")
+        if (!seen.add(parsed)) throw ServerTransferException("pagination_stalled", "Server repeated a restore cursor. Previously restored local data is preserved.")
+        return parsed
+    }
+}
+
 class ServerApiClient(
     private val settings: ServerSettings,
     private val connectTimeoutMillis: Int = 15_000,
     private val readTimeoutMillis: Int = 30_000,
     private val chunkBytes: Int = 8 * 1024 * 1024,
+    private val connectionFactory: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection },
+    private val checkCancelled: () -> Unit = {
+        if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("Transfer interrupted; local data is preserved")
+    },
 ) {
     private var authenticatedDeviceId: String? = null
 
@@ -105,19 +121,8 @@ class ServerApiClient(
             require(file.isFile && file.length() == artifact.sizeBytes) {
                 "Artifact ${artifact.id} is missing or changed"
             }
-            var offset = uploadOffset(artifact.id)
-            require(offset in 0..artifact.sizeBytes) { "Invalid server offset $offset" }
-            onProgress(artifact.id, offset, false)
-            RandomAccessFile(file, "r").use { input ->
-                val buffer = ByteArray(chunkBytes)
-                while (offset < artifact.sizeBytes) {
-                    val wanted = minOf(buffer.size.toLong(), artifact.sizeBytes - offset).toInt()
-                    input.seek(offset)
-                    input.readFully(buffer, 0, wanted)
-                    offset = patch(artifact.id, offset, buffer, wanted)
-                    require(offset in 0..artifact.sizeBytes) { "Invalid server offset $offset" }
-                    onProgress(artifact.id, offset, false)
-                }
+            uploadArtifactBytes(artifact.id, artifact.sizeBytes, file) { offset ->
+                onProgress(artifact.id, offset, false)
             }
             jsonRequest("POST", "/v1/artifacts/${artifact.id}/complete", JSONObject())
             onProgress(artifact.id, artifact.sizeBytes, true)
@@ -135,66 +140,106 @@ class ServerApiClient(
         expectedSha256: String,
         target: File,
     ): File {
+        checkCancelled()
+        require(expectedSize >= 0) { "Artifact size cannot be negative" }
         if (target.isFile) {
-            require(target.length() == expectedSize && sha256(target) == expectedSha256) {
-                "A different local artifact already exists"
+            if (target.length() != expectedSize || sha256(target, checkCancelled) != expectedSha256) {
+                throw ServerTransferException("local_artifact_conflict", "A different local file exists. It was preserved; choose another destination.")
             }
             return target
         }
         val partial = File(target.parentFile, "${target.name}.download.part")
-        partial.parentFile?.mkdirs()
+        partial.parentFile?.let { if (!it.isDirectory && !it.mkdirs()) throw IOException("Cannot create download directory") }
         var offset = partial.takeIf(File::isFile)?.length() ?: 0L
+        if (offset == expectedSize && partial.isFile) {
+            if (sha256(partial, checkCancelled) == expectedSha256) return finishDownload(partial, target)
+            check(partial.delete()) { "Cannot remove an invalid incomplete download" }
+            offset = 0L
+        }
         if (offset > expectedSize) {
-            partial.delete()
+            check(partial.delete()) { "Cannot remove an oversized incomplete download" }
             offset = 0L
         }
         val connection = open("GET", "/v1/artifacts/$artifactId/content").apply {
             setRequestProperty("Accept-Encoding", "identity")
-            if (offset > 0L) setRequestProperty("Range", "bytes=$offset-")
-        }
-        val status = connection.responseCode
-        if (status !in setOf(HttpURLConnection.HTTP_OK, HttpURLConnection.HTTP_PARTIAL)) {
-            throw error(connection, status)
-        }
-        val etag = connection.getHeaderField("ETag")?.trim('"')
-        require(etag == null || etag == expectedSha256) { "Server artifact hash changed" }
-        if (offset > 0L && status != HttpURLConnection.HTTP_PARTIAL) {
-            partial.delete()
-            connection.disconnect()
-            return downloadArtifact(artifactId, expectedSize, expectedSha256, target)
-        }
-        if (offset > 0L) {
-            require(connection.getHeaderField("Content-Range")?.startsWith("bytes $offset-") == true) {
-                "Server returned a different download range"
+            if (offset > 0L) {
+                setRequestProperty("Range", "bytes=$offset-")
+                setRequestProperty("If-Range", "\"$expectedSha256\"")
             }
-        }
-        connection.inputStream.use { input ->
-            FileOutputStream(partial, offset > 0L).buffered().use { output ->
-                input.copyTo(output)
-            }
-        }
-        connection.disconnect()
-        require(partial.length() == expectedSize) { "Downloaded artifact size mismatch" }
-        if (sha256(partial) != expectedSha256) {
-            partial.delete()
-            throw IOException("Downloaded artifact hash mismatch")
         }
         try {
-            Files.move(
-                partial.toPath(),
-                target.toPath(),
-                StandardCopyOption.ATOMIC_MOVE,
-            )
-        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
-            Files.move(partial.toPath(), target.toPath())
+            val status = connection.responseCode
+            if (status !in setOf(HttpURLConnection.HTTP_OK, HttpURLConnection.HTTP_PARTIAL)) throw error(connection, status)
+            validateDownloadHeaders(connection, status, offset, expectedSize, expectedSha256)
+            // A server may ignore Range and return the complete representation. Reuse this
+            // response from byte zero; do not recursively request it or append it to a prefix.
+            if (status == HttpURLConnection.HTTP_OK) offset = 0
+            var written = offset
+            connection.inputStream.use { input ->
+                FileOutputStream(partial, offset > 0L).buffered().use { output ->
+                    val buffer = ByteArray(65_536)
+                    while (true) {
+                        checkCancelled()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (count.toLong() > expectedSize - written) {
+                            throw ServerTransferException("download_size_invalid", "Server sent more data than the declared artifact size")
+                        }
+                        output.write(buffer, 0, count)
+                        written += count
+                    }
+                }
+            }
+            if (written != expectedSize) throw ServerTransferException("download_incomplete", "Download ended at $written of $expectedSize bytes. The received prefix is preserved for retry.", retryable = true)
+        } catch (failure: ServerTransferException) {
+            if (failure.code == "download_size_invalid") partial.delete()
+            throw failure
+        } finally { connection.disconnect() }
+        checkCancelled()
+        if (sha256(partial, checkCancelled) != expectedSha256) {
+            partial.delete()
+            throw ServerTransferException("download_hash_mismatch", "Downloaded file failed SHA-256 verification; the incomplete copy was discarded and original data is preserved", retryable = true)
         }
+        return finishDownload(partial, target)
+    }
+
+    private fun finishDownload(partial: File, target: File): File {
+        checkCancelled()
+        // No REPLACE_EXISTING: a concurrently created local file must be preserved too.
+        Files.move(partial.toPath(), target.toPath())
         return target
+    }
+
+    private fun validateDownloadHeaders(connection: HttpURLConnection, status: Int, offset: Long, size: Long, sha256: String) {
+        val encoding = connection.getHeaderField("Content-Encoding")
+        if (encoding != null && !encoding.equals("identity", ignoreCase = true)) {
+            throw ServerTransferException("download_encoding_invalid", "The server ignored identity encoding; byte ranges cannot be trusted")
+        }
+        val etag = connection.getHeaderField("ETag")?.trim()
+        if (etag != null && etag != sha256 && etag != "\"$sha256\"") {
+            throw ServerTransferException("download_etag_mismatch", "Server artifact ETag differs from its saved SHA-256. Existing local data is preserved.")
+        }
+        val remaining = if (status == HttpURLConnection.HTTP_PARTIAL) {
+            val match = Regex("bytes ([0-9]+)-([0-9]+)/([0-9]+)").matchEntire(connection.getHeaderField("Content-Range").orEmpty())
+            val start = match?.groupValues?.get(1)?.toLongOrNull()
+            val end = match?.groupValues?.get(2)?.toLongOrNull()
+            val total = match?.groupValues?.get(3)?.toLongOrNull()
+            if (start != offset || total != size || size == 0L || end != size - 1) {
+                throw ServerTransferException("download_range_invalid", "Server returned a different or malformed byte range. The existing partial copy is preserved.")
+            }
+            size - offset
+        } else size
+        val length = connection.getHeaderField("Content-Length")
+        if (length != null && length.toLongOrNull() != remaining) {
+            throw ServerTransferException("download_length_invalid", "Server response length differs from its byte range and saved artifact size")
+        }
     }
 
     fun fetchRestoreSnapshot(): ServerRestoreSnapshot {
         val dogs = mutableListOf<RemoteDog>()
         val recordings = mutableListOf<RemoteRecording>()
         var dogCursor: String? = null
+        val dogCursors = TransferCursorGuard()
         do {
             val page = jsonRequest(
                 "GET",
@@ -207,6 +252,7 @@ class ServerApiClient(
                 val dog = parseDog(jsonRequest("GET", "/v1/dogs/$dogId", null))
                 dogs += dog
                 var recordingCursor: String? = null
+                val recordingCursors = TransferCursorGuard()
                 do {
                     val recordingPage = jsonRequest(
                         "GET",
@@ -223,10 +269,10 @@ class ServerApiClient(
                             ),
                         )
                     }
-                    recordingCursor = recordingPage.nullableString("nextCursor")
+                    recordingCursor = recordingCursors.next(recordingPage.nullableString("nextCursor"))
                 } while (recordingCursor != null)
             }
-            dogCursor = page.nullableString("nextCursor")
+            dogCursor = dogCursors.next(page.nullableString("nextCursor"))
         } while (dogCursor != null)
         return ServerRestoreSnapshot(dogs, recordings, fetchDeletions())
     }
@@ -266,35 +312,71 @@ class ServerApiClient(
         }
     }
 
-    private fun uploadOffset(artifactId: String): Long {
-        val connection = open("HEAD", "/v1/artifacts/$artifactId/content")
-        val status = connection.responseCode
-        if (status !in 200..299) throw error(connection, status)
-        return connection.getHeaderField("Upload-Offset")?.toLongOrNull()
-            ?: throw IOException("Server omitted Upload-Offset")
+    internal fun uploadArtifactBytes(artifactId: String, size: Long, file: File, onProgress: (Long) -> Unit = {}) {
+        require(size >= 0 && file.isFile && file.length() == size) { "Local artifact is missing or changed" }
+        var offset = uploadOffset(artifactId, size)
+        var resynchronizations = 0
+        onProgress(offset)
+        RandomAccessFile(file, "r").use { input ->
+            val buffer = ByteArray(chunkBytes)
+            while (offset < size) {
+                checkCancelled()
+                val wanted = minOf(buffer.size.toLong(), size - offset).toInt()
+                input.seek(offset)
+                try { input.readFully(buffer, 0, wanted) }
+                catch (_: java.io.EOFException) { throw ServerTransferException("local_artifact_truncated", "The source file ended before its saved size; original files are preserved") }
+                val acknowledged = patch(artifactId, offset, buffer, wanted)
+                offset = if (acknowledged == null) {
+                    if (++resynchronizations > 3) throw ServerTransferException("upload_conflict_stalled", "Server repeatedly rejected the upload offset. Retry will resume from its confirmed position.", retryable = true)
+                    uploadOffset(artifactId, size)
+                } else {
+                    if (acknowledged != offset + wanted) throw ServerTransferException("upload_offset_invalid", "PATCH acknowledged $acknowledged bytes; expected ${offset + wanted}. Upload completion is not confirmed.")
+                    acknowledged
+                }
+                onProgress(offset)
+            }
+        }
     }
 
-    private fun patch(
-        artifactId: String,
-        offset: Long,
-        bytes: ByteArray,
-        length: Int,
-    ): Long {
+    private fun uploadOffset(artifactId: String, size: Long): Long {
+        val connection = open("HEAD", "/v1/artifacts/$artifactId/content")
+        return try {
+            val status = connection.responseCode
+            if (status !in 200..299) throw error(connection, status)
+            val offset = requiredOffset(connection)
+            if (offset !in 0..size) throw ServerTransferException("upload_offset_invalid", "HEAD returned $offset bytes for a $size-byte artifact")
+            offset
+        } finally { connection.disconnect() }
+    }
+
+    private fun requiredOffset(connection: HttpURLConnection): Long = connection.getHeaderField("Upload-Offset")?.toLongOrNull()
+        ?: throw ServerTransferException("upload_offset_missing", "Server omitted a valid Upload-Offset. Its accepted position must be checked before continuing.")
+
+    /** A conflict is recovered only through a fresh bounded HEAD, never by guessing. */
+    private fun patch(artifactId: String, offset: Long, bytes: ByteArray, length: Int): Long? {
         val connection = open("PATCH", "/v1/artifacts/$artifactId/content").apply {
             setRequestProperty("Content-Type", "application/offset+octet-stream")
             setRequestProperty("Upload-Offset", offset.toString())
             setFixedLengthStreamingMode(length)
             doOutput = true
         }
-        connection.outputStream.use { it.write(bytes, 0, length) }
-        val status = connection.responseCode
-        if (status == HttpURLConnection.HTTP_CONFLICT) {
-            connection.disconnect()
-            return uploadOffset(artifactId)
-        }
-        if (status !in 200..299) throw error(connection, status)
-        return connection.getHeaderField("Upload-Offset")?.toLongOrNull()
-            ?: throw IOException("Server omitted Upload-Offset")
+        return try {
+            connection.outputStream.use { output ->
+                var position = 0
+                while (position < length) {
+                    checkCancelled()
+                    val count = minOf(65_536, length - position)
+                    output.write(bytes, position, count)
+                    position += count
+                }
+            }
+            val status = connection.responseCode
+            if (status == HttpURLConnection.HTTP_CONFLICT) null
+            else {
+                if (status !in 200..299) throw error(connection, status)
+                requiredOffset(connection)
+            }
+        } finally { connection.disconnect() }
     }
 
     private fun jsonRequest(method: String, path: String, body: JSONObject?): JSONObject {
@@ -306,33 +388,46 @@ class ServerApiClient(
                 doOutput = true
             }
         }
-        if (encoded != null) connection.outputStream.use { it.write(encoded) }
-        val status = connection.responseCode
-        if (status !in 200..299) throw error(connection, status)
-        val response = connection.inputStream.bufferedReader().use { it.readText() }
-        connection.disconnect()
-        return if (response.isBlank()) JSONObject() else JSONObject(response)
+        return try {
+            if (encoded != null) connection.outputStream.use { it.write(encoded) }
+            val status = connection.responseCode
+            if (status !in 200..299) throw error(connection, status)
+            val response = connection.inputStream.bufferedReader().use { it.readText() }
+            if (response.isBlank()) JSONObject() else JSONObject(response)
+        } finally { connection.disconnect() }
     }
 
-    private fun open(
-        method: String,
-        path: String,
-        authenticated: Boolean = true,
-    ): HttpURLConnection = (URL(settings.baseUrl + path).openConnection() as HttpURLConnection).apply {
-        requestMethod = method
-        connectTimeout = connectTimeoutMillis
-        readTimeout = readTimeoutMillis
-        useCaches = false
-        setRequestProperty("Accept", "application/json")
-        if (authenticated) setRequestProperty("Authorization", "Bearer ${settings.token}")
-        settings.accountId?.let { setRequestProperty("X-Woona-Account", it) }
+    private fun open(method: String, path: String, authenticated: Boolean = true): HttpURLConnection {
+        checkCancelled()
+        return connectionFactory(URL(settings.baseUrl + path)).apply {
+            requestMethod = method
+            connectTimeout = connectTimeoutMillis
+            readTimeout = readTimeoutMillis
+            useCaches = false
+            instanceFollowRedirects = false // Never forward device credentials to another host.
+            setRequestProperty("Accept", "application/json")
+            if (authenticated) setRequestProperty("Authorization", "Bearer ${settings.token}")
+            settings.accountId?.let { setRequestProperty("X-Woona-Account", it) }
+        }
     }
 
     private fun error(connection: HttpURLConnection, status: Int): ServerHttpException {
-        val body = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        val exception = ServerHttpException(status, body, connection.headerFields)
-        connection.disconnect()
-        return exception
+        // Bound untrusted error payloads; callers always release the connection in finally.
+        val body = try { connection.errorStream?.bufferedReader()?.use { reader ->
+            val buffer = CharArray(16_384)
+            var size = 0
+            while (size < buffer.size) {
+                checkCancelled()
+                val read = reader.read(buffer, size, buffer.size - size)
+                if (read < 0) break
+                size += read
+            }
+            String(buffer, 0, size)
+        }.orEmpty() } catch (failure: IOException) {
+            if (Thread.currentThread().isInterrupted) throw failure
+            "The error response body could not be read (${failure.javaClass.simpleName}); HTTP status $status was received."
+        }
+        return ServerHttpException(status, body, connection.headerFields)
     }
 
     private fun profilePayload(record: ProfileSyncRecord): JSONObject = JSONObject().apply {
@@ -547,11 +642,12 @@ private fun JSONObject.nullableLong(key: String): Long? =
 private fun JSONObject.nullableDouble(key: String): Double? =
     if (!has(key) || isNull(key)) null else getDouble(key)
 
-private fun sha256(file: File): String {
+private fun sha256(file: File, checkCancelled: () -> Unit = {}): String {
     val digest = java.security.MessageDigest.getInstance("SHA-256")
     file.inputStream().buffered().use { input ->
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         while (true) {
+            checkCancelled()
             val read = input.read(buffer)
             if (read < 0) break
             digest.update(buffer, 0, read)
