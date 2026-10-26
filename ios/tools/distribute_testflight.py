@@ -61,7 +61,8 @@ def main():
                     'type': 'betaBuildLocalizations', 'id': localization['id'],
                     'attributes': {'whatsNew': notes}}})
         assigned = {group['id'] for group in report['groups']}
-        missing = [group for group in selected if group['id'] not in assigned]
+        # Internal group membership is managed automatically by App Store Connect.
+        missing = [group for group in selected if not group['is_internal'] and group['id'] not in assigned]
         if missing:
             request('/v1/builds/' + build_id + '/relationships/betaGroups', 'POST',
                     {'data': [{'type': 'betaGroups', 'id': group['id']} for group in missing]})
