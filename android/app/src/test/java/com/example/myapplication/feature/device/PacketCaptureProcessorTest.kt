@@ -504,6 +504,66 @@ class PacketCaptureProcessorTest {
         }
     }
 
+    @Test
+    fun corruptHeaderIsQuarantinedWithoutPoisoningNormalPacketsAndRawIsPreserved() {
+        val directory = Files.createTempDirectory("packet-poison-regression").toFile()
+        val updates = mutableListOf<PacketProcessingUpdate>()
+        val processor = PacketCaptureProcessor(
+            packetFileStore = BlePacketFileStore(directory),
+            rawFragmentFileStore = BleRawFragmentFileStore(directory),
+            diagnosticLogFileStore = BleDiagnosticLogFileStore(directory),
+            onPacketProcessed = updates::add,
+            onError = { message, exception -> throw AssertionError(message, exception) },
+        )
+        val first = validPacket(counter = 644, timerMillis = 658674)
+        val corrupt = validPacket(counter = 3_222_815_366L.toInt(), timerMillis = 974731800)
+        val normal = validPacket(counter = 648, timerMillis = 662678)
+        processor.submit(first)
+        processor.submit(corrupt)
+        processor.submit(normal)
+        assertTrue(processor.finishCapture(2_000))
+        processor.close()
+        assertEquals(2L, updates.last().packetsReceived)
+        assertEquals(3L, updates.last().packetsLost)
+        assertEquals(1L, updates.last().packetsRejected)
+        assertEquals(0L, updates.last().timerRegressionRejects)
+        assertArrayEquals(first + normal, requireNotNull(processor.currentPacketFile()).readBytes())
+        val raw = requireNotNull(processor.currentRawFile()).readBytes()
+        assertTrue(raw.asList().windowed(corrupt.size).any { it == corrupt.asList() })
+        assertTrue(updates.any { it.lastPacketIssue?.contains("quarantined") == true })
+    }
+
+    @Test
+    fun rolloverAndConfirmedResetPreserveCaptureAndExposeNewClockSegment() {
+        val cases = listOf(
+            Triple(listOf(4_294_967_294L to 4_294_967_290L, 1L to 5L), 2L, "rollover"),
+            Triple(listOf(100L to 1000L, 1L to 5L, 2L to 6L), 0L, "continuity unknown"),
+            Triple(listOf(10L to 100L, 100010L to 200L, 100011L to 201L), 100000L, "confirmed"),
+        )
+        cases.forEach { (headers, expectedLost, issue) ->
+            val directory = Files.createTempDirectory("packet-clock-transition").toFile()
+            val updates = mutableListOf<PacketProcessingUpdate>()
+            val processor = PacketCaptureProcessor(
+                packetFileStore = BlePacketFileStore(directory),
+                rawFragmentFileStore = BleRawFragmentFileStore(directory),
+                diagnosticLogFileStore = BleDiagnosticLogFileStore(directory),
+                onPacketProcessed = updates::add,
+                onError = { message, exception -> throw AssertionError(message, exception) },
+            )
+            headers.forEach { (counter, timer) ->
+                processor.submit(validPacket(counter.toInt(), timer.toInt(), listOf(sensorBlock(2, listOf(listOf(10, 20))))))
+            }
+            assertTrue(processor.finishCapture(2_000))
+            processor.close()
+            val last = updates.last()
+            assertEquals(2L, last.packetsReceived)
+            assertEquals(expectedLost, last.packetsLost)
+            assertEquals(if (headers.size == 2) 0L else 1L, last.packetsRejected)
+            assertTrue(requireNotNull(last.lastPacketIssue).contains(issue))
+            assertTrue(last.chartSamplesByStream.values.flatten().first().startsNewSegment)
+        }
+    }
+
     private fun validPacket(
         counter: Int,
         timerMillis: Int,
