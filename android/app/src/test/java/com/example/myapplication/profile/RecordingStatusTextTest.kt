@@ -58,6 +58,8 @@ class RecordingStatusTextTest {
         assertTrue(recordingUploadErrorText("artifact_hash_mismatch", ru).contains("Контрольная сумма"))
         assertTrue(recordingUploadErrorText("wrong_capture_device", en).contains("another device"))
         assertTrue(recordingUploadErrorText("local_copy_changed", ru).contains("Удаление отменено"))
+        assertTrue(recordingUploadErrorText("HTTP 409: profile_content_already_exists", ru).contains("Восстановите профили"))
+        assertTrue(recordingUploadErrorText("profile_content_already_exists", en).contains("do not create it again"))
         assertEquals("Unexpected future failure", recordingUploadErrorText("Unexpected future failure", en))
     }
     @Test fun replaySourceCannotBePresentedAsLiveSensorCapture() {

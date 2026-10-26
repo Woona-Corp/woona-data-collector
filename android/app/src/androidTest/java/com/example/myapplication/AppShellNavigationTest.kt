@@ -148,7 +148,9 @@ class AppShellNavigationTest {
 
     @Test
     fun exportButton_isHiddenOnSettings_andDisabledWithoutFiles() {
-        setShellContent()
+        setShellContent(serverSyncState = ServerSyncUiState(status = ServerSyncStatus.READY))
+        composeRule.onNodeWithContentDescription("Upload queue empty").assertExists()
+        composeRule.onNodeWithContentDescription("Server sync ready").assertDoesNotExist()
 
         composeRule.onNodeWithText("Export").assertExists().assertIsNotEnabled()
 

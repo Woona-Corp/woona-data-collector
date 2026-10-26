@@ -104,6 +104,7 @@ private let serverReasons: [String: (String, String)] = [
     "pagination_cursor_invalid": ("Сервер вернул некорректную ссылку на следующую страницу. Восстановление остановлено; локальные данные сохранены.", "The server returned an invalid next-page cursor. Restore stopped and local data is preserved."),
     "orphaned_upload_recovered": ("Предыдущая отправка прервалась, и активной задачи нет. Очередь восстановлена; файлы и подтверждённые позиции сохранены.", "A previous upload was interrupted and has no active task. The queue was recovered; files and confirmed positions are preserved."),
     "transfer_paused": ("Отправка приостановлена. Файлы и принятые сервером байты сохранены; повтор продолжит загрузку.", "The upload is paused. Files and accepted server bytes are preserved; a retry resumes the transfer."),
+    "profile_content_already_exists": ("Эти ответы анкеты уже сохранены на сервере. Восстановите профили и выберите текущую карточку; не создавайте её повторно", "These questionnaire answers are already saved on the server. Restore profiles and select the current profile; do not create it again"),
     "account_header_mismatch": ("Аккаунт запроса не совпадает с аккаунтом животного", "The request account does not match the animal account"),
     "dog_account_conflict": ("Аккаунт запроса не совпадает с аккаунтом животного", "The request account does not match the animal account"),
     "account_required": ("Не выбран аккаунт", "No account is selected"),
@@ -640,6 +641,9 @@ struct OverviewView: View {
                 .padding(12)
             }
             .background(Color.woonaBackground)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if section == .session { SessionSectionPicker() }
+            }
             .navigationTitle(screenTitle)
             .navigationBarTitleDisplayMode(.inline)
             .onChange(of: appState.recentRecordings) { _, records in
@@ -701,11 +705,13 @@ struct OverviewView: View {
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(appState.text(.export)) {
-                        isExportOptionsPresented = true
+                if section == .session || section == .recordings {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(appState.text(.export)) {
+                            isExportOptionsPresented = true
+                        }
+                        .disabled(appState.exportPhase != nil)
                     }
-                    .disabled(appState.exportPhase != nil)
                 }
             }
             .fileImporter(

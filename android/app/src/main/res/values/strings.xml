@@ -55,7 +55,7 @@
     <string name="language_english">English</string>
     <string name="language_russian">Russian</string>
     <string name="server_sync_not_configured">Server sync is not configured</string>
-    <string name="server_sync_ready">Server sync ready</string>
+    <string name="server_sync_ready">Upload queue empty</string>
     <string name="server_sync_uploading">Uploading to server</string>
     <string name="server_sync_needs_attention">Server sync needs attention</string>
     <string name="ble_devices_title">BLE devices</string>

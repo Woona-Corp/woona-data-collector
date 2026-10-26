@@ -1224,7 +1224,7 @@ final class WoonaDataTests: XCTestCase {
             let client = try WoonaServerClient(configuration: .init(baseURL: "https://sync.test", wifiOnly: false), token: "fixture", sessionConfiguration: configuration)
             let model = AppViewModel(store: store, uiTesting: true, questionnaireClientFactory: { _ in client })
             XCTAssertTrue(model.canEditQuestionnaire(displayed))
-            func awaitEditorReady() async {
+            @MainActor func awaitEditorReady() async {
                 let clock = ContinuousClock()
                 let deadline = clock.now.advanced(by: .seconds(5))
                 while !model.canEditQuestionnaire(displayed), clock.now < deadline { await Task.yield() }

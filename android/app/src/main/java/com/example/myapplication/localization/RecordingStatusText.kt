@@ -25,6 +25,7 @@ private val serverReasons = mapOf(
     "pagination_cursor_invalid" to ("Сервер вернул некорректную ссылку на следующую страницу. Восстановление остановлено; локальные данные сохранены." to "The server returned an invalid next-page cursor. Restore stopped and local data is preserved."),
     "orphaned_upload_recovered" to ("Предыдущая отправка прервалась, и активной задачи нет. Очередь восстановлена; файлы и подтверждённые позиции сохранены." to "A previous upload was interrupted and has no active task. The queue was recovered; files and confirmed positions are preserved."),
     "transfer_paused" to ("Отправка приостановлена. Файлы и принятые сервером байты сохранены; повтор продолжит загрузку." to "The upload is paused. Files and accepted server bytes are preserved; a retry resumes the transfer."),
+    "profile_content_already_exists" to ("Эти ответы анкеты уже сохранены на сервере. Восстановите профили и выберите текущую карточку; не создавайте её повторно" to "These questionnaire answers are already saved on the server. Restore profiles and select the current profile; do not create it again"),
     "account_header_mismatch" to ("Аккаунт запроса не совпадает с аккаунтом животного" to "The request account does not match the animal account"),
     "dog_account_conflict" to ("Аккаунт запроса не совпадает с аккаунтом животного" to "The request account does not match the animal account"),
     "account_required" to ("Не выбран аккаунт" to "No account is selected"),

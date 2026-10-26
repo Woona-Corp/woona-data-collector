@@ -55,7 +55,7 @@
     <string name="language_english">Английский</string>
     <string name="language_russian">Русский</string>
     <string name="server_sync_not_configured">Серверная синхронизация не настроена</string>
-    <string name="server_sync_ready">Серверная синхронизация готова</string>
+    <string name="server_sync_ready">Очередь выгрузки пуста</string>
     <string name="server_sync_uploading">Выгрузка на сервер</string>
     <string name="server_sync_needs_attention">Серверная синхронизация требует внимания</string>
     <string name="ble_devices_title">BLE-устройства</string>

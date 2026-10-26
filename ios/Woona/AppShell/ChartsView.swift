@@ -20,7 +20,8 @@ struct ChartsView: View {
             }
             .padding(12)
             .accessibilityHidden(isFullscreen)
-            .navigationTitle(appState.text(.charts))
+            .safeAreaInset(edge: .top, spacing: 0) { SessionSectionPicker() }
+            .navigationTitle(appState.selectedLanguage == .russian ? "Сессия" : "Session")
             .navigationBarTitleDisplayMode(.inline)
             .fullScreenCover(isPresented: $isFullscreen) {
                 VStack(spacing: 10) {

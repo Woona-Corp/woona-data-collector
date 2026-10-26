@@ -12,13 +12,7 @@ struct AppRootView: View {
                 OverviewView(section: .animals)
                     .toolbar(.hidden, for: .tabBar)
                     .tag(AppViewModel.AppTab.overview)
-                VStack(spacing: 0) {
-                    Picker(appState.selectedLanguage == .russian ? "Сессия" : "Session", selection: $appState.showingSessionCharts) {
-                        Text(appState.selectedLanguage == .russian ? "Сессия" : "Session").tag(false)
-                        Text(appState.text(.charts)).tag(true)
-                    }
-                    .pickerStyle(.segmented).padding(.horizontal, 12).padding(.vertical, 8)
-                    .accessibilityIdentifier("session.section")
+                Group {
                     if appState.showingSessionCharts { ChartsView() }
                     else { OverviewView(section: .session) }
                 }
@@ -104,6 +98,20 @@ struct AppRootView: View {
         }
     }
 }
+
+struct SessionSectionPicker: View {
+    @EnvironmentObject private var appState: AppViewModel
+
+    var body: some View {
+        Picker(appState.selectedLanguage == .russian ? "Сессия" : "Session", selection: $appState.showingSessionCharts) {
+            Text(appState.selectedLanguage == .russian ? "Сессия" : "Session").tag(false)
+            Text(appState.text(.charts)).tag(true)
+        }
+        .pickerStyle(.segmented).padding(.horizontal, 12).padding(.vertical, 8)
+        .accessibilityIdentifier("session.section")
+    }
+}
+
 
 private struct ExportProgressOverlay: View {
     @EnvironmentObject private var appState: AppViewModel
