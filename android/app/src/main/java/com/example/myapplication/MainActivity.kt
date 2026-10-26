@@ -263,6 +263,22 @@ class MainActivity : ComponentActivity() {
             pendingLiveAddress = state.getString(STATE_PENDING_LIVE_ADDRESS)
             pendingReplayQuestionnaire = state.getString(STATE_PENDING_REPLAY_QUESTIONNAIRE)
                 ?.let { json -> runCatching { sessionQuestionnaireFromJson(json) }.getOrNull() }
+            sessionPreparationError = state.getString(STATE_SESSION_PREPARATION_ERROR)
+            editingRecording = state.getString(STATE_EDITING_RECORDING_ID)?.let { woonaDatabase.recording(it) }?.let { current ->
+                current.copy(
+                    questionnaire = state.getString(STATE_EDITING_RECORDING_QUESTIONNAIRE)?.let { json ->
+                        runCatching { sessionQuestionnaireFromJson(json) }.getOrNull()
+                    } ?: current.questionnaire,
+                    // Keep the revision the operator actually opened. A newer DB
+                    // copy must produce a reviewable 409, never a silent rebase.
+                    questionnaireRevision = state.getInt(STATE_EDITING_RECORDING_REVISION, current.questionnaireRevision),
+                )
+            }
+            heartQuestionnaireRecordingId = state.getString(STATE_HEART_RECORDING_ID)
+                ?.takeIf { woonaDatabase.recording(it) != null }
+            referenceRecordingId = state.getString(STATE_REFERENCE_RECORDING_ID)
+                ?.takeIf { woonaDatabase.recording(it) != null }
+            referenceUri = state.getString(STATE_REFERENCE_URI)?.takeIf { referenceRecordingId != null }?.let(android.net.Uri::parse)
         }
         refreshServerState()
         ServerSyncScheduler.enqueuePending(applicationContext)
@@ -513,45 +529,51 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     heartQuestionnaireRecordingId?.let { id ->
-                        HeartQuestionnaireDialog(
-                            language = selectedLanguage,
-                            initial = editingRecording?.questionnaire?.heartQuestionnaire ?: woonaDatabase.heartQuestionnaireDraft(id),
-                            onDismiss = { heartQuestionnaireRecordingId = null; editingRecording = null },
-                            onSave = {},
-                            onSaveAtRevision = { heart, revision ->
-                                val displayed = requireNotNull(editingRecording ?: woonaDatabase.recording(id)) { "Исходная запись больше недоступна / Original recording is unavailable" }
-                                val original = requireNotNull(displayed.questionnaire) { "Исходная анкета отсутствует / Original questionnaire is missing" }
-                                saveEditedQuestionnaire(displayed, original.copy(heartQuestionnaire = heart), revision, heartOnly = true)
-                            },
-                        )
+                        androidx.compose.runtime.key("heart", id) {
+                            HeartQuestionnaireDialog(
+                                language = selectedLanguage,
+                                initial = editingRecording?.questionnaire?.heartQuestionnaire ?: woonaDatabase.heartQuestionnaireDraft(id),
+                                onDismiss = { heartQuestionnaireRecordingId = null; editingRecording = null },
+                                onSave = {},
+                                onSaveAtRevision = { heart, revision ->
+                                    val displayed = requireNotNull(editingRecording ?: woonaDatabase.recording(id)) { "Исходная запись больше недоступна / Original recording is unavailable" }
+                                    val original = requireNotNull(displayed.questionnaire) { "Исходная анкета отсутствует / Original questionnaire is missing" }
+                                    saveEditedQuestionnaire(displayed, original.copy(heartQuestionnaire = heart), revision, heartOnly = true)
+                                },
+                            )
+                        }
                     }
                     editingRecording?.takeIf { it.questionnaire?.sessionKind != "heart" }?.let { recording ->
-                        SessionQuestionnaireDialog(language = selectedLanguage, initial = recording.questionnaire,
-                            onDismiss = { editingRecording = null },
-                            onSave = {}, onSaveAtRevision = { answers, revision -> saveEditedQuestionnaire(recording, answers, revision) })
+                        androidx.compose.runtime.key("session", recording.id) {
+                            SessionQuestionnaireDialog(language = selectedLanguage, initial = recording.questionnaire,
+                                onDismiss = { editingRecording = null },
+                                onSave = {}, onSaveAtRevision = { answers, revision -> saveEditedQuestionnaire(recording, answers, revision) })
+                        }
                     }
                     referenceUri?.let { uri ->
-                        val name = contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
-                            if (it.moveToFirst()) it.getString(0) else null
-                        } ?: "data.bin"
-                        ReferenceAttachmentDialog(selectedLanguage, name,
-                            onDismiss = { referenceUri = null; referenceRecordingId = null },
-                            onSave = { type, metadata ->
-                                val id = requireNotNull(referenceRecordingId)
-                                check(!accountBusy && !deviceFeatureController.isCaptureActive()) { "Дождитесь завершения записи/операции аккаунта / Wait for capture/account operation" }
-                                accountBusy = true
-                                try {
-                                    withContext(Dispatchers.IO) { serverOperationLock.withLock {
-                                        val recording = requireNotNull(woonaDatabase.recording(id))
-                                        check(recording.serverSyncState != "uploading") { "Дождитесь завершения выгрузки / Wait for upload completion" }
-                                        check(woonaDatabase.profile(recording.profileId)?.accountId == serverSettingsStore.get().accountId) { "Аккаунт записи изменился / The recording account changed" }
-                                        woonaDatabase.attachReference(id, type, name, requireNotNull(contentResolver.openInputStream(uri)), metadata)
-                                    } }
-                                    referenceUri = null; referenceRecordingId = null
-                                    handleRecordingChanged()
-                                } finally { accountBusy = false; refreshServerState() }
-                            },
-                        )
+                        androidx.compose.runtime.key("reference", referenceRecordingId, uri) {
+                            val name = runCatching { contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                                if (it.moveToFirst()) it.getString(0) else null
+                            } }.getOrNull() ?: "data.bin"
+                            ReferenceAttachmentDialog(selectedLanguage, name,
+                                onDismiss = { referenceUri = null; referenceRecordingId = null },
+                                onSave = { type, metadata ->
+                                    val id = requireNotNull(referenceRecordingId)
+                                    check(!accountBusy && !deviceFeatureController.isCaptureActive()) { "Дождитесь завершения записи/операции аккаунта / Wait for capture/account operation" }
+                                    accountBusy = true
+                                    try {
+                                        withContext(Dispatchers.IO) { serverOperationLock.withLock {
+                                            val recording = requireNotNull(woonaDatabase.recording(id))
+                                            check(recording.serverSyncState != "uploading") { "Дождитесь завершения выгрузки / Wait for upload completion" }
+                                            check(woonaDatabase.profile(recording.profileId)?.accountId == serverSettingsStore.get().accountId) { "Аккаунт записи изменился / The recording account changed" }
+                                            woonaDatabase.attachReference(id, type, name, requireNotNull(contentResolver.openInputStream(uri)), metadata)
+                                        } }
+                                        referenceUri = null; referenceRecordingId = null
+                                        handleRecordingChanged()
+                                    } finally { accountBusy = false; refreshServerState() }
+                                },
+                            )
+                        }
                     }
                     if (isServerSettingsVisible) {
                         ServerSettingsDialog(
@@ -597,6 +619,13 @@ class MainActivity : ComponentActivity() {
             STATE_PENDING_REPLAY_QUESTIONNAIRE,
             pendingReplayQuestionnaire?.toJson(),
         )
+        outState.putString(STATE_SESSION_PREPARATION_ERROR, sessionPreparationError)
+        outState.putString(STATE_EDITING_RECORDING_ID, editingRecording?.id)
+        outState.putString(STATE_EDITING_RECORDING_QUESTIONNAIRE, editingRecording?.questionnaire?.toJson())
+        editingRecording?.let { outState.putInt(STATE_EDITING_RECORDING_REVISION, it.questionnaireRevision) }
+        outState.putString(STATE_HEART_RECORDING_ID, heartQuestionnaireRecordingId)
+        outState.putString(STATE_REFERENCE_RECORDING_ID, referenceRecordingId)
+        outState.putString(STATE_REFERENCE_URI, referenceUri?.toString())
         outState.putBoolean(STATE_SERVER_SETTINGS_VISIBLE, isServerSettingsVisible)
         super.onSaveInstanceState(outState)
     }
@@ -1114,5 +1143,12 @@ class MainActivity : ComponentActivity() {
         const val STATE_PENDING_LIVE_ADDRESS = "state_pending_live_address"
         const val STATE_PENDING_REPLAY_QUESTIONNAIRE = "state_pending_replay_questionnaire"
         const val STATE_SERVER_SETTINGS_VISIBLE = "state_server_settings_visible"
+        const val STATE_SESSION_PREPARATION_ERROR = "state_session_preparation_error"
+        const val STATE_EDITING_RECORDING_ID = "state_editing_recording_id"
+        const val STATE_EDITING_RECORDING_QUESTIONNAIRE = "state_editing_recording_questionnaire"
+        const val STATE_EDITING_RECORDING_REVISION = "state_editing_recording_revision"
+        const val STATE_HEART_RECORDING_ID = "state_heart_recording_id"
+        const val STATE_REFERENCE_RECORDING_ID = "state_reference_recording_id"
+        const val STATE_REFERENCE_URI = "state_reference_uri"
     }
 }
