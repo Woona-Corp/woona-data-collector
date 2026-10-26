@@ -59,6 +59,12 @@ struct SettingsView: View {
 
                 AppCard(title: appState.selectedLanguage == .russian ? "Серверное хранилище" : "Server storage") {
                     Text(appState.uploadQueueExplanation).font(.footnote)
+                    Text(appState.backgroundSyncExplanation).font(.footnote)
+                    if let error = appState.backgroundSyncError {
+                        DisclosureGroup(russian ? "Подробности фонового запуска" : "Background scheduling details") {
+                            Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                        }
+                    }
                     Text(russian ? "Аккаунт: \(appState.selectedAccountID ?? "без аккаунта")" : "Account: \(appState.selectedAccountID ?? "unassigned")").font(.footnote)
                     Text(russian ? "Сессии: \(appState.uploadPending) ожидают · \(appState.uploadRunning) выгружаются · \(appState.uploadSynced) подтверждены · \(appState.uploadFailed) ошибок" : "Sessions: \(appState.uploadPending) pending · \(appState.uploadRunning) uploading · \(appState.uploadSynced) confirmed · \(appState.uploadFailed) failed").font(.footnote)
                     if let error = appState.uploadLastError {

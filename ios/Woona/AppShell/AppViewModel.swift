@@ -83,6 +83,22 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var transferCheckedAt: [UUID: String] = [:]
     @Published private(set) var checkingTransferIDs: Set<UUID> = []
     private var networkMonitor: NWPathMonitor?
+    private let backgroundSchedulingEnabled: Bool
+    @Published private(set) var backgroundSyncStatus = "not_requested"
+    @Published private(set) var backgroundSyncError: String?
+
+    var backgroundSyncExplanation: String {
+        let ru = selectedLanguage == .russian
+        switch backgroundSyncStatus {
+        case "scheduled": return ru ? "iOS приняла запрос фоновой выгрузки. Время запуска определяет система; запуск пока не подтверждён." : "iOS accepted the background upload request. The system chooses when it runs; execution is not yet confirmed."
+        case "running": return ru ? "Выполняется фоновая выгрузка; завершение ещё не подтверждено." : "Background upload is running; completion is not yet confirmed."
+        case "completed": return ru ? "Последний фоновый запуск завершил обработку своей очереди." : "The last background run finished processing its queue."
+        case "incomplete": return ru ? "Фоновый запуск прерван или очередь не завершена. Сохранённые данные доступны; откройте приложение для продолжения." : "The background run was interrupted or its queue is incomplete. Saved data remains available; open the app to continue."
+        case "failed": return ru ? "Фоновый запуск недоступен. Очередь сохранена; оставьте приложение открытым для отправки. Подробности ниже." : "Background scheduling is unavailable. The queue is saved; keep the app open to upload. Details follow."
+        case "disabled": return ru ? "Фоновый планировщик отключён в тестовом запуске." : "Background scheduling is disabled for this test run."
+        default: return ru ? "Фоновый запуск пока не запрошен. Отправка при открытом приложении работает отдельно; iOS определяет возможность и время фоновой работы." : "No background run has been requested. Foreground uploads operate separately; iOS decides background availability and timing."
+        }
+    }
 
     var uploadQueueExplanation: String {
         let ru = selectedLanguage == .russian
@@ -225,6 +241,8 @@ final class AppViewModel: ObservableObject {
     init(store: WoonaStore? = try? WoonaStore(), uiTesting: Bool = false,
          questionnaireClientFactory: ((String?) throws -> WoonaServerClient)? = nil) {
         self.questionnaireClientFactory = questionnaireClientFactory
+        self.backgroundSchedulingEnabled = !uiTesting &&
+            ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil && NSClassFromString("XCTestCase") == nil
         self.store = store
         let defaults = UserDefaults.standard
         selectedThemeMode = defaults.string(forKey: "themeMode").flatMap(AppThemeMode.init(rawValue:)) ?? .system
@@ -264,7 +282,6 @@ final class AppViewModel: ObservableObject {
                 }
             }
             monitor.start(queue: DispatchQueue(label: "woona.network-status"))
-            registerBackgroundSync()
             schedulePendingSync()
         }
     }
@@ -417,14 +434,21 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func resumePendingSync() async {
-        guard transferNetworkAllowsWork, !serverToken.isEmpty, let store else { return }
+    @discardableResult
+    func resumePendingSync() async -> Bool {
+        guard !Task.isCancelled, transferNetworkAllowsWork, !serverToken.isEmpty, let store else { return false }
         do {
+            var success = true
             for recording in try store.pendingRecordings() {
-                await sync(recording: recording)
+                guard !Task.isCancelled else { return false }
+                if !(await sync(recording: recording)) { success = false }
             }
             reloadRecentRecordings()
-        } catch { appendDiagnostic("Pending sync unavailable: \(error.localizedDescription)") }
+            return success && !Task.isCancelled
+        } catch {
+            appendDiagnostic("Pending sync unavailable: \(error.localizedDescription)")
+            return false
+        }
     }
 
     func canRemoveLocalRecording(_ recording: WoonaRecording) -> Bool {
@@ -486,10 +510,30 @@ final class AppViewModel: ObservableObject {
     }
 
     func scheduleBackgroundSync() {
+        guard backgroundSchedulingEnabled else { backgroundSyncStatus = "disabled"; return }
+        guard BackgroundSyncRegistration.shared.registered else {
+            backgroundSyncStatus = "failed"
+            backgroundSyncError = "Background handler is not registered (com.woona.apps.sync). Foreground uploads remain available."
+            return
+        }
+        guard !serverToken.isEmpty else { return }
         let request = BGProcessingTaskRequest(identifier: Self.backgroundSyncIdentifier)
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
-        try? BGTaskScheduler.shared.submit(request)
+        recordBackgroundSubmission { try BGTaskScheduler.shared.submit(request) }
+    }
+
+    // Kept injectable so error/success presentation is tested without OS scheduling.
+    func recordBackgroundSubmission(_ submit: () throws -> Void) {
+        do {
+            try submit()
+            backgroundSyncStatus = "scheduled"
+            backgroundSyncError = nil
+        } catch {
+            backgroundSyncStatus = "failed"
+            backgroundSyncError = error.localizedDescription
+            appendDiagnostic("Background scheduling failed: \(error.localizedDescription)")
+        }
     }
 
     func applyConnectionState(isConnected: Bool) {
@@ -1314,36 +1358,73 @@ final class AppViewModel: ObservableObject {
         } catch { showError("Failed to finalize recording", error: error) }
     }
 
-    private func sync(recording: WoonaRecording) async {
-        guard transferNetworkAllowsWork, removingLocalRecordingID == nil, !isAccountOperationRunning, !serverToken.isEmpty, let store, recording.questionnaire?.readyForSync != false, !syncingRecordingIDs.contains(recording.id) else { return }
+    @discardableResult
+    private func sync(recording: WoonaRecording) async -> Bool {
+        guard !Task.isCancelled, transferNetworkAllowsWork, removingLocalRecordingID == nil, !isAccountOperationRunning, !serverToken.isEmpty, let store, recording.questionnaire?.readyForSync != false, !syncingRecordingIDs.contains(recording.id) else { return false }
         syncingRecordingIDs.insert(recording.id)
         reloadRecentRecordings()
         defer { syncingRecordingIDs.remove(recording.id); reloadRecentRecordings() }
         do {
-            guard let profile = try store.profile(dogID: recording.dogID, versionID: recording.profileVersionID) else {
-                throw WoonaStoreError.invalidData("Recording profile version is missing")
-            }
-            try await serverClient(accountID: profile.accountID).upload(recording: recording, profile: profile, store: store, onProgress: { [weak self] in self?.reloadRecentRecordings() })
-            reloadRecentRecordings()
-            await reloadServerRecordings()
-            if let latest = try store.recording(id: recording.id), latest.serverSyncState == "pending" {
-                scheduleSync(latest)
+            var current = recording
+            // Await follow-up revisions in the same operation. A detached retry could
+            // outlive BGTask expiration and falsely report the queue as complete.
+            for _ in 0..<3 {
+                try Task.checkCancellation()
+                guard transferNetworkAllowsWork, current.questionnaire?.readyForSync != false else { return false }
+                guard let profile = try store.profile(dogID: current.dogID, versionID: current.profileVersionID) else {
+                    throw WoonaStoreError.invalidData("Recording profile version is missing")
+                }
+                try await serverClient(accountID: profile.accountID).upload(recording: current, profile: profile, store: store, onProgress: { [weak self] in self?.reloadRecentRecordings() })
+                try Task.checkCancellation()
+                reloadRecentRecordings()
+                await reloadServerRecordings()
+                guard let latest = try store.recording(id: recording.id) else { return false }
+                if latest.serverSyncState != "pending" {
+                    scheduleBackgroundSync()
+                    return latest.serverSyncState == "synced" && !Task.isCancelled
+                }
+                current = latest
             }
         } catch {
             reloadRecentRecordings()
-            showError("Recording upload failed", error: error)
+            if !Task.isCancelled { showError("Recording upload failed", error: error) }
         }
-        scheduleBackgroundSync()
+        if !Task.isCancelled { scheduleBackgroundSync() }
+        return false
     }
 
-    private func registerBackgroundSync() {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.backgroundSyncIdentifier, using: nil) { [weak self] task in
-            guard let task = task as? BGProcessingTask else { return }
-            let operation = Task { @MainActor [weak self] in
-                await self?.resumePendingSync()
-                task.setTaskCompleted(success: !Task.isCancelled)
+    // Called once by the real app entry point, never by AppViewModel initialization.
+    func registerBackgroundSync() {
+        guard backgroundSchedulingEnabled else { backgroundSyncStatus = "disabled"; return }
+        let registered = BackgroundSyncRegistration.shared.register(owner: self) {
+            BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.backgroundSyncIdentifier, using: .main) { task in
+                MainActor.assumeIsolated {
+                    guard let task = task as? BGProcessingTask else { task.setTaskCompleted(success: false); return }
+                    let operation = BackgroundSyncExecution.start(work: {
+                        guard let owner = BackgroundSyncRegistration.shared.owner else { return false }
+                        owner.backgroundSyncStatus = "running"
+                        // Do not claim completion for unrelated foreground operations
+                        // that this task does not own or await.
+                        let canRun = owner.syncingRecordingIDs.isEmpty && owner.uploadingProfileCount == 0 &&
+                            owner.scheduledSyncCount == 0 && !owner.isAccountOperationRunning
+                        let success: Bool
+                        if canRun { success = await owner.resumePendingSync() }
+                        else { success = false }
+                        // A fresh request is only permission to run again, not proof of execution.
+                        owner.scheduleBackgroundSync()
+                        if owner.backgroundSyncStatus != "failed" {
+                            owner.backgroundSyncStatus = success && !Task.isCancelled ? "completed" : "incomplete"
+                        }
+                        return success
+                    }, completion: { task.setTaskCompleted(success: $0) })
+                    task.expirationHandler = { operation.cancel() }
+                }
             }
-            task.expirationHandler = { operation.cancel() }
+        }
+        if !registered {
+            backgroundSyncStatus = "failed"
+            backgroundSyncError = "iOS rejected background handler registration. Check BGTaskSchedulerPermittedIdentifiers in the built Info.plist."
+            appendDiagnostic(backgroundSyncError!)
         }
     }
 
@@ -2382,4 +2463,33 @@ private struct ExportArtifactSnapshot {
     let packetFile: URL?
     let rawFile: URL?
     let logFile: URL?
+}
+
+
+@MainActor
+final class BackgroundSyncRegistration {
+    static let shared = BackgroundSyncRegistration()
+    private(set) var attempted = false
+    private(set) var registered = false
+    private(set) weak var owner: AppViewModel?
+
+    func register(owner: AppViewModel, registrar: () -> Bool) -> Bool {
+        self.owner = owner
+        guard !attempted else { return registered }
+        attempted = true
+        registered = registrar()
+        return registered
+    }
+}
+
+@MainActor
+enum BackgroundSyncExecution {
+    static func start(work: @escaping @MainActor () async -> Bool,
+                      completion: @escaping @MainActor (Bool) -> Void) -> Task<Void, Never> {
+        Task { @MainActor in
+            guard !Task.isCancelled else { completion(false); return }
+            let success = await work()
+            completion(success && !Task.isCancelled)
+        }
+    }
 }
