@@ -87,6 +87,8 @@ struct OverviewView: View {
     @State private var referenceURL: URL?
     @State private var isReferenceEditorPresented = false
 
+    private var russian: Bool { appState.selectedLanguage == .russian }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -103,6 +105,23 @@ struct OverviewView: View {
                                 .disabled(!appState.canChangeAccount)
                             Button(appState.selectedLanguage == .russian ? "Проверить аккаунт" : "Check account") { appState.selectedTab = .overview }
                         }
+                    }
+                    }
+                }
+                if appState.activeRecording != nil || appState.isCaptureReady {
+                    AppCard(title: russian ? "Синхронная сессия" : "Synchronized session") {
+                        Text(appState.statusText).foregroundStyle(.secondary)
+                    if appState.isCaptureReady, appState.activeRecording?.videoRequested == true, !appState.isCameraDegraded {
+                        CameraPreview(recorder: appState.cameraRecorder)
+                            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    if appState.isCaptureReady {
+                        Button(appState.isRecording ? (appState.selectedLanguage == .russian ? "Завершить сессию" : "Stop session") : (appState.selectedLanguage == .russian ? "Начать сессию" : "Start session")) {
+                            if appState.isRecording { appState.stopActiveCapture() }
+                            else { appState.startActiveCapture() }
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
                     }
                 }
@@ -233,53 +252,28 @@ struct OverviewView: View {
 
                 }
 
-                AppCard(title: appState.text(.captureControls)) {
-                    if appState.isCaptureReady, appState.activeRecording?.videoRequested == true, !appState.isCameraDegraded {
-                        CameraPreview(recorder: appState.cameraRecorder)
-                            .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                if appState.isConnectionActive || appState.isReplayRunning {
+                    AppCard(title: russian ? "Подключение" : "Connection") {
+                        Button(russian ? "ОТКЛЮЧИТЬ" : "DISCONNECT") { appState.disconnect() }
+                            .buttonStyle(.bordered)
+                            .frame(maxWidth: .infinity)
                     }
-                    if appState.isCaptureReady {
-                        Button(appState.isRecording ? (appState.selectedLanguage == .russian ? "Остановить" : "Stop") : (appState.selectedLanguage == .russian ? "Начать" : "Start")) {
-                            if appState.isRecording { appState.stopActiveCapture() }
-                            else { appState.startActiveCapture() }
-                        }
+                } else {
+                AppCard(title: russian ? "BLE-устройства" : "BLE devices") {
+                    Text(russian ? "Запустите сканирование, выберите найденное устройство или воспроизведите сохраненный дамп." : "Start a scan, pick a discovered device, or replay a captured dump.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button(appState.isScanning ? (russian ? "ИДЕТ СКАНИРОВАНИЕ..." : "SCANNING...") : (russian ? "НАЧАТЬ ПОИСК" : "START SCAN")) { appState.startScanning() }
                         .buttonStyle(.borderedProminent)
-                    }
-                    HStack {
-                        Button(appState.isScanning ? appState.text(.stopScan) : appState.text(.scan)) {
-                            if appState.isScanning {
-                                appState.stopScanning()
-                            } else {
-                                appState.startScanning()
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(appState.isConnectionActive || appState.selectedDogProfile == nil)
-
-                        Button(appState.isReplayRunning ? appState.text(.stopReplay) : appState.text(.uploadBinary)) {
-                            if appState.isReplayRunning {
-                                appState.stopReplay()
-                            } else {
-                                isReplayImporterPresented = true
-                            }
-                        }
+                        .frame(maxWidth: .infinity)
+                        .disabled(appState.isScanning || appState.selectedDogProfile == nil)
+                        .accessibilityIdentifier("devices.scan")
+                    Button(russian ? "Загрузить файл (debug)" : "Upload binary (debug)") { isReplayImporterPresented = true }
                         .buttonStyle(.bordered)
-                        .disabled((appState.isConnectionActive && !appState.isReplayRunning) || appState.selectedDogProfile == nil)
-
-                        Spacer()
-
-                        Button(appState.text(.disconnect)) {
-                            appState.disconnect()
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!appState.isConnectionActive)
-                    }
-                }
-
-                AppCard(title: appState.text(.devices)) {
+                        .frame(maxWidth: .infinity)
+                        .disabled(appState.selectedDogProfile == nil)
+                        .accessibilityIdentifier("devices.replay")
                     if appState.foundDevices.isEmpty {
-                        Text(appState.text(.noDevices))
+                        Text(appState.isScanning ? (russian ? "Идет поиск ближайших BLE-устройств..." : "Scanning for nearby BLE devices...") : (russian ? "Устройства еще не найдены." : "No discovered devices yet."))
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(appState.foundDevices) { device in
@@ -300,10 +294,11 @@ struct OverviewView: View {
                     }
                 }
 
+                }
 
-                AppCard(title: appState.text(.diagnostics)) {
+                AppCard(title: russian ? "Последние события" : "Latest events") {
                     if appState.diagnosticMessages.isEmpty {
-                        Text(appState.text(.noDiagnosticEvents))
+                        Text(russian ? "Здесь будут показаны диагностические сообщения и события захвата." : "Session diagnostics and capture events will appear here.")
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(Array(appState.diagnosticMessages.enumerated()), id: \.offset) { _, message in
