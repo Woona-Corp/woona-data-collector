@@ -15,7 +15,12 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import androidx.work.OneTimeWorkRequest
+import androidx.work.WorkInfo
+import java.util.concurrent.Executors
 import com.example.myapplication.data.WoonaDatabase
+import com.example.myapplication.data.recoverOrphanedUploads
+import kotlin.concurrent.withLock
 import com.example.myapplication.data.artifactFile
 import com.example.myapplication.data.hashPendingArtifacts
 import com.example.myapplication.data.markArtifactProgress
@@ -239,6 +244,47 @@ class RecordingSyncWorker(
 object ServerSyncScheduler {
     const val WORK_TAG = "woona-server-sync"
 
+    private val policyLock = Any()
+    private val policyExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "woona-network-policy") }
+
+    /** Update queued constraints in-place; WorkManager never interrupts a running generation. */
+    fun refreshPendingNetworkPolicy(context: Context, onComplete: (Throwable?) -> Unit = {}) = policyExecutor.submit {
+        val failure = runCatching {
+            serverOperationLock.withLock {
+            synchronized(policyLock) {
+                val manager = WorkManager.getInstance(context.applicationContext)
+                val constraints = networkConstraints(context)
+                WoonaDatabase(context.applicationContext).use { database ->
+                    database.recoverOrphanedUploads { name ->
+                        manager.getWorkInfosForUniqueWork(name).get(30, TimeUnit.SECONDS).any { !it.state.isFinished }
+                    }
+                    database.pendingProfileVersionIds().forEach { id ->
+                        updateWaitingNetworkPolicy(manager, "server-profile-$id", constraints) { old -> profileRequest(context, id, old, constraints) }
+                    }
+                    database.pendingRecordingIds().forEach { id ->
+                        updateWaitingNetworkPolicy(manager, "server-sync-$id", constraints) { old -> recordingRequest(context, id, old, constraints) }
+                    }
+                }
+                enqueuePending(context.applicationContext)
+            }
+            }
+        }.exceptionOrNull()
+        onComplete(failure)
+    }
+
+    internal fun updateWaitingNetworkPolicy(manager: WorkManager, name: String, constraints: Constraints, request: (WorkInfo) -> OneTimeWorkRequest): Int {
+        var updated = 0
+        for (old in manager.getWorkInfosForUniqueWork(name).get(30, TimeUnit.SECONDS)) {
+            if (old.state != WorkInfo.State.ENQUEUED && old.state != WorkInfo.State.BLOCKED) continue
+            if (old.constraints == constraints) continue
+            val next = request(old)
+            check(next.id == old.id) { "Network policy must preserve worker identity" }
+            manager.updateWork(next).get(30, TimeUnit.SECONDS)
+            updated++
+        }
+        return updated
+    }
+
     fun enqueuePending(context: Context) {
         val database = WoonaDatabase(context.applicationContext)
         try {
@@ -268,30 +314,34 @@ object ServerSyncScheduler {
     }
 
     fun enqueueProfile(context: Context, profileVersionId: String) {
-        WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
-            "server-profile-$profileVersionId",
-            ExistingWorkPolicy.KEEP,
-            OneTimeWorkRequestBuilder<ProfileSyncWorker>()
-                .addTag(WORK_TAG)
-                .setInputData(workDataOf(KEY_ID to profileVersionId))
-                .setConstraints(networkConstraints(context))
-                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-                .build(),
-        )
+        synchronized(policyLock) {
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork("server-profile-$profileVersionId", ExistingWorkPolicy.KEEP, profileRequest(context, profileVersionId))
+        }
     }
 
+    private fun profileRequest(context: Context, profileVersionId: String, old: WorkInfo? = null, constraints: Constraints = networkConstraints(context)): OneTimeWorkRequest =
+        OneTimeWorkRequestBuilder<ProfileSyncWorker>()
+            .addTag(WORK_TAG)
+            .setInputData(workDataOf(KEY_ID to profileVersionId))
+            .setConstraints(constraints)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .apply { old?.let { setId(it.id); it.tags.forEach { tag -> addTag(tag) } } }
+            .build()
+
     fun enqueueRecording(context: Context, recordingId: String) {
-        WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
-            "server-sync-$recordingId",
-            ExistingWorkPolicy.KEEP,
-            OneTimeWorkRequestBuilder<RecordingSyncWorker>()
-                .addTag(WORK_TAG)
-                .setInputData(workDataOf(KEY_ID to recordingId))
-                .setConstraints(networkConstraints(context))
-                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-                .build(),
-        )
+        synchronized(policyLock) {
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork("server-sync-$recordingId", ExistingWorkPolicy.KEEP, recordingRequest(context, recordingId))
+        }
     }
+
+    private fun recordingRequest(context: Context, recordingId: String, old: WorkInfo? = null, constraints: Constraints = networkConstraints(context)): OneTimeWorkRequest =
+        OneTimeWorkRequestBuilder<RecordingSyncWorker>()
+            .addTag(WORK_TAG)
+            .setInputData(workDataOf(KEY_ID to recordingId))
+            .setConstraints(constraints)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .apply { old?.let { setId(it.id); it.tags.forEach { tag -> addTag(tag) } } }
+            .build()
 
     private fun networkConstraints(context: Context): Constraints =
         Constraints.Builder()

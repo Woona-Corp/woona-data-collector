@@ -254,7 +254,9 @@ class MainActivity : ComponentActivity() {
                 ?.let { json -> runCatching { sessionQuestionnaireFromJson(json) }.getOrNull() }
         }
         refreshServerState()
-        ServerSyncScheduler.enqueuePending(applicationContext)
+        ServerSyncScheduler.refreshPendingNetworkPolicy(applicationContext) { failure ->
+            if (failure != null) runOnUiThread { deviceFeatureController.showErrorOnMainThread("Network policy reconciliation failed; original recordings and upload progress are preserved", failure) }
+        }
         observeServerWork()
         deviceFeatureController
         CaptureServiceBridge.onStopRequested = {
@@ -303,9 +305,14 @@ class MainActivity : ComponentActivity() {
                         },
                         onServerConfigure = { isServerSettingsVisible = true },
                         onServerWifiOnlyChange = {
-                            serverSettingsStore.setWifiOnly(it)
-                            refreshServerState()
-                            ServerSyncScheduler.enqueuePending(applicationContext)
+                            if (!accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && serverSyncState.workersRunning == 0) {
+                                serverSettingsStore.setWifiOnly(it)
+                                refreshServerState()
+                                ServerSyncScheduler.refreshPendingNetworkPolicy(applicationContext) { failure ->
+                                    if (failure != null) deviceFeatureController.showErrorOnMainThread("Network policy could not be applied; original recordings and confirmed upload progress are preserved", failure)
+                                    runOnUiThread { refreshServerState() }
+                                }
+                            }
                         },
                         onServerRetryPending = {
                             woonaDatabase.resetFailedSync()
