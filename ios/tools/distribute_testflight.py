@@ -55,6 +55,11 @@ def main():
             request('/v1/betaBuildLocalizations', 'POST', {'data': {'type': 'betaBuildLocalizations',
                 'attributes': {'locale': 'en-US', 'whatsNew': notes},
                 'relationships': {'build': {'data': {'type': 'builds', 'id': build_id}}}}})
+        for localization in existing:
+            if not (localization['attributes'].get('whatsNew') or '').strip():
+                request('/v1/betaBuildLocalizations/' + localization['id'], 'PATCH', {'data': {
+                    'type': 'betaBuildLocalizations', 'id': localization['id'],
+                    'attributes': {'whatsNew': notes}}})
         assigned = {group['id'] for group in report['groups']}
         missing = [group for group in selected if group['id'] not in assigned]
         if missing:
