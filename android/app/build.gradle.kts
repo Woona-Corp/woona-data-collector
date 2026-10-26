@@ -53,6 +53,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".v2test"
+            versionNameSuffix = "-v2test"
+        }
         release {
             isMinifyEnabled = false
             if (hasAndroidSigningConfig) {

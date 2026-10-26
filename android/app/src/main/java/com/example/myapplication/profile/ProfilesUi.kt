@@ -67,6 +67,8 @@ import com.example.myapplication.data.HEART_OPTIONS
 import com.example.myapplication.data.readyForSync
 import com.example.myapplication.data.validate
 import com.example.myapplication.feature.device.VideoCaptureState
+import com.example.myapplication.feature.device.DeviceUiState
+import com.example.myapplication.feature.device.V2RecordingTarget
 import com.example.myapplication.feature.device.DeviceListItem
 import com.example.myapplication.localization.AppLanguage
 import com.example.myapplication.ble.PolarConnectionState
@@ -95,6 +97,10 @@ fun ProfilesOverview(
     videoState: VideoCaptureState,
     videoOffsetMillis: Double?,
     onVideoAction: () -> Unit,
+    v2UiState: DeviceUiState? = null,
+    onV2Discovery: () -> Unit = {},
+    onV2StreamToggle: (Int) -> Unit = {},
+    onV2TargetSelect: (V2RecordingTarget) -> Unit = {},
     showVideoPreview: Boolean = true,
     onPreviewSurface: (Surface?) -> Unit = {},
     connectionQuality: ConnectionQuality = ConnectionQuality.IDLE,
@@ -115,6 +121,10 @@ fun ProfilesOverview(
             videoOffsetMillis,
             language,
             onVideoAction,
+            v2UiState,
+            onV2Discovery,
+            onV2StreamToggle,
+            onV2TargetSelect,
             showVideoPreview,
             onPreviewSurface,
             connectionQuality,
@@ -256,6 +266,10 @@ private fun CaptureStatusCard(
     offsetMillis: Double?,
     language: AppLanguage,
     onAction: () -> Unit,
+    v2UiState: DeviceUiState?,
+    onV2Discovery: () -> Unit,
+    onV2StreamToggle: (Int) -> Unit,
+    onV2TargetSelect: (V2RecordingTarget) -> Unit,
     showVideoPreview: Boolean,
     onPreviewSurface: (Surface?) -> Unit,
     connectionQuality: ConnectionQuality,
@@ -304,22 +318,94 @@ private fun CaptureStatusCard(
                     VideoCaptureState.FAILED,
                 )
             ) {
-                Button(
-                    onClick = onAction,
+                val v2 = v2UiState
+                val isV2 = v2?.v2DiscoveryRequested == true
+                val running = isV2 && v2?.v2LiveRunning == true
+                Row(
                     modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        if (state in setOf(
-                                VideoCaptureState.STARTING,
-                                VideoCaptureState.RECORDING,
-                                VideoCaptureState.DEGRADED,
-                            )
+                    Button(
+                        onClick = onAction,
+                        enabled = !isV2 || (v2?.v2Ready == true &&
+                            (running || v2.v2RecordingTarget == V2RecordingTarget.LIVE)),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(if (running || (!isV2 && state in setOf(
+                            VideoCaptureState.STARTING, VideoCaptureState.RECORDING,
+                            VideoCaptureState.DEGRADED,
+                        ))) tr(language, "Stop session", "Завершить сессию")
+                        else tr(language, "Start session", "Начать сессию"))
+                    }
+                    if (v2 != null) {
+                        OutlinedButton(
+                            onClick = onV2Discovery,
+                            enabled = !isV2 && state == VideoCaptureState.READY,
                         ) {
-                            tr(language, "Stop session", "Завершить сессию")
+                            Text(if (isV2) "V2" else "V2 →")
+                        }
+                    }
+                }
+                if (isV2 && v2 != null) {
+                    if (v2.v2DiscoveryError != null) {
+                        Text(v2.v2DiscoveryError, color = MaterialTheme.colorScheme.error)
+                    } else if (!v2.v2Ready) {
+                        Text(tr(language, "Negotiating V2…", "Согласование V2…"))
+                    } else {
+                        Text(tr(language, "Streams to acquire", "Датчики для записи"),
+                            style = MaterialTheme.typography.labelMedium)
+                        listOf(
+                            Triple(1, "Акселерометр", "Accel"),
+                            Triple(2, "Гироскоп", "Gyro"),
+                            Triple(3, "Контактный микрофон", "Contact mic"),
+                            Triple(4, "Внешний микрофон", "Ambient mic"),
+                            Triple(5, "Пьезо", "Piezo"),
+                            Triple(6, "Температура 1", "Temperature 1"),
+                            Triple(7, "Температура 2", "Temperature 2"),
+                        ).forEach { (streamId, ru, en) ->
+                            val bit = 1L shl (streamId - 1)
+                            if (v2.v2StreamMask and bit != 0L) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(
+                                        checked = v2.v2SelectedStreamMask and bit != 0L,
+                                        onCheckedChange = { onV2StreamToggle(streamId) },
+                                        enabled = !v2.v2LiveRunning,
+                                    )
+                                    Text(if (language == AppLanguage.RUSSIAN) ru else en)
+                                }
+                            }
+                        }
+                        Text(tr(language, "Record destination", "Куда записывать"),
+                            style = MaterialTheme.typography.labelMedium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = v2.v2RecordingTarget == V2RecordingTarget.LIVE,
+                                enabled = !v2.v2LiveRunning,
+                                onClick = { onV2TargetSelect(V2RecordingTarget.LIVE) },
+                            )
+                            Text("LIVE")
+                            RadioButton(
+                                selected = v2.v2RecordingTarget == V2RecordingTarget.STORAGE,
+                                enabled = !v2.v2LiveRunning && v2.v2Capabilities and 2L != 0L,
+                                onClick = { onV2TargetSelect(V2RecordingTarget.STORAGE) },
+                            )
+                            Text(tr(language, "Flash / SD", "Flash / SD"))
+                        }
+                        if (v2.v2RecordingTarget == V2RecordingTarget.STORAGE) {
+                            Text(tr(language,
+                                "Stored-session retrieval and server upload are not yet implemented in this build.",
+                                "Чтение с носителя и отправка на сервер ещё не реализованы в этой сборке."),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall)
                         } else {
-                            tr(language, "Start session", "Начать сессию")
-                        },
-                    )
+                            Text(tr(language,
+                                "V2 LIVE preview is not saved or uploaded yet.",
+                                "Предпросмотр V2 LIVE пока не сохраняется и не выгружается."),
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text("V2 blocks: ${v2.v2PreviewBlocks} · gaps: ${v2.v2SequenceGaps}")
+                    }
                 }
             }
             if (showVideoPreview && state !in setOf(VideoCaptureState.FINISHED, VideoCaptureState.FAILED, VideoCaptureState.DEGRADED)) {

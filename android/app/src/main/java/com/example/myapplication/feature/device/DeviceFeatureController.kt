@@ -149,6 +149,45 @@ class DeviceFeatureController(
         bleSessionController.connect(address)
     }
 
+    /** V2 is opt-in because HELLO permanently ends Legacy streaming for this BLE connection. */
+    fun onV2DiscoveryRequested() {
+        if (synchronizedCaptureStarted) {
+            uiStateHolder.showError("Stop the current Legacy recording before switching to V2")
+            return
+        }
+        if (bleSessionController.beginV2Discovery()) {
+            uiStateHolder.onV2DiscoveryRequested()
+        } else {
+            uiStateHolder.showError("V2 discovery is unavailable. Check BLE connection and reconnect if necessary.")
+        }
+    }
+
+    fun onV2StreamToggled(streamId: Int) = uiStateHolder.toggleV2Stream(streamId)
+
+    fun onV2RecordingTargetSelected(target: V2RecordingTarget) =
+        uiStateHolder.selectV2RecordingTarget(target)
+
+    /** Starts a validated V2 LIVE preview via the normal Start session UI. */
+    fun onV2LiveStartRequested() {
+        if (!uiState.v2Ready || uiState.v2LiveRunning) return
+        if (uiState.v2RecordingTarget == V2RecordingTarget.STORAGE) {
+            uiStateHolder.showError(
+                "V2 storage acquisition and upload are not connected yet; select LIVE for this build"
+            )
+            return
+        }
+        val selectedMask = uiState.v2SelectedStreamMask and uiState.v2StreamMask
+        if (selectedMask == 0L || !bleSessionController.startV2Live(selectedMask)) {
+            uiStateHolder.showError("Cannot start V2 LIVE: check selected streams and BLE state")
+        }
+    }
+
+    fun onV2LiveStopRequested() {
+        if (!bleSessionController.stopV2Live()) {
+            uiStateHolder.showError("Cannot stop V2 preview: session is not running")
+        }
+    }
+
     fun beginRecordingSession(recording: Recording) {
         cancel(finalizationRetryRunnable)
         pendingFinalizationStatus = null
@@ -192,7 +231,12 @@ class DeviceFeatureController(
         packetReplayController?.stop()
         pendingTransportDiagnostics.clear()
         awaitingCaptureReady = false
-        finalizeRecording(RecordingStatus.COMPLETED)
+        // Preview-only V2 is not a persisted session; do not mark it COMPLETED.
+        finalizeRecording(if (uiState.v2DiscoveryRequested) {
+            RecordingStatus.INTERRUPTED
+        } else {
+            RecordingStatus.COMPLETED
+        })
         packetCaptureController.stopCapture()
         val staleSnapshot = synchronized(exportLock) {
             invalidateExportSnapshotLocked()
@@ -523,6 +567,11 @@ class DeviceFeatureController(
 
     @Synchronized
     fun startSynchronizedSession() {
+        if (uiState.v2DiscoveryRequested) {
+            // A queued permission/capture callback can still arrive after V2 opt-in.
+            // Do not start Legacy on a V2 connection and do not report a false error.
+            return
+        }
         val recording = currentRecording ?: return
         if (
             recordingFinalized ||

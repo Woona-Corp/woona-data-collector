@@ -22,6 +22,10 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.example.myapplication.R
 import com.example.myapplication.localization.AppTextResolver
+import com.example.myapplication.protocol.WoonaV2Discovery
+import com.example.myapplication.protocol.WoonaV2LiveSession
+import com.example.myapplication.protocol.WoonaV2StreamDecoder
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.IdentityHashMap
 import java.util.UUID
@@ -36,6 +40,12 @@ interface BleSessionListener {
     ) = onPacketReceived(packetFragment)
     fun onDiagnosticMessage(message: String)
     fun onCaptureReady()
+    /** Called only after explicit V2 discovery has completed successfully. */
+    fun onV2DiscoveryReady(device: WoonaV2Discovery.Device) = Unit
+    fun onV2LiveStarted(sessionId: Long, streamMask: Long) = Unit
+    /** Fully validated frame, still containing original LE sample bytes. */
+    fun onV2LiveSamples(event: WoonaV2LiveSession.Event.Samples) = Unit
+    fun onV2LiveStopped(sessionId: Long) = Unit
     fun onStateChanged(state: BleSessionState)
     fun onError(message: String, throwable: Throwable? = null)
 }
@@ -47,6 +57,11 @@ interface BleSessionController {
     fun startScanning()
     fun stopScanning()
     fun connect(address: String)
+    /** Explicit opt-in; never probe Legacy automatically (HELLO switches firmware to V2). */
+    fun beginV2Discovery(): Boolean = false
+    /** Only after explicit discovery, never during an ordinary Legacy capture. */
+    fun startV2Live(streamMask: Long): Boolean = false
+    fun stopV2Live(): Boolean = false
     fun setCaptureActive(active: Boolean) = Unit
     fun disconnect()
     fun close()
@@ -63,6 +78,33 @@ class BleSessionManager(
     private val scanHandler = Handler(Looper.getMainLooper())
     private val bluetoothAdapter by lazy {
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    }
+
+    private val v2WriteUuid = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
+    private val v2GattWrites = WoonaV2GattWriteQueue()
+    private val v2PendingFrames = ArrayDeque<ByteArray>()
+    private var v2Discovery: WoonaV2Discovery? = null
+    private var v2Live: WoonaV2LiveSession? = null
+    private var v2LiveReceiver: WoonaV2StreamDecoder? = null
+    private var v2SupportsLive = false
+    private var v2WriteCharacteristic: BluetoothGattCharacteristic? = null
+    @Volatile private var v2Requested = false
+    private var v2Failed = false
+    private val v2ResponseTimeoutRunnable = Runnable {
+        val discovery = v2Discovery ?: return@Runnable
+        if (!v2Requested || v2Failed) return@Runnable
+        if (discovery.phase == WoonaV2Discovery.Phase.READY) {
+            val live = v2Live ?: return@Runnable
+            if (live.phase == WoonaV2LiveSession.Phase.WAIT_START ||
+                live.phase == WoonaV2LiveSession.Phase.WAIT_STOP
+            ) dispatchV2LiveEvent(live.onResponseTimeout())
+        } else if (discovery.phase != WoonaV2Discovery.Phase.FAILED) {
+            emitDiagnostic("V2 response timeout in ${discovery.phase}; retrying if possible", DiagnosticLevel.WARNING)
+            dispatchV2Event(discovery.onResponseTimeout())
+        }
+    }
+    private val v2ChunkTimeoutRunnable = Runnable {
+        if (v2Requested && v2GattWrites.isBusy) failV2Discovery("FFF2 GATT write timed out")
     }
 
     private val discoveredAddresses = linkedSetOf<String>()
@@ -533,12 +575,35 @@ class BleSessionManager(
             listener.onCaptureReady()
         }
 
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int,
+        ) {
+            if (!isCurrentGatt(gatt) || characteristic.uuid != v2WriteUuid) return
+            scanHandler.post {
+                if (!isCurrentGatt(gatt) || !v2Requested || v2Failed) return@post
+                scanHandler.removeCallbacks(v2ChunkTimeoutRunnable)
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    failV2Discovery("FFF2 GATT write failed (status=$status)")
+                } else {
+                    try {
+                        val nextChunk = v2GattWrites.acknowledgeChunk()
+                        if (nextChunk != null) writeV2Chunk(gatt, nextChunk)
+                        else startNextV2Frame(gatt)
+                    } catch (exception: IllegalStateException) {
+                        failV2Discovery("Unexpected FFF2 write callback: ${exception.message}")
+                    }
+                }
+            }
+        }
+
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
         ) {
-            if (!isCurrentGatt(gatt)) return
+            if (!isCurrentGatt(gatt) || characteristic.uuid != characteristicUuid) return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return
             val value = characteristic.value?.clone() ?: return
             handleCharacteristicChanged(value)
@@ -549,7 +614,7 @@ class BleSessionManager(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray,
         ) {
-            if (!isCurrentGatt(gatt)) return
+            if (!isCurrentGatt(gatt) || characteristic.uuid != characteristicUuid) return
             handleCharacteristicChanged(value)
         }
     }
@@ -562,7 +627,61 @@ class BleSessionManager(
         transportProfile = profile
     }
 
+    override fun beginV2Discovery(): Boolean {
+        val gatt = bluetoothGatt ?: return false
+        if (v2Requested || captureActive || recoveryInProgress || !notificationsReady ||
+            sessionState != BleSessionState.CONNECTED || !isCurrentGatt(gatt) || !hasConnectPermission()
+        ) return false
+
+        val writeCharacteristic = gatt.getService(serviceUuid)?.getCharacteristic(v2WriteUuid)
+        if (writeCharacteristic == null ||
+            writeCharacteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0
+        ) {
+            emitDiagnostic("V2 requires FFF2 with acknowledged GATT WRITE", DiagnosticLevel.WARNING)
+            return false
+        }
+
+        val discovery = WoonaV2Discovery()
+        v2WriteCharacteristic = writeCharacteristic
+        v2Discovery = discovery
+        v2Failed = false
+        v2Requested = true
+        emitDiagnostic("V2 discovery explicitly requested; Legacy packets are now ignored", DiagnosticLevel.INFO)
+        dispatchV2Event(discovery.begin())
+        return true
+    }
+
+    override fun startV2Live(streamMask: Long): Boolean {
+        val gatt = bluetoothGatt ?: return false
+        val live = v2Live ?: return false
+        if (!v2Requested || v2Failed || !v2SupportsLive || !isCurrentGatt(gatt) || !notificationsReady ||
+            !hasConnectPermission() || captureActive || recoveryInProgress ||
+            v2Discovery?.phase != WoonaV2Discovery.Phase.READY ||
+            live.phase !in setOf(WoonaV2LiveSession.Phase.IDLE, WoonaV2LiveSession.Phase.STOPPED)
+        ) return false
+        return try {
+            dispatchV2LiveEvent(live.start(streamMask))
+            true
+        } catch (exception: IllegalArgumentException) {
+            emitDiagnostic("V2 LIVE start rejected: ${exception.message}", DiagnosticLevel.WARNING)
+            false
+        }
+    }
+
+    override fun stopV2Live(): Boolean {
+        val gatt = bluetoothGatt ?: return false
+        val live = v2Live ?: return false
+        if (!v2Requested || v2Failed || !isCurrentGatt(gatt) || !hasConnectPermission() ||
+            live.phase != WoonaV2LiveSession.Phase.RUNNING) return false
+        dispatchV2LiveEvent(live.stop())
+        return true
+    }
+
     override fun setCaptureActive(active: Boolean) {
+        if (active && v2Requested) {
+            listener.onError("Legacy capture is not available after V2 HELLO; disconnect or use the V2 capture path")
+            return
+        }
         captureActive = active
         if (!active) {
             stopNotificationWatchdog()
@@ -739,6 +858,7 @@ class BleSessionManager(
         if (bluetoothGatt === gatt) {
             scanHandler.removeCallbacks(gattConnectionTimeoutRunnable)
             scanHandler.removeCallbacks(gattSetupTimeoutRunnable)
+            resetV2OnDisconnect()
             bluetoothGatt = null
             gattGenerations.remove(gatt)
             activeGattGeneration = null
@@ -856,11 +976,162 @@ class BleSessionManager(
                 }
             }
         }
+        if (v2Requested) {
+            // The firmware leaves Legacy mode as soon as it accepts HELLO. Do not
+            // feed any V2 bytes to the Legacy PacketAssembler, even on failure.
+            val gatt = bluetoothGatt
+            if (gatt != null) scanHandler.post {
+                if (isCurrentGatt(gatt) && v2Requested && !v2Failed) {
+                    if (v2Discovery?.phase == WoonaV2Discovery.Phase.READY) {
+                        val live = v2Live
+                        val frames = v2LiveReceiver?.append(value.clone()).orEmpty()
+                        for (frame in frames) {
+                            val events = live?.receive(frame).orEmpty()
+                            if (events.any { it !is WoonaV2LiveSession.Event.Samples }) {
+                                scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
+                            }
+                            events.forEach(::dispatchV2LiveEvent)
+                        }
+                    } else {
+                        val events = v2Discovery?.receive(value.clone()).orEmpty()
+                        if (events.isNotEmpty()) scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
+                        events.forEach(::dispatchV2Event)
+                    }
+                }
+            }
+            return
+        }
         listener.onPacketReceived(
             packetFragment = value.clone(),
             receivedAtWallClockMillis = System.currentTimeMillis(),
             receivedAtMonotonicNs = SystemClock.elapsedRealtimeNanos(),
         )
+    }
+
+    private fun dispatchV2Event(event: WoonaV2Discovery.Event) {
+        if (v2Failed) return
+        when (event) {
+            is WoonaV2Discovery.Event.Transmit -> {
+                emitDiagnostic("V2 command queued (${v2Discovery?.phase}, ${event.bytes.size} bytes COBS)",
+                    DiagnosticLevel.INFO)
+                v2PendingFrames.addLast(event.bytes.clone())
+                bluetoothGatt?.let(::startNextV2Frame)
+            }
+            is WoonaV2Discovery.Event.Complete -> {
+                scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
+                emitDiagnostic("V2 ready: streams=${event.device.streams.descriptors.size}, " +
+                    "capabilities=0x${event.device.hello.capabilities.toString(16)}", DiagnosticLevel.INFO)
+                v2SupportsLive = event.device.hello.hasCapability(0)
+                v2Live = WoonaV2LiveSession(event.device.streams)
+                v2LiveReceiver = WoonaV2StreamDecoder()
+                listener.onV2DiscoveryReady(event.device)
+            }
+            is WoonaV2Discovery.Event.Failure -> failV2Discovery(event.reason)
+        }
+    }
+
+    private fun dispatchV2LiveEvent(event: WoonaV2LiveSession.Event) {
+        if (v2Failed) return
+        when (event) {
+            is WoonaV2LiveSession.Event.Transmit -> {
+                v2PendingFrames.addLast(event.bytes.clone())
+                bluetoothGatt?.let(::startNextV2Frame)
+            }
+            is WoonaV2LiveSession.Event.Started -> {
+                emitDiagnostic("V2 LIVE started: id=${event.sessionId} mask=0x${event.streamMask.toString(16)}", DiagnosticLevel.INFO)
+                listener.onV2LiveStarted(event.sessionId, event.streamMask)
+            }
+            is WoonaV2LiveSession.Event.Samples -> listener.onV2LiveSamples(event)
+            is WoonaV2LiveSession.Event.Stopped -> {
+                emitDiagnostic("V2 LIVE stopped: id=${event.sessionId}", DiagnosticLevel.INFO)
+                listener.onV2LiveStopped(event.sessionId)
+            }
+            is WoonaV2LiveSession.Event.Failure -> failV2Discovery(event.reason)
+        }
+    }
+
+    private fun startNextV2Frame(gatt: BluetoothGatt) {
+        if (v2Failed || !v2Requested || v2GattWrites.isBusy || !isCurrentGatt(gatt)) return
+        if (v2PendingFrames.isEmpty()) {
+            val phase = v2Discovery?.phase
+            val livePhase = v2Live?.phase
+            if (phase in setOf(
+                    WoonaV2Discovery.Phase.WAIT_HELLO,
+                    WoonaV2Discovery.Phase.WAIT_STREAMS,
+                    WoonaV2Discovery.Phase.WAIT_STATUS,
+                ) || livePhase in setOf(
+                    WoonaV2LiveSession.Phase.WAIT_START,
+                    WoonaV2LiveSession.Phase.WAIT_STOP,
+                )
+            ) {
+                scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
+                scanHandler.postDelayed(v2ResponseTimeoutRunnable, V2_RESPONSE_TIMEOUT_MS)
+            }
+            return
+        }
+        scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
+        val wire = v2PendingFrames.removeFirst()
+        try {
+            writeV2Chunk(gatt, v2GattWrites.begin(wire, negotiatedMtu ?: 23))
+        } catch (exception: IllegalArgumentException) {
+            failV2Discovery("Invalid V2 frame/MTU: ${exception.message}")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    @SuppressLint("MissingPermission")
+    private fun writeV2Chunk(gatt: BluetoothGatt, chunk: ByteArray) {
+        val characteristic = v2WriteCharacteristic
+        if (characteristic == null || !hasConnectPermission() || !isCurrentGatt(gatt)) {
+            failV2Discovery("FFF2 is unavailable while sending V2")
+            return
+        }
+        val result = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(characteristic, chunk, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            } else {
+                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                characteristic.value = chunk
+                if (gatt.writeCharacteristic(characteristic)) BluetoothStatusCodes.SUCCESS
+                else BluetoothStatusCodes.ERROR_UNKNOWN
+            }
+        } catch (_: SecurityException) {
+            BluetoothStatusCodes.ERROR_MISSING_BLUETOOTH_CONNECT_PERMISSION
+        }
+        if (result != BluetoothStatusCodes.SUCCESS) {
+            failV2Discovery("FFF2 rejected write (status=$result)")
+        } else {
+            scanHandler.removeCallbacks(v2ChunkTimeoutRunnable)
+            scanHandler.postDelayed(v2ChunkTimeoutRunnable, V2_CHUNK_WRITE_TIMEOUT_MS)
+        }
+    }
+
+    private fun failV2Discovery(reason: String) {
+        if (v2Failed) return
+        v2Failed = true
+        v2PendingFrames.clear()
+        v2GattWrites.reset()
+        scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
+        scanHandler.removeCallbacks(v2ChunkTimeoutRunnable)
+        emitDiagnostic("V2 discovery failed: $reason; disconnect before trying Legacy", DiagnosticLevel.WARNING)
+        listener.onError("V2 discovery failed: $reason")
+    }
+
+    private fun resetV2OnDisconnect() {
+        scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
+        scanHandler.removeCallbacks(v2ChunkTimeoutRunnable)
+        v2GattWrites.reset()
+        v2PendingFrames.clear()
+        v2Discovery?.resetForNewConnection()
+        v2Discovery = null
+        v2Live?.reset()
+        v2Live = null
+        v2LiveReceiver?.reset()
+        v2LiveReceiver = null
+        v2SupportsLive = false
+        v2WriteCharacteristic = null
+        v2Failed = false
+        v2Requested = false
     }
 
     private fun isCurrentGatt(gatt: BluetoothGatt): Boolean {
@@ -1112,6 +1383,8 @@ class BleSessionManager(
 
     private companion object {
         const val TAG = "BLE_SESSION"
+        const val V2_RESPONSE_TIMEOUT_MS = 3_000L
+        const val V2_CHUNK_WRITE_TIMEOUT_MS = 3_000L
         const val SCAN_TIMEOUT_MS = 10_000L
         const val TRANSPORT_SUMMARY_INTERVAL_MS = 5_000L
         const val DEFAULT_LONG_NOTIFICATION_GAP_MS = 100L

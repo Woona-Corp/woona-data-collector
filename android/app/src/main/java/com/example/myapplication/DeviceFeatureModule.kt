@@ -25,6 +25,9 @@ import com.example.myapplication.feature.device.BatchingPacketCaptureController
 import com.example.myapplication.feature.device.PacketCaptureController
 import com.example.myapplication.feature.device.PacketCaptureProcessor
 import com.example.myapplication.feature.device.PacketProcessingUpdateBatcher
+import com.example.myapplication.feature.device.ChartPoint
+import com.example.myapplication.feature.device.ChartStreamKey
+import com.example.myapplication.feature.device.WoonaV2ChartMapper
 import com.example.myapplication.feature.device.PacketReplayController
 import com.example.myapplication.feature.device.PacketSubmitResult
 import com.example.myapplication.storage.BleFileShareIntentFactory
@@ -37,6 +40,8 @@ import com.example.myapplication.storage.PolarCsvFileStore
 import com.example.myapplication.localization.AppLanguage
 import com.example.myapplication.localization.AppTextResolver
 import com.example.myapplication.protocol.ConnectionQuality
+import com.example.myapplication.protocol.WoonaV2Discovery
+import com.example.myapplication.protocol.WoonaV2LiveSession
 import com.example.myapplication.video.AndroidVideoRecorder
 import java.io.File
 import java.util.UUID
@@ -139,6 +144,31 @@ fun createDeviceFeatureController(
             }
         }
     }
+    // UI-only bounded buffer. It must not become the durable V2 acquisition path.
+    val v2PreviewLock = Any()
+    val v2PreviewEvents = ArrayDeque<WoonaV2LiveSession.Event.Samples>()
+    var v2PreviewScheduled = false
+    val flushV2Preview = Runnable {
+        val batch = synchronized(v2PreviewLock) {
+            v2PreviewScheduled = false
+            val events = v2PreviewEvents.toList()
+            v2PreviewEvents.clear()
+            events
+        }
+        if (batch.isNotEmpty()) {
+            val charts = linkedMapOf<ChartStreamKey, MutableList<ChartPoint>>()
+            batch.forEach { event ->
+                WoonaV2ChartMapper.map(event).forEach { (key, points) ->
+                    charts.getOrPut(key) { mutableListOf() }.addAll(points)
+                }
+            }
+            uiStateHolder.onV2LivePreview(
+                samplesByStream = charts,
+                receivedBlocks = batch.size,
+                sequenceGaps = batch.count { it.sequenceGap },
+            )
+        }
+    }
     val listener = object : BleSessionListener {
             override fun onDeviceFound(device: BleDevice) {
                 mainHandler.post {
@@ -174,6 +204,35 @@ fun createDeviceFeatureController(
                 }
             }
 
+            override fun onV2DiscoveryReady(device: WoonaV2Discovery.Device) {
+                mainHandler.post {
+                    uiStateHolder.onV2DiscoveryReady(
+                        device.streams.streamMask, device.hello.capabilities
+                    )
+                }
+            }
+
+            override fun onV2LiveStarted(sessionId: Long, streamMask: Long) {
+                synchronized(v2PreviewLock) { v2PreviewEvents.clear() }
+                mainHandler.post { uiStateHolder.onV2LiveStarted() }
+            }
+
+            override fun onV2LiveSamples(event: WoonaV2LiveSession.Event.Samples) {
+                val schedulePreview = synchronized(v2PreviewLock) {
+                    if (v2PreviewEvents.size >= 64) v2PreviewEvents.removeFirst()
+                    v2PreviewEvents.addLast(event)
+                    if (v2PreviewScheduled) false else {
+                        v2PreviewScheduled = true
+                        true
+                    }
+                }
+                if (schedulePreview) mainHandler.postDelayed(flushV2Preview, 100L)
+            }
+
+            override fun onV2LiveStopped(sessionId: Long) {
+                mainHandler.post { uiStateHolder.onV2LiveStopped() }
+            }
+
             override fun onStateChanged(state: BleSessionState) {
                 mainHandler.post {
                     deviceFeatureController?.onBleStateChanged(state)
@@ -183,7 +242,12 @@ fun createDeviceFeatureController(
 
             override fun onError(message: String, throwable: Throwable?) {
                 mainHandler.post {
-                    deviceFeatureController?.onSessionError(message, throwable) ?: uiStateHolder.showError(message)
+                    if (message.startsWith("V2 discovery failed:")) {
+                        // Diagnostic V2 negotiation is not a Legacy capture failure.
+                        uiStateHolder.onV2DiscoveryFailed(message)
+                    } else {
+                        deviceFeatureController?.onSessionError(message, throwable) ?: uiStateHolder.showError(message)
+                    }
                 }
                 Log.e("BLE_SESSION", message, throwable)
             }
