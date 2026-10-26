@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
 from server.eligibility import activity_exclusion_reasons
+from server.sync_status import recording_status
 from server.label_sync import active_project, file_url, paged, request_json
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -64,10 +65,13 @@ def records_from_sources() -> tuple[list[dict], dict]:
         rows = connection.execute(text("""
             SELECT r.id, r.started_at, r.ingest_status, r.capture_status,
                    r.questionnaire_validation_state, r.session_questionnaire, r.capture_error_code,
+                   r.capture_error_message,r.server_verified_at,r.receipt_sha256,r.server_updated_at,
                    d.number_or_name, v.id AS profile_id, v.validation_state AS profile_state,
                    v.questionnaire AS profile_questionnaire,
                    a.artifact_type, a.file_name, a.expected_size_bytes,
-                   a.server_relative_path, a.storage_status, a.reference_metadata
+                   a.id AS artifact_id,a.server_relative_path,a.storage_status,a.reference_metadata,
+                   a.stored_size_bytes,a.sha256,a.verified_at,a.upload_updated_at,
+                   a.error_code,a.error_message
             FROM recordings r JOIN dogs d ON d.id=r.dog_id
             JOIN dog_profile_versions v ON v.id=r.dog_profile_version_id
             LEFT JOIN artifacts a ON a.recording_id=r.id
@@ -89,12 +93,15 @@ def records_from_sources() -> tuple[list[dict], dict]:
             "recording_id": str(row["id"]), "session_kind": row["session_questionnaire"].get("sessionKind", "activity"),
             "ingest_status": row["ingest_status"], "capture_status": row["capture_status"],
             "capture_error_code": row["capture_error_code"],
+            "capture_error_message": row["capture_error_message"],
+            "_recording": row, "_artifacts": [],
             "profile": {"version_id": str(row["profile_id"]), "state": row["profile_state"],
                         "answers": row["profile_questionnaire"]},
             "session_questionnaire": {"state": row["questionnaire_validation_state"],
                                       "answers": row["session_questionnaire"]},
         })
         if row["artifact_type"]:
+            record['_artifacts'].append({**row, 'id': row['artifact_id']})
             relative = row["server_relative_path"]
             path = (STORAGE_ROOT / relative).resolve() if relative else None
             record["files"].append({"name": row["file_name"], "relative": "woona/" +
@@ -102,9 +109,15 @@ def records_from_sources() -> tuple[list[dict], dict]:
                                     "size": row["expected_size_bytes"],
                                     "type": row["artifact_type"],
                                     "reference_metadata": row["reference_metadata"],
+                                    "storage_status": row['storage_status'],
+                                    "uploaded_bytes": row['stored_size_bytes'],
+                                    "error_code": row['error_code'], "error_message": row['error_message'],
+                                    "last_progress_at_utc": row['upload_updated_at'].isoformat(),
                                     "available": row["storage_status"] == "available" and
                                     path is not None and STORAGE_ROOT in path.parents and
                                     available_file(path, row["expected_size_bytes"])})
+    for record in app_records.values():
+        record['server_status'] = recording_status(record.pop('_recording'), record.pop('_artifacts'), STORAGE_ROOT)
     records.extend(app_records.values())
     return records, {"drive_files": 0,
                      "drive_unindexed_files": 0,
@@ -113,7 +126,7 @@ def records_from_sources() -> tuple[list[dict], dict]:
 
 def summarize(records: list[dict], projects: list[dict], tasks_by_kind: dict, annotation_tasks: dict,
               extra: dict) -> dict:
-    task_maps = {kind: {t["data"]["source_id"]: t for t in tasks_by_kind[kind]} for kind in KINDS}
+    task_maps = {kind: {t.get('data', {}).get('source_id'): t for t in tasks_by_kind[kind]} for kind in KINDS}
     category = {}
     for kind in KINDS:
         class_sources = defaultdict(set)
@@ -131,7 +144,7 @@ def summarize(records: list[dict], projects: list[dict], tasks_by_kind: dict, an
                     if result.get("from_name") != projects[0]["timeline_name"]:
                         continue
                     for label in labels:
-                        class_sources[label].add(task["data"]["source_id"])
+                        class_sources[label].add(task.get('data', {}).get('source_id'))
                         class_segments[label] += 1
         project = projects[0]
         category[kind] = {"title": project["title"], "project_id": project["id"],
@@ -161,6 +174,21 @@ def summarize(records: list[dict], projects: list[dict], tasks_by_kind: dict, an
             {f.get('type') for f in files})
         record['eligible'] = not record['exclusion_reasons']
 
+    source_ids = {record['source_id'] for record in records}
+    eligible_ids = {record['source_id'] for record in records if record['eligible']}
+    task_sources = defaultdict(list)
+    for item in tasks_by_kind['activity']:
+        task_sources[item.get('data', {}).get('source_id')].append(item['id'])
+    service_available = extra.get('label_service', {}).get('available', True)
+    reconciliation = {
+        'status': 'checked' if service_available else 'unavailable',
+        'eligible_missing_tasks': sorted(eligible_ids - set(task_sources)) if service_available else [],
+        'unknown_task_sources': sorted(str(key) for key in set(task_sources) - source_ids),
+        'ineligible_task_sources': sorted(str(key) for key in (set(task_sources) & source_ids) - eligible_ids),
+        'duplicate_task_sources': {str(key): value for key, value in task_sources.items() if len(value) > 1},
+        'stalled_uploads': sum(bool(record.get('server_status', {}).get('transfer', {}).get('stalled')) for record in records),
+        'integrity_problems': sum(record.get('server_status', {}).get('transfer', {}).get('status') == 'integrity_problem' for record in records),
+    }
     records.sort(key=lambda r: (r["date"], r["source_id"]), reverse=True)
     video_ble = [r for r in records if r["video"] and r["ble"] and r.get("session_kind") != "heart"]
     return {"updated_at": datetime.now(ZoneInfo("Europe/Moscow")).isoformat(timespec="seconds"),
@@ -171,28 +199,38 @@ def summarize(records: list[dict], projects: list[dict], tasks_by_kind: dict, an
                        "files": sum(len(r["files"]) for r in records),
                        "available_files": sum(f["available"] for r in records for f in r["files"]),
                        "bytes": sum(r["bytes"] for r in records),
-                        "pending_import": sum(r["eligible"] and not r["tasks"]["activity"] for r in records),
+                        "pending_import": sum(r["eligible"] and not r["tasks"]["activity"] for r in records) if service_available else None,
                        **extra},
             "funnel": {
                 "attempts": len(records),
                 "capture_ok": sum(r.get('capture_status') == 'completed' and not r.get('capture_error_code') for r in records),
                 "uploaded": sum(r['ingest_status'] == 'complete' for r in records),
                 "eligible": sum(r['eligible'] for r in records),
-                "in_label_studio": sum(bool(r['tasks']['activity']) for r in records),
-                "with_annotations": sum(bool(r['annotated_any']) for r in records),
+                "in_label_studio": sum(bool(r['tasks']['activity']) for r in records) if service_available else None,
+                "with_annotations": sum(bool(r['annotated_any']) for r in records) if service_available else None,
             },
             "ingest": dict(Counter(r["ingest_status"] for r in records)),
+            "reconciliation": reconciliation,
+            "label_service": extra.get('label_service', {'available': True}),
             "categories": category, "records": records}
 
 
 def load_dashboard() -> dict:
     records, extra = records_from_sources()
-    projects = [active_project()]
-    tasks = {kind: paged(f'/api/tasks?project={projects[0]["id"]}')
-             for kind in KINDS}
-    # ponytail: read each labeled task directly; batch/cache only if annotation volume makes this slow.
-    labeled = {(kind, t["id"]): request_json("GET", f'/api/tasks/{t["id"]}')
-               for kind in KINDS for t in tasks[kind] if t.get("is_labeled")}
+    try:
+        projects = [active_project()]
+        tasks = {kind: paged(f'/api/tasks?project={projects[0]["id"]}') for kind in KINDS}
+        labeled = {(kind, t["id"]): request_json("GET", f'/api/tasks/{t["id"]}')
+                   for kind in KINDS for t in tasks[kind] if t.get("is_labeled")}
+        extra['label_service'] = {'available': True}
+    except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, KeyError) as error:
+        # A labeling outage must not hide transfer/capture diagnostics or imply zero tasks.
+        projects = [{'id': int(os.environ.get('LABEL_PROJECT_ID', '21')),
+                     'title': 'Label Studio', 'timeline_name': '', 'labels': []}]
+        tasks, labeled = {kind: [] for kind in KINDS}, {}
+        extra['label_service'] = {'available': False, 'code': 'label_studio_unavailable',
+            'message': 'Статусы задач Label Studio сейчас недоступны. Данные и статусы файлов показаны; отсутствие задач не подтверждено.',
+            'retryable': True, 'errorType': type(error).__name__}
     return summarize(records, projects, tasks, labeled, extra)
 
 
@@ -212,13 +250,27 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
              ("Записано без ошибок", funnel['capture_ok'], "успешный capture"),
              ("Передано полностью", funnel['uploaded'], "включая ошибочные capture"),
              ("Допущено к разметке", funnel['eligible'], "полный комплект и успешный capture"),
-             ("В Label Studio", funnel['in_label_studio'], "созданные задачи"),
-             ("Есть разметка", funnel['with_annotations'], "не означает покрытие всех кадров")]
+             ("В Label Studio", funnel['in_label_studio'] if funnel['in_label_studio'] is not None else 'Недоступно', "созданные задачи"),
+             ("Есть разметка", funnel['with_annotations'] if funnel['with_annotations'] is not None else 'Недоступно', "не означает покрытие всех кадров")]
     card_html = "".join(f'<div class="metric"><span>{name}</span><div><strong>{value}</strong><small>{hint}</small></div></div>'
                         for name, value, hint in cards)
     card_html += (f'<div class="metric"><span>Анкеты собак / сессий</span><div><strong>{totals["profile_versions"]}'
                   f' <em>/ {totals["session_questionnaires"]}</em></strong><small>сессий: {totals["session_questionnaires"]}/{app_records}</small></div>'
                   f'<div class="meter"><i style="width:{ratio}%"></i></div></div>')
+
+    reconciliation = data.get('reconciliation', {})
+    if data.get('label_service', {}).get('available', True):
+        diagnostics = ('Сверка Label Studio: ' +
+            f"ожидают импорта {len(reconciliation.get('eligible_missing_tasks', []))}; " +
+            f"дубли источников {len(reconciliation.get('duplicate_task_sources', {}))}; " +
+            f"задачи без записи {len(reconciliation.get('unknown_task_sources', []))}; " +
+            f"исключённые записи в LS {len(reconciliation.get('ineligible_task_sources', []))}. ")
+    else:
+        diagnostics = data['label_service']['message'] + ' '
+    diagnostics += (f"Загрузки без прогресса ≥15 минут: {reconciliation.get('stalled_uploads', 0)}; " +
+                    f"проблемы целостности: {reconciliation.get('integrity_problems', 0)}. " +
+                    'Проверка не видит записи, которые ещё не отправлены с телефонов.')
+    card_html += '<div class="metric" role="status">' + escape(diagnostics) + '</div>'
 
     colors = {"source": ("#0052cc", "#de350b", "#ffab00"),
               "activity": ("#4c9aff", "#6554c0", "#36b37e", "#ff8b00", "#ff5630"),
@@ -233,12 +285,13 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
         chips = "".join(f'<span class="class-chip"><i style="background:{color}"></i>{escape(name)}: '
                         f'<b>{stats["records"]} записей / {stats["segments"]} {unit}</b></span>'
                         for (name, stats), color in zip(category["classes"].items(), colors[kind] * 10))
+        progress_label = (f'{category["labeled"]} / {category["tasks"]} <small>({percent}%)</small>'
+                          if data.get('label_service', {}).get('available', True) else 'Статус недоступен')
         category_rows.append(
             f'<div class="project-row"><div class="project-main"><div class="project-title">'
             f'<a href="/projects/{category["project_id"]}/data">{escape(category["title"])}</a>'
             f'<span class="type-tag">{labels[kind]}</span></div><div class="chips">{chips}</div></div>'
-            f'<div class="project-progress"><span>{category["labeled"]} / {category["tasks"]} '
-            f'<small>({percent}%)</small></span><div class="meter"><i style="width:{percent}%"></i></div></div></div>')
+            f'<div class="project-progress"><span>{progress_label}</span><div class="meter"><i style="width:{percent}%"></i></div></div></div>')
 
     def matches(record: dict) -> bool:
         if query.casefold() not in (record["source_id"] + " " + record["dog"] + " " + record["origin"]).casefold():
@@ -271,8 +324,12 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
         source_id = record["source_id"]
         short_id = source_id.split(":", 1)[1][:12] + "…"
         files = "".join(f'<li><a href="{escape(file_url(item["relative"]), quote=True)}">'
-                        f'{escape(item["name"])}</a> · {item["size"]:,} B</li>'
-                        if item["available"] else f'<li>{escape(item["name"])} · недоступен</li>'
+                        f'{escape(item["name"])}</a> · {item["size"]:,} B · проверен</li>'
+                        if item["available"] else f'<li>{escape(item["name"])} · '
+                        f'{escape(item.get("storage_status", "unavailable"))} · '
+                        f'{item.get("uploaded_bytes", 0):,} / {item["size"]:,} B'
+                        f'{" · " + escape(item["error_code"]) if item.get("error_code") else ""}'
+                        f'{" · " + escape(item["error_message"]) if item.get("error_message") else ""}</li>'
                         for item in record["files"])
         file_details = f'<details><summary>{len(record["files"])} файлов · {record["bytes"] / 1048576:.1f} MiB</summary>' \
                        f'<ul>{files}</ul></details>'
@@ -299,6 +356,8 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
                  "Нет пары видео + BLE" if not (record["video"] and record["ble"]) else
                  "Видео размечено" if record["annotated_all"] else "В процессе" if record["annotated_any"] else
                  "Ожидает разметки")
+        if not data.get('label_service', {}).get('available', True):
+            state = 'Статус Label Studio недоступен; наличие задачи не проверено'
         if record.get('exclusion_reasons'):
             state = '; '.join(record['exclusion_reasons'])
         if record.get("session_kind") == "heart":
@@ -306,12 +365,26 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
             dots = ""
         if record.get("recording_id"):
             action += f'<br><a class="action" href="/dashboard/recordings/{record["recording_id"]}/references">Добавить ЭКГ / ЧСС</a>'
+        transfer = record.get('server_status', {}).get('transfer')
+        transfer_html = escape(record['ingest_status'])
+        if transfer:
+            state_names = {'metadata_pending': 'Ожидает метаданных', 'uploading': 'Загрузка не завершена',
+                'awaiting_verification': 'Байты переданы; ожидается проверка', 'verified': 'Файлы и receipt подтверждены',
+                'integrity_problem': 'Проблема целостности — сохраните локальные оригиналы', 'rejected': 'Загрузка отклонена'}
+            transfer_html = (escape(state_names[transfer['status']]) + '<br>' +
+                f"{transfer['uploadedBytes']:,} / {transfer['totalBytes']:,} B · проверено файлов: " +
+                f"{transfer['verifiedFiles']}/{transfer['totalFiles']}" +
+                (f"<br>Нет прогресса с {escape(transfer['lastProgressAtUtc'] or 'неизвестного времени')}" if transfer['stalled'] else ''))
+        capture_message = record.get('capture_error_message')
+        if capture_message:
+            transfer_html += '<details><summary>Ошибка записи</summary><pre>' + escape(capture_message) + '</pre></details>'
         rows.append(f'<tr><td><code class="source-id" title="{escape(source_id, quote=True)}">{escape(short_id)}</code>'
                     f'<div class="sub">{escape(record["dog"])} · {escape(record["date"])} · {escape(record["origin"])}</div></td>'
                     f'<td><span class="pill {"ok" if record["video"] else "neutral"}">Видео: {"есть" if record["video"] else "нет"}</span> '
                     f'<span class="pill {"ok" if record["ble"] else "neutral"}">BLE: {"есть" if record["ble"] else "нет"}</span></td>'
-                    f'<td>{file_details}<div class="sub">{escape(record["ingest_status"])} · референсы: {record["reference_files"]}</div></td>'
-                    f'<td><div class="dots">{dots}</div><span class="state">{escape(state)} ({done}/{len(KINDS)})</span></td>'
+                    f'<td>{file_details}<div class="sub">{transfer_html} · референсы: {record["reference_files"]}</div></td>'
+                    f'<td><div class="dots">{dots}</div><span class="state">{escape(state)}'
+                    f'{" (" + str(done) + "/" + str(len(KINDS)) + ")" if data.get("label_service", {}).get("available", True) else ""}</span></td>'
                     f'<td>{questionnaire}</td><td>{action}</td></tr>')
 
     selected = lambda value, current: ' selected' if value == current else ''

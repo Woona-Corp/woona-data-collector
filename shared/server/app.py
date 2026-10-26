@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import threading
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ from jsonschema import Draft202012Validator, ValidationError as SchemaValidation
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 DATABASE_URL = os.getenv(
@@ -388,7 +390,7 @@ class MetadataBodyLimitMiddleware:
             request_id = request.state.request_id
             return await JSONResponse(status_code=413, content={
                 "requestId": request_id, "code": "json_body_too_large",
-                "message": "JSON request body is too large",
+                **error_guidance("json_body_too_large", 413),
             }, headers={"X-Request-ID": request_id})(scope, receive, send)
         messages: list[Message] = [{"type": "http.request", "body": bytes(body), "more_body": disconnected}]
         if disconnected:
@@ -404,6 +406,8 @@ class MetadataBodyLimitMiddleware:
 app = FastAPI(title="Woona API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(MetadataBodyLimitMiddleware)
 
+from server.errors import error_guidance
+from server.sync_status import recording_status
 from server.dashboard import router as dashboard_router
 
 app.include_router(dashboard_router)
@@ -412,7 +416,8 @@ app.include_router(dashboard_router)
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
     started = time.monotonic()
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    supplied_id = request.headers.get("X-Request-ID", "")
+    request_id = supplied_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied_id) else str(uuid.uuid4())
     request.state.request_id = request_id
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
@@ -431,22 +436,34 @@ async def request_id_middleware(request: Request, call_next):
     return response
 
 
-@app.exception_handler(HTTPException)
-async def http_error(request: Request, exception: HTTPException) -> JSONResponse:
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exception: StarletteHTTPException) -> JSONResponse:
     detail = exception.detail if isinstance(exception.detail, dict) else {}
     code = str(detail.get("code", "request_failed"))
-    message = str(detail.get("message", code.replace("_", " ")))
     content = {
         "requestId": getattr(request.state, "request_id", ""),
         "code": code,
-        "message": message,
+        **error_guidance(code, exception.status_code),
     }
+    if isinstance(exception.detail, str) and exception.detail:
+        content['detail'] = exception.detail
     content.update({key: value for key, value in detail.items() if key != "code"})
     return JSONResponse(
         status_code=exception.status_code,
         content=content,
-        headers=exception.headers,
+        headers={**(exception.headers or {}), "X-Request-ID": content["requestId"]},
     )
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exception: Exception) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", "")
+    # Never return exception strings, SQL parameters, connection URLs or credentials.
+    logger.error(json.dumps({"requestId": request_id, "event": "request_failed",
+                             "exceptionType": type(exception).__name__}))
+    return JSONResponse(status_code=500, content={"requestId": request_id,
+        "code": "internal_server_error", **error_guidance("internal_server_error", 500)},
+        headers={"X-Request-ID": request_id})
 
 
 @app.exception_handler(RequestValidationError)
@@ -462,7 +479,7 @@ async def validation_error(
         content={
             "requestId": getattr(request.state, "request_id", ""),
             "code": "request_invalid",
-            "message": "Request validation failed",
+            **error_guidance("request_invalid", 422),
             "fieldErrors": fields,
         },
     )
@@ -545,11 +562,13 @@ def ready() -> dict[str, str]:
     except Exception as exception:
         raise HTTPException(503, detail={"code": "database_unavailable"}) from exception
     try:
-        probe = STORAGE_ROOT / ".health"
-        probe.write_bytes(b"ok")
-        if probe.read_bytes() != b"ok":
-            raise OSError("storage probe mismatch")
-        probe.unlink(missing_ok=True)
+        # Concurrent readiness probes must not truncate or unlink each other's file.
+        with tempfile.NamedTemporaryFile(prefix=".health-", dir=STORAGE_ROOT) as probe:
+            probe.write(b"ok")
+            probe.flush()
+            probe.seek(0)
+            if probe.read() != b"ok":
+                raise OSError("storage probe mismatch")
     except Exception as exception:
         raise HTTPException(503, detail={"code": "storage_unavailable"}) from exception
     return {"status": "ready"}
@@ -1678,22 +1697,23 @@ def get_recording_status(
         row = connection.execute(
             text(
                 """
-                SELECT ingest_status,server_verified_at,receipt_sha256
+                SELECT id,ingest_status,server_verified_at,receipt_sha256,
+                       capture_status,capture_error_code,capture_error_message,
+                       session_questionnaire,server_updated_at
                 FROM recordings WHERE id=:id
                 """
             ),
             {"id": recording_id},
         ).mappings().first()
+        artifacts = connection.execute(text("""
+            SELECT id,artifact_type,file_name,expected_size_bytes,stored_size_bytes,
+                   sha256,storage_status,server_relative_path,verified_at,
+                   upload_updated_at,error_code,error_message
+            FROM artifacts WHERE recording_id=:id ORDER BY id
+        """), {"id": recording_id}).mappings().all()
     if row is None:
         raise HTTPException(404, detail={"code": "recording_not_found"})
-    return {
-        "recordingId": str(recording_id),
-        "ingestStatus": row["ingest_status"],
-        "verifiedAtUtc": utc_isoformat(row["server_verified_at"])
-        if row["server_verified_at"]
-        else None,
-        "receiptSha256": row["receipt_sha256"],
-    }
+    return recording_status(row, artifacts, STORAGE_ROOT)
 
 
 def stream_file(path: Path, start: int, length: int):
