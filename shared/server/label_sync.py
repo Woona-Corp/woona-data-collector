@@ -116,17 +116,27 @@ def request_json(method: str, path: str, payload=None):
 
 def paged(path: str) -> list[dict]:
     results = []
+    seen_ids = set()
     page = 1
     while True:
         separator = "&" if "?" in path else "?"
         body = request_json("GET", f"{path}{separator}{urlencode({'page': page, 'page_size': 100})}")
         if isinstance(body, list):
+            if page != 1:
+                raise RuntimeError(f"pagination response format changed: {path}")
             return body
         batch = body.get("results", body.get("tasks", []))
-        if not batch and body.get("total", body.get("count", 0)) > len(results):
+        total = body.get("total", body.get("count"))
+        if total is not None and (not isinstance(total, int) or total < 0):
+            raise RuntimeError(f"invalid pagination total: {path}")
+        if not batch and (body.get('next') or (total is not None and total > len(results))):
             raise RuntimeError(f"pagination stopped early: {path}")
+        page_ids = [item.get('id') for item in batch]
+        if len(set(page_ids)) != len(page_ids) or seen_ids.intersection(page_ids):
+            raise RuntimeError(f"pagination repeated task IDs: {path}")
+        seen_ids.update(page_ids)
         results.extend(batch)
-        if not body.get("next") and len(results) >= body.get("total", body.get("count", len(results))):
+        if not body.get("next") and (total is None or len(results) >= total):
             return results
         page += 1
 
@@ -166,27 +176,44 @@ def _sync_unlocked() -> dict[str, tuple[int, int]]:
     rows = paged(f"/api/tasks?project={project_id}")
     by_source = {row['data'].get('source_id'): row for row in rows}
     for candidate in expected:
-        presentation = candidate['meta'].get('video_presentation')
         current = by_source.get(candidate['data']['source_id'])
-        if not presentation or not current:
-            continue
-        if (current['data'].get('video') == candidate['data']['video'] and
-                current.get('meta', {}).get('video_presentation') == presentation):
+        if not current or not managed_task_patch(candidate, current):
             continue
         detail = request_json('GET', f"/api/tasks/{current['id']}/")
-        if detail['data'].get('video') not in (candidate['data']['original_video'], candidate['data']['video']):
-            raise RuntimeError('Presentation change conflicts with current task video')
-        request_json('PATCH', f"/api/tasks/{current['id']}/", {
-            'data': {**detail['data'], 'original_video': candidate['data']['original_video'],
-                     'video': candidate['data']['video']},
-            'meta': {**detail.get('meta', {}), 'video_presentation': presentation},
-        })
+        update = managed_task_patch(candidate, detail)
+        if update:
+            request_json('PATCH', f"/api/tasks/{current['id']}/", update)
     actual = [row["data"].get("source_id") for row in rows]
     if not {item["data"]["source_id"] for item in expected}.issubset(actual):
         raise RuntimeError("import not verified")
     if len(actual) != len(set(actual)):
         raise RuntimeError("duplicate source IDs in labeling project")
     return {"activity": (len(expected), len(actual))}
+
+
+def managed_task_patch(candidate: dict, current: dict) -> dict | None:
+    """Refresh editable questionnaires, never annotations or frozen frame coordinates."""
+    data, meta = dict(current.get('data', {})), dict(current.get('meta', {}))
+    if candidate['data'].get('source_id') is not None and data.get('source_id') != candidate['data']['source_id']:
+        raise RuntimeError('Task source identity conflicts with canonical recording')
+    for key in ('recording_id', 'dog_id', 'dog_profile_version_id', 'dog', 'session'):
+        if key in candidate['data']:
+            if key in ('recording_id', 'dog_id', 'dog_profile_version_id') and data.get(key) not in (None, candidate['data'][key]):
+                raise RuntimeError('Task identity conflicts with canonical recording')
+            data[key] = candidate['data'][key]
+    for key in ('schema_version', 'source', 'source_id', 'dog', 'capture_date',
+                'dog_questionnaire', 'session_questionnaire', 'alignment', 'data_quality'):
+        if key in candidate['meta']:
+            meta[key] = candidate['meta'][key]
+    presentation = candidate['meta'].get('video_presentation')
+    if presentation:
+        if data.get('video') not in (candidate['data']['original_video'], candidate['data']['video']):
+            raise RuntimeError('Presentation change conflicts with current task video')
+        data.update(original_video=candidate['data']['original_video'], video=candidate['data']['video'])
+        meta['video_presentation'] = presentation
+    if data == current.get('data', {}) and meta == current.get('meta', {}):
+        return None
+    return {'data': data, 'meta': meta}
 
 
 def active_project() -> dict:

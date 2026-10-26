@@ -71,3 +71,49 @@ class DashboardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class DashboardReconciliationTest(unittest.TestCase):
+    def summarize(self, tasks, extra=None):
+        from server.eligibility import REQUIRED_ACTIVITY_ARTIFACTS
+        records = [{'source_id': 'woona:one', 'origin': 'Woona', 'dog': 'Synthetic dog',
+            'date': '2026-10-26', 'ingest_status': 'complete', 'capture_status': 'completed',
+            'capture_error_code': None, 'profile': None,
+            'session_questionnaire': {'answers': {'schemaVersion': 2, 'plannedActivities': ['Активность']}},
+            'files': [{'name': kind, 'type': kind, 'relative': kind, 'size': 1, 'available': True}
+                      for kind in REQUIRED_ACTIVITY_ARTIFACTS]}]
+        return summarize(records,
+            [{'id': 21, 'title': 'Activity', 'timeline_name': 'videoLabels', 'labels': []}],
+            {'activity': tasks}, {}, {'dogs': 1, 'profile_versions': 1, 'session_questionnaires': 1,
+                'drive_files': 0, 'drive_unindexed_files': 0, **(extra or {})})
+
+    def test_duplicates_orphans_and_missing_import_are_independent(self):
+        data = self.summarize([{'id': 1, 'data': {'source_id': 'woona:unknown'}},
+                               {'id': 2, 'data': {'source_id': 'woona:unknown'}},
+                               {'id': 3, 'data': {}}])
+        self.assertEqual(data['reconciliation']['eligible_missing_tasks'], ['woona:one'])
+        self.assertEqual(data['reconciliation']['duplicate_task_sources'], {'woona:unknown': [1, 2]})
+        self.assertEqual(data['reconciliation']['unknown_task_sources'], ['None', 'woona:unknown'])
+        self.assertIn('дубли источников 1', render(data, ''))
+
+    def test_labeling_outage_does_not_look_like_zero_tasks_or_missing_imports(self):
+        data = self.summarize([], {'label_service': {'available': False, 'message': 'Label Studio сейчас недоступна'}})
+        self.assertIsNone(data['funnel']['in_label_studio'])
+        self.assertIsNone(data['totals']['pending_import'])
+        self.assertEqual(data['reconciliation']['status'], 'unavailable')
+        self.assertEqual(data['reconciliation']['eligible_missing_tasks'], [])
+        page = render(data, '')
+        self.assertIn('Недоступно', page)
+        self.assertIn('наличие задачи не проверено', page)
+        self.assertNotIn('ожидают импорта 0', page)
+
+    def test_transfer_diagnostics_survive_unavailable_label_service(self):
+        from unittest.mock import patch
+        from urllib.error import URLError
+        from server.dashboard import load_dashboard
+        with patch('server.dashboard.records_from_sources', return_value=([], {
+                'dogs': 0, 'profile_versions': 0, 'session_questionnaires': 0})), \
+             patch('server.dashboard.active_project', side_effect=URLError('private-token-must-not-escape')):
+            data = load_dashboard()
+        self.assertFalse(data['label_service']['available'])
+        self.assertEqual(data['label_service']['errorType'], 'URLError')
+        self.assertNotIn('private-token', str(data))
