@@ -1345,7 +1345,7 @@ final class WoonaDataTests: XCTestCase {
         let client = try WoonaServerClient(configuration: .init(baseURL: baseURL, wifiOnly: false),
                                           token: "loopback-fixture", sessionConfiguration: configuration)
         try await client.download(artifactID: server.artifactID, to: server.target, expectedSize: Int64(server.payload.count), sha256: server.sha256)
-        XCTAssertEqual(try WoonaStore.sha256(server.target), server.sha256)
+        XCTAssertEqual(try WoonaStore.sha256File(server.target), server.sha256)
         XCTAssertEqual(try Data(contentsOf: server.target).count, server.payload.count)
         XCTAssertFalse(FileManager.default.fileExists(atPath: server.target.appendingPathExtension("part").path))
         XCTAssertEqual(server.requests.map(\.method), ["HEAD", "GET", "GET"])
@@ -1370,7 +1370,7 @@ final class WoonaDataTests: XCTestCase {
         let client = try WoonaServerClient(configuration: .init(baseURL: baseURL, wifiOnly: false),
                                           token: "loopback-fixture", sessionConfiguration: configuration)
         try await client.download(artifactID: server.artifactID, to: server.target, expectedSize: Int64(server.payload.count), sha256: server.sha256)
-        XCTAssertEqual(try WoonaStore.sha256(server.target), server.sha256)
+        XCTAssertEqual(try WoonaStore.sha256File(server.target), server.sha256)
         XCTAssertEqual(try Data(contentsOf: server.target), server.payload)
         XCTAssertEqual(server.requests.map(\.range), ["bytes=\(prefixLength)-\(server.payload.count - 1)"])
         XCTAssertEqual(server.requests.first?.ifRange, "\"\(server.sha256)\"")
