@@ -1,5 +1,7 @@
 import XCTest
 import SQLite3
+import Network
+import CryptoKit
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
@@ -1324,6 +1326,85 @@ final class WoonaDataTests: XCTestCase {
         return dog
     }
 
+    @MainActor
+    func testRealLoopbackDownloadUsesTwoBoundedRangesAndVerifiedTargetNeedsNoRequest() async throws {
+        let server = try LoopbackArtifactHTTPServer(payload: Data(repeating: 0x35, count: 8 * 1_024 * 1_024) + Data("loopback-tail".utf8))
+        defer { server.stop() }
+        let baseURL = try await server.start()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 8
+        configuration.timeoutIntervalForResource = 20
+        let probe = URLSession(configuration: configuration)
+        defer { probe.invalidateAndCancel() }
+        var head = URLRequest(url: try XCTUnwrap(URL(string: baseURL + "/v1/artifacts/\(server.artifactID.uuidString)/content")))
+        head.httpMethod = "HEAD"
+        let (headBody, headResponse) = try await probe.data(for: head)
+        XCTAssertTrue(headBody.isEmpty)
+        XCTAssertEqual((headResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Length"), String(server.payload.count))
+        XCTAssertEqual((headResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag"), "\"\(server.sha256)\"")
+        let client = try WoonaServerClient(configuration: .init(baseURL: baseURL, wifiOnly: false),
+                                          token: "loopback-fixture", sessionConfiguration: configuration)
+        try await client.download(artifactID: server.artifactID, to: server.target, expectedSize: Int64(server.payload.count), sha256: server.sha256)
+        XCTAssertEqual(try WoonaStore.sha256(server.target), server.sha256)
+        XCTAssertEqual(try Data(contentsOf: server.target).count, server.payload.count)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: server.target.appendingPathExtension("part").path))
+        XCTAssertEqual(server.requests.map(\.method), ["HEAD", "GET", "GET"])
+        let requests = server.requests.filter { $0.method == "GET" }
+        XCTAssertEqual(requests.map(\.path), [server.route, server.route])
+        XCTAssertEqual(requests.map(\.range), ["bytes=0-8388607", "bytes=8388608-\(server.payload.count - 1)"])
+        XCTAssertEqual(requests.map(\.encoding), ["identity", "identity"])
+        XCTAssertEqual(requests.last?.ifRange, "\"\(server.sha256)\"")
+        try await client.download(artifactID: server.artifactID, to: server.target, expectedSize: Int64(server.payload.count), sha256: server.sha256)
+        XCTAssertEqual(server.requests.count, 3, "An already verified target must not make a network request")
+    }
+
+    @MainActor
+    func testRealLoopbackDownloadResumesExistingPrefixWithRangeAndIfRange() async throws {
+        let server = try LoopbackArtifactHTTPServer(payload: Data(repeating: 0x62, count: 512 * 1_024 + 19))
+        defer { server.stop() }
+        let baseURL = try await server.start()
+        let prefixLength = 131_073
+        try server.payload.prefix(prefixLength).write(to: server.target.appendingPathExtension("part"))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 8
+        let client = try WoonaServerClient(configuration: .init(baseURL: baseURL, wifiOnly: false),
+                                          token: "loopback-fixture", sessionConfiguration: configuration)
+        try await client.download(artifactID: server.artifactID, to: server.target, expectedSize: Int64(server.payload.count), sha256: server.sha256)
+        XCTAssertEqual(try WoonaStore.sha256(server.target), server.sha256)
+        XCTAssertEqual(try Data(contentsOf: server.target), server.payload)
+        XCTAssertEqual(server.requests.map(\.range), ["bytes=\(prefixLength)-\(server.payload.count - 1)"])
+        XCTAssertEqual(server.requests.first?.ifRange, "\"\(server.sha256)\"")
+        XCTAssertEqual(server.requests.first?.encoding, "identity")
+    }
+
+    @MainActor
+    func testRealLoopbackMalformedRangePreservesPrefixAndExistingOriginal() async throws {
+        let server = try LoopbackArtifactHTTPServer(payload: Data(repeating: 0x73, count: 128 * 1_024 + 7), malformedRange: true)
+        defer { server.stop() }
+        let baseURL = try await server.start()
+        let part = server.target.appendingPathExtension("part")
+        let prefix = Data(server.payload.prefix(37))
+        try prefix.write(to: part)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 8
+        let client = try WoonaServerClient(configuration: .init(baseURL: baseURL, wifiOnly: false),
+                                          token: "loopback-fixture", sessionConfiguration: configuration)
+        do {
+            try await client.download(artifactID: server.artifactID, to: server.target, expectedSize: Int64(server.payload.count), sha256: server.sha256)
+            XCTFail("A response with the wrong Content-Range must not publish a target")
+        } catch ServerSyncError.transfer(let code, _, _) { XCTAssertEqual(code, "download_range_invalid") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: server.target.path))
+        XCTAssertEqual(try Data(contentsOf: part), prefix)
+        let original = Data("Preserve this independent local original".utf8)
+        try original.write(to: server.target)
+        do {
+            try await client.download(artifactID: server.artifactID, to: server.target, expectedSize: Int64(server.payload.count), sha256: server.sha256)
+            XCTFail("An existing conflicting local original must not be overwritten")
+        } catch ServerSyncError.transfer(let code, _, _) { XCTAssertEqual(code, "local_artifact_conflict") }
+        XCTAssertEqual(try Data(contentsOf: server.target), original)
+        XCTAssertEqual(server.requests.count, 1)
+    }
+
     private func completeSession() -> SessionQuestionnaire {
         var session = SessionQuestionnaire()
         session.sessionLabel = "Morning"
@@ -1340,6 +1421,141 @@ final class WoonaDataTests: XCTestCase {
         session.respirationStatus = "not_measured"
         session.bodyTemperatureStatus = "not_measured"
         return session
+    }
+}
+
+/// A single-route, loopback-only fixture exercising URLSession's real socket and
+/// download-task temporary files. It never contacts a configured or external API.
+private final class LoopbackArtifactHTTPServer: @unchecked Sendable {
+    struct Request {
+        let method: String
+        let path: String
+        let range: String?
+        let ifRange: String?
+        let encoding: String?
+    }
+    let payload: Data
+    let sha256: String
+    let artifactID = UUID()
+    let target: URL
+    var route: String { "/prefix/v1/artifacts/\(artifactID.uuidString)/content" }
+    private let root: URL
+    private let malformedRange: Bool
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "woona.tests.loopback-http")
+    private let lock = NSLock()
+    private var ready: CheckedContinuation<UInt16, Error>?
+    private var connections: [NWConnection] = []
+    private var recorded: [Request] = []
+    var requests: [Request] { lock.lock(); defer { lock.unlock() }; return recorded }
+
+    init(payload: Data, malformedRange: Bool = false) throws {
+        self.payload = payload
+        self.malformedRange = malformedRange
+        sha256 = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("woona-loopback-" + UUID().uuidString)
+        target = root.appendingPathComponent("download.bin")
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    func start() async throws -> String {
+        let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
+            lock.lock(); ready = continuation; lock.unlock()
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    if let port = self.listener.port { _ = self.finishReady(.success(port.rawValue)) }
+                case .failed(let error): _ = self.finishReady(.failure(error))
+                default: break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else { connection.cancel(); return }
+                self.lock.lock(); self.connections.append(connection); self.lock.unlock()
+                connection.start(queue: self.queue)
+                self.receive(connection, buffered: Data())
+            }
+            listener.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self else { return }
+                if self.finishReady(.failure(URLError(.timedOut))) { self.listener.cancel() }
+            }
+        }
+        return "http://127.0.0.1:\(port)/prefix"
+    }
+
+    private func finishReady(_ result: Result<UInt16, Error>) -> Bool {
+        lock.lock(); let continuation = ready; ready = nil; lock.unlock()
+        continuation?.resume(with: result)
+        return continuation != nil
+    }
+
+    func stop() {
+        listener.cancel()
+        lock.lock(); let active = connections; connections = []; lock.unlock()
+        active.forEach { $0.cancel() }
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func receive(_ connection: NWConnection, buffered: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] bytes, _, complete, error in
+            guard let self else { connection.cancel(); return }
+            var buffer = buffered
+            if let bytes { buffer.append(bytes) }
+            guard buffer.count <= 16_384 else { connection.cancel(); return }
+            if buffer.range(of: Data("\r\n\r\n".utf8)) != nil { self.respond(connection, header: buffer) }
+            else if !complete && error == nil { self.receive(connection, buffered: buffer) }
+            else { connection.cancel() }
+        }
+    }
+
+    private func respond(_ connection: NWConnection, header: Data) {
+        guard let text = String(data: header, encoding: .utf8) else { connection.cancel(); return }
+        let lines = text.components(separatedBy: "\r\n")
+        let first = (lines.first ?? "").split(separator: " ")
+        guard first.count == 3 else { connection.cancel(); return }
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let separator = line.firstIndex(of: ":") else { continue }
+            headers[String(line[..<separator]).lowercased()] = line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
+        }
+        let method = String(first[0]), path = String(first[1])
+        lock.lock()
+        recorded.append(Request(method: method, path: path, range: headers["range"], ifRange: headers["if-range"], encoding: headers["accept-encoding"]))
+        lock.unlock()
+        guard path == route, ["GET", "HEAD"].contains(method) else {
+            return send(connection, status: "404 Not Found", fields: [:], body: Data())
+        }
+        var fields = ["ETag": "\"\(sha256)\"", "Content-Encoding": "identity", "Accept-Ranges": "bytes", "Content-Type": "application/octet-stream"]
+        if method == "HEAD" {
+            fields["Content-Length"] = String(payload.count)
+            return send(connection, status: "200 OK", fields: fields, body: Data())
+        }
+        guard let range = headers["range"], range.hasPrefix("bytes=") else {
+            return send(connection, status: "200 OK", fields: fields, body: payload)
+        }
+        let bounds = range.dropFirst(6).split(separator: "-", omittingEmptySubsequences: false)
+        guard bounds.count == 2, let start = Int(bounds[0]), let end = Int(bounds[1]),
+              start >= 0, start <= end, end < payload.count else {
+            return send(connection, status: "416 Range Not Satisfiable", fields: fields, body: Data())
+        }
+        fields["Content-Range"] = malformedRange
+            ? "bytes \(start + 1)-\(end + 1)/\(payload.count + 1)"
+            : "bytes \(start)-\(end)/\(payload.count)"
+        send(connection, status: "206 Partial Content", fields: fields, body: payload.subdata(in: start..<(end + 1)))
+    }
+
+    private func send(_ connection: NWConnection, status: String, fields: [String: String], body: Data) {
+        var headers = fields
+        if headers["Content-Length"] == nil { headers["Content-Length"] = String(body.count) }
+        headers["Connection"] = "close"
+        let prefix = "HTTP/1.1 \(status)\r\n" + headers.sorted(by: { $0.key < $1.key }).map { "\($0.key): \($0.value)\r\n" }.joined() + "\r\n"
+        connection.send(content: Data(prefix.utf8) + body, contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { error in if error != nil { connection.cancel() } })
     }
 }
 
