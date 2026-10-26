@@ -22,9 +22,9 @@ final class OverviewParityTests: XCTestCase {
         screenshot.name = "Overview-account-and-dogs"
         screenshot.lifetime = .keepAlways
         add(screenshot)
-        app.tabBars.buttons["Settings"].tap()
+        app.buttons["tab.settings"].tap()
         XCTAssertFalse(account.exists)
-        app.tabBars.buttons["Overview"].tap()
+        app.buttons["tab.overview"].tap()
         XCTAssertTrue(account.isHittable)
     }
 
@@ -51,7 +51,7 @@ final class OverviewParityTests: XCTestCase {
     }
 
     func testServerConnectionRequiresTokenAndCancelDoesNotConfigure() {
-        app.tabBars.buttons["Settings"].tap()
+        app.buttons["tab.settings"].tap()
         let configure = app.buttons["server.configure"]
         if !configure.isHittable { app.swipeUp() }
         configure.tap()
@@ -63,8 +63,22 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertEqual(configure.label, "Connect")
     }
 
+    func testIdleDiscoveryActionsAppearTogether() {
+        let scan = app.buttons["devices.scan"]
+        for _ in 0..<4 {
+            if scan.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(scan.isHittable)
+        XCTAssertEqual(scan.label, "START SCAN")
+        let replay = app.buttons["devices.replay"]
+        XCTAssertTrue(replay.isHittable)
+        XCTAssertLessThan(scan.frame.minY, replay.frame.minY)
+        XCTAssertFalse(app.buttons["DISCONNECT"].exists)
+    }
+
     func testFullscreenKeepsChartSelection() {
-        app.tabBars.buttons["Charts"].tap()
+        app.buttons["tab.charts"].tap()
         app.segmentedControls.buttons["AXL"].tap()
         app.segmentedControls.buttons["Channel 2"].tap()
         app.buttons["chart.fullscreen.open"].tap()
