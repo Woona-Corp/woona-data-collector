@@ -387,8 +387,14 @@ class ServerApiClientIntegrationTest {
         expectFailure(409, "animal_id_already_exists") {
             client.uploadProfile(profile.copy(dogId = UUID.randomUUID().toString(), profileVersionId = UUID.randomUUID().toString()))
         }
+        expectFailure(409, "profile_content_already_exists") {
+            client.uploadProfile(profile.copy(profileVersionId = UUID.randomUUID().toString(), expectedRevision = 1))
+        }
+        // Exercise a stale revision independently of the duplicate-content guard.
+        val revisedDogJson = completeDog().copy(schemaVersion = 2, animalId = animalId, numberOrName = "Revised E2E").toJson()
         expectFailure(409, "revision_conflict") {
-            client.uploadProfile(profile.copy(profileVersionId = UUID.randomUUID().toString(), expectedRevision = 999))
+            client.uploadProfile(profile.copy(profileVersionId = UUID.randomUUID().toString(), expectedRevision = 999,
+                dogName = "Revised E2E", questionnaireJson = revisedDogJson, contentSha256 = canonicalJsonSha256(revisedDogJson)))
         }
         val invalidClient = ServerApiClient(ServerSettings(baseUrl, "invalid-test-token", "unused", false))
         expectFailure(401, "invalid_bearer_token") { invalidClient.uploadProfile(profile) }

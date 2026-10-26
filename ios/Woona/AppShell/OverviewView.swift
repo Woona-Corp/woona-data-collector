@@ -170,6 +170,21 @@ private let serverReasons: [String: (String, String)] = [
     "local_copy_remove_failed": ("Не удалось удалить один из локальных файлов. Серверная копия сохранена", "A local file could not be removed. The server copy is preserved"),
 ]
 
+private func httpFailureNextAction(_ status: Int, language: AppLanguage) -> String {
+    switch status {
+    case 401: return ""
+    case 403: return errorText(language, "Проверьте права доступа с администратором. Повтор без изменения прав не устранит отказ.", "Check access permissions with an administrator. Retrying without a permission change will not resolve the refusal.")
+    case 404: return errorText(language, "Обновите историю и проверьте выбранный аккаунт. Сохраните локальные оригиналы.", "Refresh history and check the selected account. Preserve local originals.")
+    case 408, 504: return errorText(language, "Проверьте доступность сервера и повторите операцию. Её результат пока не подтверждён.", "Check server availability and retry the operation. Its outcome is not yet confirmed.")
+    case 409: return errorText(language, "Обновите данные с сервера и сравните их с черновиком перед повтором. Сохраните черновик и файлы.", "Refresh server data and compare it with the draft before retrying. Preserve the draft and files.")
+    case 413: return errorText(language, "Сохраните данные и передайте подробности разработчику для проверки лимита сервера. Не удаляйте файлы.", "Preserve data and send details to support to check the server limit. Keep the original files.")
+    case 422: return errorText(language, "Проверьте указанные поля. Если ошибка повторяется, передайте код и подробности разработчику.", "Check the indicated fields. If the error repeats, send its code and details to support.")
+    case 429: return errorText(language, "Подождите и повторите операцию позже.", "Wait and retry the operation later.")
+    case 500...599: return errorText(language, "Проверьте сервер и повторите позже. При повторении ошибки передайте подробности разработчику.", "Check the server and retry later. If the error repeats, send details to support.")
+    default: return errorText(language, "Проверьте подробности и настройки сервера. Сохраните исходные данные перед исправлением причины.", "Check details and server settings. Preserve original data before resolving the cause.")
+    }
+}
+
 func recordingUploadErrorText(_ message: String?, language: AppLanguage) -> String {
     let raw = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     guard !raw.isEmpty else { return errorText(language, "Причина не сохранена; проверьте диагностику сессии", "The cause was not saved; check session diagnostics") }
@@ -191,7 +206,7 @@ func recordingUploadErrorText(_ message: String?, language: AppLanguage) -> Stri
         case 500...599: reason = errorText(language, "Ошибка на стороне сервера", "The server encountered an error")
         default: reason = errorText(language, "Сервер отклонил запрос", "The server rejected the request")
         }
-        return "\(reason) (HTTP \(status))"
+        return ["\(reason) (HTTP \(status))", httpFailureNextAction(status, language: language)].filter { !$0.isEmpty }.joined(separator: ". ")
     }
     let normalized = raw.lowercased()
     if normalized.contains("token") && (normalized.contains("missing") || normalized.contains("required")) {
@@ -212,7 +227,7 @@ func recordingUploadErrorText(_ message: String?, language: AppLanguage) -> Stri
     if ["missing", "changed", "sha-256", "checksum", "unreadable"].contains(where: normalized.contains) {
         return errorText(language, "Локальный файл отсутствует, изменён или не прошёл проверку целостности", "A local file is missing, changed or failed integrity verification")
     }
-    return raw
+    return errorText(language, "Результат операции не подтверждён. Причина не распознана: проверьте статус операции, сохраните полный архив и передайте подробности разработчику. Технические сведения: ", "The operation outcome is not confirmed. The cause is unrecognized: check the operation status, save a complete archive and send details to support. Technical details: ") + raw
 }
 
 func recordingCaptureText(status: String, code: String?, message: String?, language: AppLanguage) -> String {
@@ -308,8 +323,12 @@ struct ServerRecordingTransferView: View {
                     ForEach(status.artifacts ?? []) { artifact in
                         VStack(alignment: .leading, spacing: 3) {
                             Text("\(artifact.fileName): \(artifact.uploadedBytes)/\(artifact.sizeBytes) · \(artifact.storageStatus)")
-                            if let error = artifact.errorMessage { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-                            if let code = artifact.errorCode { Text(code).textSelection(.enabled) }
+                            let rawError = [artifact.errorCode, artifact.errorMessage].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
+                            if !rawError.isEmpty {
+                                let explanation = recordingUploadErrorText(rawError, language: appState.selectedLanguage)
+                                Text((ru ? "Причина: " : "Cause: ") + explanation).foregroundStyle(.red).textSelection(.enabled)
+                                if !explanation.contains(rawError) { Text((ru ? "Технические сведения: " : "Technical details: ") + rawError).textSelection(.enabled) }
+                            }
                             Text(transferNextAction(artifact.nextAction, ru: ru))
                         }.font(.caption)
                     }

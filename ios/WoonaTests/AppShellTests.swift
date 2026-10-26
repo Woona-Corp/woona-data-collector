@@ -34,7 +34,18 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(recordingUploadErrorText("profile_content_already_exists", language: .english).contains("do not create it again"))
         XCTAssertTrue(recordingUploadErrorText("local_copy_changed", language: .russian).contains("Удаление отменено"))
         XCTAssertTrue(recordingUploadErrorText("Server token is missing", language: .russian).contains("токен"))
-        XCTAssertEqual(recordingUploadErrorText("Unexpected future failure", language: .english), "Unexpected future failure")
+        let unknown = recordingUploadErrorText("Unexpected future failure", language: .english)
+        XCTAssertTrue(unknown.contains("outcome is not confirmed"))
+        XCTAssertTrue(unknown.contains("complete archive"))
+        XCTAssertTrue(unknown.contains("Unexpected future failure"))
+    }
+
+    func testHTTPFailuresExplainSafeNextActions() {
+        XCTAssertTrue(recordingUploadErrorText("HTTP 403", language: .english).contains("permission change"))
+        XCTAssertTrue(recordingUploadErrorText("HTTP 409", language: .russian).contains("сравните их с черновиком"))
+        XCTAssertTrue(recordingUploadErrorText("HTTP 422", language: .english).contains("indicated fields"))
+        XCTAssertTrue(recordingUploadErrorText("HTTP 503", language: .russian).contains("повторите позже"))
+        XCTAssertTrue(recordingUploadErrorText("HTTP 404", language: .english).contains("Preserve local originals"))
     }
 
     func testServerErrorDecodingRetainsBothCodeAndMessage() {

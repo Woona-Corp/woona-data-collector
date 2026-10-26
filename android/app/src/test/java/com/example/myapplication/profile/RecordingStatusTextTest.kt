@@ -60,7 +60,17 @@ class RecordingStatusTextTest {
         assertTrue(recordingUploadErrorText("local_copy_changed", ru).contains("Удаление отменено"))
         assertTrue(recordingUploadErrorText("HTTP 409: profile_content_already_exists", ru).contains("Восстановите профили"))
         assertTrue(recordingUploadErrorText("profile_content_already_exists", en).contains("do not create it again"))
-        assertEquals("Unexpected future failure", recordingUploadErrorText("Unexpected future failure", en))
+        val unknown = recordingUploadErrorText("Unexpected future failure", en)
+        assertTrue(unknown.contains("outcome is not confirmed"))
+        assertTrue(unknown.contains("complete archive"))
+        assertTrue(unknown.contains("Unexpected future failure"))
+    }
+    @Test fun httpErrorsExplainTheNextActionWithoutPromisingSuccessfulRetry() {
+        assertTrue(recordingUploadErrorText("HTTP 403", en).contains("permission change"))
+        assertTrue(recordingUploadErrorText("HTTP 409", ru).contains("сравните их с черновиком"))
+        assertTrue(recordingUploadErrorText("HTTP 422", en).contains("indicated fields"))
+        assertTrue(recordingUploadErrorText("HTTP 503", ru).contains("повторите позже"))
+        assertTrue(recordingUploadErrorText("HTTP 404", en).contains("Preserve local originals"))
     }
     @Test fun replaySourceCannotBePresentedAsLiveSensorCapture() {
         assertEquals("Источник: запись с датчика", recordingSourceText("live", AppLanguage.RUSSIAN))

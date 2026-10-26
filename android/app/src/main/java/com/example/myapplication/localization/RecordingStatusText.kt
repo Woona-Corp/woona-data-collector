@@ -91,6 +91,19 @@ private val serverReasons = mapOf(
     "local_copy_remove_failed" to ("Не удалось удалить один из локальных файлов. Серверная копия сохранена" to "A local file could not be removed. The server copy is preserved"),
 )
 
+private fun httpFailureNextAction(status: Int, language: AppLanguage): String = when (status) {
+    401 -> ""
+    403 -> errorText(language, "Проверьте права доступа с администратором. Повтор без изменения прав не устранит отказ.", "Check access permissions with an administrator. Retrying without a permission change will not resolve the refusal.")
+    404 -> errorText(language, "Обновите историю и проверьте выбранный аккаунт. Сохраните локальные оригиналы.", "Refresh history and check the selected account. Preserve local originals.")
+    408, 504 -> errorText(language, "Проверьте доступность сервера и повторите операцию. Её результат пока не подтверждён.", "Check server availability and retry the operation. Its outcome is not yet confirmed.")
+    409 -> errorText(language, "Обновите данные с сервера и сравните их с черновиком перед повтором. Сохраните черновик и файлы.", "Refresh server data and compare it with the draft before retrying. Preserve the draft and files.")
+    413 -> errorText(language, "Сохраните данные и передайте подробности разработчику для проверки лимита сервера. Не удаляйте файлы.", "Preserve data and send details to support to check the server limit. Keep the original files.")
+    422 -> errorText(language, "Проверьте указанные поля. Если ошибка повторяется, передайте код и подробности разработчику.", "Check the indicated fields. If the error repeats, send its code and details to support.")
+    429 -> errorText(language, "Подождите и повторите операцию позже.", "Wait and retry the operation later.")
+    in 500..599 -> errorText(language, "Проверьте сервер и повторите позже. При повторении ошибки передайте подробности разработчику.", "Check the server and retry later. If the error repeats, send details to support.")
+    else -> errorText(language, "Проверьте подробности и настройки сервера. Сохраните исходные данные перед исправлением причины.", "Check details and server settings. Preserve original data before resolving the cause.")
+}
+
 internal fun recordingUploadErrorText(message: String?, language: AppLanguage): String {
     val raw = message?.trim().orEmpty()
     if (raw.isEmpty()) return errorText(language, "Причина не сохранена; проверьте диагностику сессии", "The cause was not saved; check session diagnostics")
@@ -110,7 +123,7 @@ internal fun recordingUploadErrorText(message: String?, language: AppLanguage): 
             in 500..599 -> errorText(language, "Ошибка на стороне сервера", "The server encountered an error")
             else -> errorText(language, "Сервер отклонил запрос", "The server rejected the request")
         }
-        return "$reason (HTTP $http)"
+        return listOf("$reason (HTTP $http)", httpFailureNextAction(http.toInt(), language)).filter { it.isNotEmpty() }.joinToString(". ")
     }
     val normalized = raw.lowercase()
     return when {
@@ -120,7 +133,7 @@ internal fun recordingUploadErrorText(message: String?, language: AppLanguage): 
         listOf("ssl", "tls", "certificate").any { it in normalized } -> errorText(language, "Не удалось проверить защищённое соединение с сервером", "The secure connection to the server could not be verified")
         listOf("unknownhost", "unable to resolve host", "failed to connect", "not connected", "offline", "could not connect", "network", "connection refused").any { it in normalized } -> errorText(language, "Сервер недоступен или нет подключения к сети", "The server is unreachable or the network is unavailable")
         listOf("missing", "changed", "sha-256", "checksum", "unreadable").any { it in normalized } -> errorText(language, "Локальный файл отсутствует, изменён или не прошёл проверку целостности", "A local file is missing, changed or failed integrity verification")
-        else -> raw
+        else -> errorText(language, "Результат операции не подтверждён. Причина не распознана: проверьте статус операции, сохраните полный архив и передайте подробности разработчику. Технические сведения: ", "The operation outcome is not confirmed. The cause is unrecognized: check the operation status, save a complete archive and send details to support. Technical details: ") + raw
     }
 }
 

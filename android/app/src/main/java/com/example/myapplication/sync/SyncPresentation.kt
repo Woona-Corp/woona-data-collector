@@ -1,6 +1,7 @@
 package com.example.myapplication.sync
 
 import com.example.myapplication.localization.AppLanguage
+import com.example.myapplication.localization.recordingUploadErrorText
 
 enum class ConnectionCheck { NOT_CHECKED, CHECKING, VERIFIED, FAILED }
 
@@ -64,8 +65,12 @@ fun recordingServerReport(status: org.json.JSONObject, language: AppLanguage): S
             for (i in 0 until files.length()) {
                 val file = files.getJSONObject(i)
                 appendLine("${file.optString("fileName")}: ${file.optLong("uploadedBytes")}/${file.optLong("sizeBytes")} · ${file.optString("storageStatus")}")
-                if (!file.isNull("errorCode")) appendLine(file.optString("errorCode"))
-                if (!file.isNull("errorMessage")) appendLine(file.optString("errorMessage"))
+                val rawError = listOf("errorCode", "errorMessage").filter { !file.isNull(it) }.map { file.optString(it) }.filter { it.isNotBlank() }.joinToString(": ")
+                if (rawError.isNotEmpty()) {
+                    val explanation = recordingUploadErrorText(rawError, language)
+                    appendLine((if (ru) "Причина: " else "Cause: ") + explanation)
+                    if (!explanation.contains(rawError)) appendLine((if (ru) "Технические сведения: " else "Technical details: ") + rawError)
+                }
             }
         }
     }.trim()
