@@ -47,7 +47,9 @@ struct WoonaApp: App {
             return
         }
         #endif
-        _appState = StateObject(wrappedValue: AppViewModel())
+        let model = AppViewModel()
+        model.registerBackgroundSync()
+        _appState = StateObject(wrappedValue: model)
     }
 
     var body: some Scene {

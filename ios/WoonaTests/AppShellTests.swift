@@ -4,6 +4,82 @@ import SQLite3
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    func testBuiltAppAdvertisesBackgroundProcessingWithTypedPlistArrays() {
+        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String], ["com.woona.apps.sync"])
+        XCTAssertTrue((Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String])?.contains("processing") == true)
+    }
+
+    func testBackgroundRegistrationIsOncePerCoordinatorAndUpdatesOnlyItsWeakOwner() {
+        let registration = BackgroundSyncRegistration()
+        var calls = 0
+        var first: AppViewModel? = AppViewModel(store: nil, uiTesting: true)
+        var second: AppViewModel? = AppViewModel(store: nil, uiTesting: true)
+        XCTAssertTrue(registration.register(owner: first!) { calls += 1; return true })
+        XCTAssertTrue(registration.register(owner: second!) { calls += 1; return false })
+        XCTAssertEqual(calls, 1)
+        XCTAssertTrue(registration.owner === second)
+        first = nil
+        second = nil
+        XCTAssertNil(registration.owner)
+    }
+
+    func testRejectedBackgroundRegistrationDoesNotAttemptASecondOSRegistration() {
+        let registration = BackgroundSyncRegistration()
+        let model = AppViewModel(store: nil, uiTesting: true)
+        var calls = 0
+        XCTAssertFalse(registration.register(owner: model) { calls += 1; return false })
+        XCTAssertFalse(registration.register(owner: model) { calls += 1; return true })
+        XCTAssertEqual(calls, 1)
+        model.registerBackgroundSync()
+        model.scheduleBackgroundSync()
+        XCTAssertEqual(model.backgroundSyncStatus, "disabled")
+    }
+
+    func testBackgroundCompletionAwaitsItsWorkAndCancellationCannotReportSuccess() async {
+        var finish: CheckedContinuation<Void, Never>?
+        var results: [Bool] = []
+        let operation = BackgroundSyncExecution.start(work: {
+            await withCheckedContinuation { finish = $0 }
+            return true
+        }, completion: { results.append($0) })
+        while finish == nil { await Task.yield() }
+        XCTAssertTrue(results.isEmpty)
+        operation.cancel() // Same handle used by BGTask.expirationHandler.
+        finish?.resume()
+        await operation.value
+        XCTAssertEqual(results, [false])
+    }
+
+    func testBackgroundCompletionReportsFalseFromFailedWorkAndAwaitsSuccess() async {
+        var finish: CheckedContinuation<Void, Never>?
+        var results: [Bool] = []
+        let operation = BackgroundSyncExecution.start(work: {
+            await withCheckedContinuation { finish = $0 }
+            return true
+        }, completion: { results.append($0) })
+        while finish == nil { await Task.yield() }
+        XCTAssertTrue(results.isEmpty)
+        finish?.resume()
+        await operation.value
+        XCTAssertEqual(results, [true])
+        let failed = BackgroundSyncExecution.start(work: { false }, completion: { results.append($0) })
+        await failed.value
+        XCTAssertEqual(results, [true, false])
+    }
+
+    func testBackgroundSubmissionFailureIsVisibleAndAcceptanceDoesNotClaimExecution() {
+        let model = AppViewModel(store: nil, uiTesting: true)
+        model.selectedLanguage = .english
+        model.recordBackgroundSubmission { throw NSError(domain: "synthetic.background", code: 7, userInfo: [NSLocalizedDescriptionKey: "Synthetic scheduling denied"]) }
+        XCTAssertEqual(model.backgroundSyncStatus, "failed")
+        XCTAssertEqual(model.backgroundSyncError, "Synthetic scheduling denied")
+        XCTAssertTrue(model.backgroundSyncExplanation.contains("keep the app open"))
+        model.recordBackgroundSubmission { }
+        XCTAssertEqual(model.backgroundSyncStatus, "scheduled")
+        XCTAssertNil(model.backgroundSyncError)
+        XCTAssertTrue(model.backgroundSyncExplanation.contains("execution is not yet confirmed"))
+    }
+
     func testCaptureCauseIsIndependentOfSuccessfulUpload() {
         XCTAssertEqual(recordingCaptureText(status: "failed", code: "gatt_error", message: "Ошибка GATT-подключения: 8", language: .russian),
                        "Запись: прервана — сбой связи с ошейником (GATT 8)")
