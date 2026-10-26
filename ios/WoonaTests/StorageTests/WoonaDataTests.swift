@@ -370,6 +370,14 @@ final class WoonaDataTests: XCTestCase {
             sessionQuestionnaire: remote.sessionQuestionnaire, videoRequested: remote.videoRequested, sync: remote.sync,
             artifacts: remote.artifacts, captureErrorCode: remote.captureErrorCode, captureErrorMessage: remote.captureErrorMessage,
             receiptSha256: remote.receiptSha256, serverVerifiedAtUtc: remote.serverVerifiedAtUtc)
+        // Model the imported row, not a previously finalized local capture: restore
+        // correctly preserves a known local end rather than erasing it with nil.
+        do {
+            var database: OpaquePointer?
+            XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+            defer { sqlite3_close(database) }
+            XCTAssertEqual(sqlite3_exec(database, "UPDATE recordings SET ended_at_utc=NULL WHERE id='\(record.id.uuidString)'", nil, nil, nil), SQLITE_OK)
+        }
         _ = try store.restoreRemoteRecording(remote)
         record = try XCTUnwrap(store.recording(id: record.id))
         XCTAssertNil(record.endedAtUTC)
