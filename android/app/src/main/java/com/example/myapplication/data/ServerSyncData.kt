@@ -1111,3 +1111,13 @@ fun WoonaDatabase.recoverOrphanedUploads(hasUnfinishedWork: (String) -> Boolean)
     } finally { writableDatabase.endTransaction() }
     return profileCount to recordingCount
 }
+
+// Policy refresh includes a persisted uploading state whose WorkRequest may have
+// been re-enqueued by WorkManager after process death. This does not reset it.
+fun WoonaDatabase.networkPolicyProfileVersionIds(): List<String> = readableDatabase.rawQuery(
+    "SELECT id FROM dog_profile_versions WHERE server_sync_state IN ('pending','retryable_error','uploading')", null,
+).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getString(0)) } }
+
+fun WoonaDatabase.networkPolicyRecordingIds(): List<String> = readableDatabase.rawQuery(
+    "SELECT recording_id FROM server_sync_state WHERE state IN ('pending','retryable_error','uploading')", null,
+).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getString(0)) } }

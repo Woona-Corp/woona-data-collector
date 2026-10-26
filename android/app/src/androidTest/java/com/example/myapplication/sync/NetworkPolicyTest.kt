@@ -69,6 +69,8 @@ class NetworkPolicyTest {
                 assertFalse(database.pendingRecordingIds().contains(queued.id))
                 assertTrue(database.pendingProfileVersionIds().contains(profile.profileVersionId))
                 assertFalse(database.pendingProfileVersionIds().contains(activeProfile.profileVersionId))
+                assertTrue("Queued saved-uploading recordings still need policy updates", database.networkPolicyRecordingIds().contains(queued.id))
+                assertTrue("Queued saved-uploading profiles still need policy updates", database.networkPolicyProfileVersionIds().contains(activeProfile.profileVersionId))
                 database.readableDatabase.rawQuery("SELECT server_receipt_sha256 FROM server_sync_state WHERE recording_id=?", arrayOf(lost.id)).use { cursor ->
                     assertTrue(cursor.moveToFirst()); assertEquals("f".repeat(64), cursor.getString(0))
                 }

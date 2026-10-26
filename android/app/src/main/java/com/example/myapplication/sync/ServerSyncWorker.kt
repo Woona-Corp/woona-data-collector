@@ -20,6 +20,8 @@ import androidx.work.WorkInfo
 import java.util.concurrent.Executors
 import com.example.myapplication.data.WoonaDatabase
 import com.example.myapplication.data.recoverOrphanedUploads
+import com.example.myapplication.data.networkPolicyProfileVersionIds
+import com.example.myapplication.data.networkPolicyRecordingIds
 import kotlin.concurrent.withLock
 import com.example.myapplication.data.artifactFile
 import com.example.myapplication.data.hashPendingArtifacts
@@ -258,10 +260,10 @@ object ServerSyncScheduler {
                     database.recoverOrphanedUploads { name ->
                         manager.getWorkInfosForUniqueWork(name).get(30, TimeUnit.SECONDS).any { !it.state.isFinished }
                     }
-                    database.pendingProfileVersionIds().forEach { id ->
+                    database.networkPolicyProfileVersionIds().forEach { id ->
                         updateWaitingNetworkPolicy(manager, "server-profile-$id", constraints) { old -> profileRequest(context, id, old, constraints) }
                     }
-                    database.pendingRecordingIds().forEach { id ->
+                    database.networkPolicyRecordingIds().forEach { id ->
                         updateWaitingNetworkPolicy(manager, "server-sync-$id", constraints) { old -> recordingRequest(context, id, old, constraints) }
                     }
                 }
