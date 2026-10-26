@@ -1,101 +1,28 @@
-name: Upload iOS to TestFlight
-
+name: Check TestFlight processing
 on:
-  push:
-    tags: ['ios-v*']
   workflow_dispatch:
     inputs:
       upload:
-        description: Upload to App Store Connect
         type: boolean
-        default: true
-
+        default: false
 permissions:
   contents: read
-
-concurrency:
-  group: testflight-main
-  cancel-in-progress: false
-
 jobs:
-  testflight:
-    runs-on: macos-26
-    timeout-minutes: 60
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - name: Test on iOS Simulator
-        run: |
-          simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for devices in json.load(sys.stdin)["devices"].values() for d in devices if d["name"].startswith("iPhone")))')"
-          xcodebuild -project ios/Woona.xcodeproj -scheme Woona -derivedDataPath "$RUNNER_TEMP/WoonaDerived" -resultBundlePath "$RUNNER_TEMP/WoonaTests.xcresult" -destination "platform=iOS Simulator,id=$simulator_id" CODE_SIGNING_ALLOWED=NO test || {
-            xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/WoonaTests.xcresult" --compact
-            exit 1
-          }
-          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/WoonaTests.xcresult" --output-path "$RUNNER_TEMP/WoonaTestAttachments"
-          python3 ios/tools/check-recording-export.py "$RUNNER_TEMP/WoonaTestAttachments"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ios-recording-export-proof
-          path: ${{ runner.temp }}/WoonaTestAttachments/
-          if-no-files-found: error
-      - name: Install distribution signing assets
-        env:
-          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
-          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          : "${BUILD_CERTIFICATE_BASE64:?Missing BUILD_CERTIFICATE_BASE64 secret}"
-          : "${BUILD_PROVISION_PROFILE_BASE64:?Missing BUILD_PROVISION_PROFILE_BASE64 secret}"
-          : "${P12_PASSWORD:?Missing P12_PASSWORD secret}"
-          : "${KEYCHAIN_PASSWORD:?Missing KEYCHAIN_PASSWORD secret}"
-          umask 077
-          certificate_path="$RUNNER_TEMP/woona-distribution.p12"
-          profile_path="$RUNNER_TEMP/woona-app-store.mobileprovision"
-          keychain_path="$RUNNER_TEMP/woona-signing.keychain-db"
-          printf '%s' "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o "$certificate_path"
-          printf '%s' "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o "$profile_path"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security import "$certificate_path" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security list-keychain -d user -s "$keychain_path"
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          cp "$profile_path" "$HOME/Library/MobileDevice/Provisioning Profiles/woona-app-store.mobileprovision"
-      - name: Archive and upload to App Store Connect
+      - name: Check Apple build and groups
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
-          UPLOAD: ${{ github.event_name == 'push' || inputs.upload }}
-        run: |
-          set -euo pipefail
-          : "${ASC_KEY_ID:?Missing ASC_KEY_ID secret}"
-          : "${ASC_ISSUER_ID:?Missing ASC_ISSUER_ID secret}"
-          : "${ASC_PRIVATE_KEY:?Missing ASC_PRIVATE_KEY secret}"
-          umask 077
-          key_path="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
-          printf '%s' "$ASC_PRIVATE_KEY" > "$key_path"
-          trap 'rm -f "$key_path"' EXIT
-          build_number=$((10000 + GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
-          echo "Building Woona $build_number"
-          if [[ "$UPLOAD" == 'true' ]]; then destination=upload; else destination=export; fi
-          cat > "$RUNNER_TEMP/ExportOptions.plist" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>app-store-connect</string>
-            <key>destination</key><string>DESTINATION</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>manageAppVersionAndBuildNumber</key><false/>
-            <key>signingCertificate</key><string>Apple Distribution</string>
-            <key>provisioningProfiles</key><dict>
-              <key>com.woona.apps</key><string>Woona CI App Store Connect</string>
-            </dict>
-            <key>teamID</key><string>NBM28T989D</string>
-          </dict></plist>
-          PLIST
-          sed -i '' "s/DESTINATION/$destination/" "$RUNNER_TEMP/ExportOptions.plist"
-          xcodebuild -project ios/Woona.xcodeproj -scheme Woona -configuration Release -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/Woona.xcarchive" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY='Apple Distribution' PROVISIONING_PROFILE_SPECIFIER='Woona CI App Store Connect' DEVELOPMENT_TEAM=NBM28T989D CURRENT_PROJECT_VERSION="$build_number" archive
-          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Woona.xcarchive" -exportPath "$RUNNER_TEMP/WoonaExport" -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -allowProvisioningUpdates -authenticationKeyPath "$key_path" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          CHECK_VERSION: '1.3.9'
+          CHECK_BUILD: '11901'
+        run: python3 ios/tools/check_testflight_status.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: testflight-status
+          path: testflight-status.json
+          if-no-files-found: error
