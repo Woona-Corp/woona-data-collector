@@ -129,8 +129,9 @@ final class OverviewParityTests: XCTestCase {
         app.segmentedControls.buttons["Channel 2"].tap()
         app.buttons["chart.fullscreen.open"].tap()
         XCTAssertTrue(app.buttons["chart.fullscreen.close"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.segmentedControls.buttons["AXL"].isSelected)
-        XCTAssertTrue(app.segmentedControls.buttons["Channel 2"].isSelected)
+        let fullscreen = app.otherElements["chart.fullscreen"]
+        XCTAssertTrue(fullscreen.segmentedControls.buttons["AXL"].isSelected)
+        XCTAssertTrue(fullscreen.segmentedControls.buttons["Channel 2"].isSelected)
         app.buttons["chart.fullscreen.close"].tap()
         XCTAssertTrue(app.buttons["chart.fullscreen.open"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.segmentedControls.buttons["Channel 2"].isSelected)

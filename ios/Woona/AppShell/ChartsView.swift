@@ -18,7 +18,8 @@ struct ChartsView: View {
                 DeviceChartView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding()
+            .padding(12)
+            .accessibilityHidden(isFullscreen)
             .navigationTitle(appState.text(.charts))
             .navigationBarTitleDisplayMode(.inline)
             .fullScreenCover(isPresented: $isFullscreen) {
@@ -34,6 +35,8 @@ struct ChartsView: View {
                 }
                 .padding(12)
                 .background(Color(uiColor: .systemBackground))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("chart.fullscreen")
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
