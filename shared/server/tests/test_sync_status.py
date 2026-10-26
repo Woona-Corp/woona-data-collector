@@ -183,3 +183,13 @@ class SyncStatusApiTest(unittest.TestCase):
         self.assertEqual(final['capture']['errorCode'], 'gatt_error')
         self.assertFalse(final['labeling']['eligible'])
         expect_http(404, 'GET', path + '/sync-status', headers={'X-Woona-Account': 'other-account'})
+
+class CalibrationWireCompatibilityTest(unittest.TestCase):
+    def test_unknown_calibration_is_not_a_measured_zero(self):
+        from server.sync_status import calibration_status
+        for offset in [None, 0, 123]:
+            result = calibration_status({'calibration_offset_ns': offset, 'sensor_clock_quality': 'first_packet_arrival'})
+            self.assertFalse(result['measured'])
+            self.assertIsNone(result['offsetNs'])
+            self.assertEqual(result['compatibilityPlaceholder'], offset is None)
+        self.assertFalse(calibration_status({'calibration_offset_ns': 0, 'sensor_clock_quality': 'calibrated'})['measured'])

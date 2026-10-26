@@ -407,7 +407,7 @@ app = FastAPI(title="Woona API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(MetadataBodyLimitMiddleware)
 
 from server.errors import error_guidance
-from server.sync_status import recording_status
+from server.sync_status import calibration_status, recording_status
 from server.dashboard import router as dashboard_router
 
 app.include_router(dashboard_router)
@@ -1668,7 +1668,8 @@ def get_recording(
             "cameraClockQuality": sync["camera_clock_quality"],
             "sensorClockQuality": sync["sensor_clock_quality"],
             "overallSyncQuality": sync["overall_sync_quality"],
-            "calibrationOffsetNs": sync["calibration_offset_ns"],
+            "calibrationOffsetNs": sync["calibration_offset_ns"] if sync["calibration_offset_ns"] is not None else 0,
+            "calibration": calibration_status(sync, artifacts),
             "estimatedDriftPpm": sync["estimated_drift_ppm"],
         },
         "artifacts": [
