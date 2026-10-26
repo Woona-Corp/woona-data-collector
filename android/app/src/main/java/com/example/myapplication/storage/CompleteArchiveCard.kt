@@ -61,7 +61,7 @@ fun CompleteArchiveCard(language: AppLanguage, captureActive: Boolean) {
                         prepared = withContext(Dispatchers.IO) {
                             val running = coroutineContext
                             var lastUpdate = 0L
-                            createCompleteDataArchive(application, checkCancelled = { running.ensureActive() }, onProgress = {
+                            createCompleteDataArchive(application, captureActive = captureActive, checkCancelled = { running.ensureActive() }, onProgress = {
                                 val now = System.nanoTime()
                                 if (now - lastUpdate > 100_000_000 || it.completedFiles == it.totalFiles) {
                                     progress = it

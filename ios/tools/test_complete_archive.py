@@ -194,10 +194,14 @@ class CompleteArchiveCompatibilityTests(unittest.TestCase):
                     count += len(chunk)
             self.assertEqual(count, 4_294_967_296 + 65_537)
 
-    def test_recording_must_be_finalized_first(self):
+    def test_unfinalized_history_from_previous_crash_is_exportable_and_explicit(self):
         self.db.execute("UPDATE recordings SET status='recording'")
         self.db.commit()
-        self.run_export(success=False)
+        self.run_export()
+        with zipfile.ZipFile(self.base / "out.zip") as archive:
+            metadata = json.loads(archive.read("manifest.json"))["database"]
+            self.assertEqual(metadata["unfinalizedRecordingCount"], 1)
+            self.assertEqual(metadata["unfinalizedRecordings"][0]["savedStatus"], "recording")
 
 
 if __name__ == "__main__":

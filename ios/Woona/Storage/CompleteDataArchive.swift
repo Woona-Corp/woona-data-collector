@@ -43,9 +43,6 @@ struct CompleteDataArchive: Sendable {
         defer { try? manager.removeItem(at: snapshot) }
         let database = try Database(dataDirectory.appendingPathComponent("woona.sqlite"), writable: false)
         let version = try database.scalar("PRAGMA data_version")
-        guard try database.scalar("SELECT count(*) FROM recordings WHERE status IN ('preparing','recording')") == 0 else {
-            throw completeArchiveError("Stop and finalize the active recording before exporting all data. Original data is unchanged.")
-        }
         try database.snapshot(to: snapshot, checkCancelled: checkCancelled)
         var metadata = try Database(snapshot, writable: false).metadata(root: dataDirectory)
         metadata["configuration"] = configuration
@@ -205,6 +202,11 @@ struct CompleteDataArchive: Sendable {
             try query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name") { names.append(String(cString: sqlite3_column_text($0, 0))) }
             var counts: [String: Int64] = [:]
             for table in names { counts[table] = try scalar("SELECT count(*) FROM \"" + table.replacingOccurrences(of: "\"", with: "\"\"") + "\"") }
+            var unfinished: [[String: Any]] = []
+            try query("SELECT id,status FROM recordings WHERE status IN ('preparing','recording') ORDER BY id") { statement in
+                unfinished.append(["recordingId": String(cString: sqlite3_column_text(statement, 0)), "savedStatus": String(cString: sqlite3_column_text(statement, 1)),
+                                   "reason": "Unfinalized history is included as saved; it may be left by an interrupted process. No active capture is inferred from database status."])
+            }
             var missing: [[String: Any]] = []
             try query("SELECT id,recording_id,relative_path,size_bytes,sha256 FROM artifacts ORDER BY relative_path") { statement in
                 func text(_ column: Int32) -> String { sqlite3_column_text(statement, column).map { String(cString: $0) } ?? "" }
@@ -215,7 +217,7 @@ struct CompleteDataArchive: Sendable {
                     missing.append(["artifactId": text(0), "recordingId": text(1), "path": "data/Woona/" + relative, "expectedBytes": sqlite3_column_int64(statement, 3), "expectedSha256": text(4), "reason": "not_available_locally_deleted_or_server_only"])
                 }
             }
-            return ["snapshot": "data/Woona/woona.sqlite", "integrityCheck": "ok", "counts": counts, "unavailableLocalArtifacts": missing, "unavailableLocalArtifactCount": missing.count]
+            return ["snapshot": "data/Woona/woona.sqlite", "integrityCheck": "ok", "counts": counts, "unavailableLocalArtifacts": missing, "unavailableLocalArtifactCount": missing.count, "unfinalizedRecordings": unfinished, "unfinalizedRecordingCount": unfinished.count]
         }
         private func error() -> WoonaStoreError { .sqlite(String(cString: sqlite3_errmsg(handle))) }
     }

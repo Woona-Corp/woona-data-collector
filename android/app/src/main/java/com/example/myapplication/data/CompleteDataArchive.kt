@@ -16,16 +16,14 @@ fun createCompleteDataArchive(
     context: Context,
     checkCancelled: () -> Unit = {},
     onProgress: (CompleteArchiveExporter.Progress) -> Unit = {},
+    captureActive: Boolean = false,
 ): File {
     checkCancelled()
+    if (captureActive) throw IOException("Stop and finalize the active recording before exporting all data. Original files are unchanged.")
     if (!serverOperationLock.tryLock(1, TimeUnit.SECONDS)) throw IOException("Server synchronization is running. Wait for it to finish, then retry the export.")
     try {
         val root = File(context.filesDir, "Woona")
         WoonaDatabase(context).use { database ->
-            database.readableDatabase.rawQuery("SELECT count(*) FROM recordings WHERE status IN ('preparing','recording')", null).use {
-                it.moveToFirst()
-                if (it.getLong(0) > 0) throw IOException("Stop and finalize the active recording before exporting all data. No original files were changed.")
-            }
             val directory = File(context.cacheDir, "woona_complete_exports/${UUID.randomUUID()}")
             if (!directory.mkdirs()) throw IOException("Cannot create export directory")
             val snapshot = File(directory, "snapshot.sqlite")
@@ -80,6 +78,11 @@ internal fun completeArchiveMetadata(snapshot: File, root: File): String =
                 database.rawQuery("SELECT count(*) FROM \"$escaped\"", null).use { rows -> rows.moveToFirst(); counts.put(table, rows.getLong(0)) }
             }
         }
+        val unfinished = JSONArray()
+        database.rawQuery("SELECT id,status FROM recordings WHERE status IN ('preparing','recording') ORDER BY id", null).use { rows ->
+            while (rows.moveToNext()) unfinished.put(JSONObject().put("recordingId", rows.getString(0)).put("savedStatus", rows.getString(1))
+                .put("reason", "Unfinalized history is included as saved; it may be left by an interrupted process. No active capture is inferred from database status."))
+        }
         val missing = JSONArray()
         database.rawQuery("SELECT id,recording_id,relative_path,size_bytes,sha256 FROM artifacts ORDER BY relative_path", null).use { values ->
             while (values.moveToNext()) {
@@ -92,7 +95,8 @@ internal fun completeArchiveMetadata(snapshot: File, root: File): String =
             }
         }
         result.put("snapshot", "data/Woona/woona.sqlite").put("integrityCheck", "ok").put("counts", counts)
-            .put("unavailableLocalArtifacts", missing).put("unavailableLocalArtifactCount", missing.length()).toString()
+            .put("unavailableLocalArtifacts", missing).put("unavailableLocalArtifactCount", missing.length())
+            .put("unfinalizedRecordings", unfinished).put("unfinalizedRecordingCount", unfinished.length()).toString()
     }
 
 internal fun createDatabaseSnapshot(source: SQLiteDatabase, destination: File) {

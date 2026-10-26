@@ -11,6 +11,26 @@ import org.json.JSONObject
 
 @RunWith(AndroidJUnit4::class)
 class CompleteDataArchiveTest {
+    @Test fun unfinalizedHistoryAndUnavailableFilesRemainExplicitInRecoveryArchive() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val root = File(context.cacheDir, "archive-recovery-${System.nanoTime()}").apply { mkdirs() }
+        val snapshot = File(root.parentFile, "archive-recovery-snapshot-${System.nanoTime()}.sqlite")
+        try {
+            SQLiteDatabase.openOrCreateDatabase(File(root, "woona.sqlite"), null).use { database ->
+                database.execSQL("CREATE TABLE recordings(id TEXT PRIMARY KEY,status TEXT)")
+                database.execSQL("CREATE TABLE artifacts(id TEXT,recording_id TEXT,relative_path TEXT,size_bytes INTEGER,sha256 TEXT)")
+                database.execSQL("INSERT INTO recordings VALUES ('old-crash','recording')")
+                database.execSQL("INSERT INTO artifacts VALUES ('old-file','old-crash','recordings/missing.mp4',12,'sha256')")
+                createDatabaseSnapshot(database, snapshot)
+            }
+            val metadata = JSONObject(completeArchiveMetadata(snapshot, root))
+            assertEquals(1, metadata.getInt("unfinalizedRecordingCount"))
+            assertEquals("old-crash", metadata.getJSONArray("unfinalizedRecordings").getJSONObject(0).getString("recordingId"))
+            assertEquals("recording", metadata.getJSONArray("unfinalizedRecordings").getJSONObject(0).getString("savedStatus"))
+            assertEquals(1, metadata.getInt("unavailableLocalArtifactCount"))
+            assertEquals("old-file", metadata.getJSONArray("unavailableLocalArtifacts").getJSONObject(0).getString("artifactId"))
+        } finally { snapshot.delete(); root.deleteRecursively() }
+    }
     @Test fun sqliteSnapshotIncludesCommittedWalAndAllHistoricalTables() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val root = File(context.cacheDir, "archive-wal-${System.nanoTime()}").apply { mkdirs() }
