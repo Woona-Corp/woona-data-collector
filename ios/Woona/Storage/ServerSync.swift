@@ -505,7 +505,9 @@ final class WoonaServerClient {
             try store.updateRecordingSync(recording.id, state: "synced")
         } catch {
             let state: String
-            if case ServerSyncError.requestFailed(let status, _) = error,
+            if case ServerSyncError.animalIDConflict = error {
+                state = "permanent_error"
+            } else if case ServerSyncError.requestFailed(let status, _) = error,
                [400, 401, 403, 404, 409, 410, 413, 422].contains(status) {
                 state = "permanent_error"
             } else if case WoonaStoreError.invalidData = error {

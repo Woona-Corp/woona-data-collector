@@ -4,6 +4,31 @@ import SQLite3
 
 final class WoonaDataTests: XCTestCase {
     @MainActor
+    func testIdentityConflictKeepsLocalRecordingAndStopsAutomaticRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root); RecordingSyncProtocol.handler = nil }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        let recording = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+        try store.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8))
+        let saved = try XCTUnwrap(store.recording(id: recording.id))
+        RecordingSyncProtocol.handler = { request in
+            if request.url!.path == "/v1/deletions" { return (200, ["entities": []]) }
+            if request.url!.path.hasSuffix("/sync-status") { return (404, [:]) }
+            if request.url!.path == "/v1/me" { return (200, ["deviceId": UUID().uuidString]) }
+            if request.httpMethod == "PUT" { return (409, ["code": "animal_id_already_exists"]) }
+            throw ServerSyncError.responseInvalid
+        }
+        do {
+            try await syncClient().upload(recording: saved, profile: profile, store: store)
+            XCTFail("Conflicting identity must not be uploaded")
+        } catch ServerSyncError.animalIDConflict {}
+        XCTAssertEqual(try store.recording(id: recording.id)?.serverSyncState, "permanent_error")
+        XCTAssertFalse(try store.artifacts(recordingID: recording.id).isEmpty)
+        XCTAssertEqual(try store.profile(dogID: profile.id, versionID: profile.profileVersionID)?.id, profile.id)
+    }
+
+    @MainActor
     func testFirstOfflineRecordingAcceptsRevisionBeforeArtifactUploadFails() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root); RecordingSyncProtocol.handler = nil }
