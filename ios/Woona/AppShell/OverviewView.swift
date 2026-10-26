@@ -138,7 +138,7 @@ struct OverviewView: View {
                                     Text(profile.numberOrName).foregroundStyle(.primary)
                                     Spacer()
                                 }
-                                .padding(.vertical, 8)
+                                .frame(minHeight: 48)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)

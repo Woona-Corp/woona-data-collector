@@ -70,6 +70,7 @@ struct AppRootView: View {
             .background(selected ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 18))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
         .accessibilityIdentifier("tab.\(tab)")
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
