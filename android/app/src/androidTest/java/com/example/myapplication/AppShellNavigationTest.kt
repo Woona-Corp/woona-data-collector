@@ -162,7 +162,7 @@ class AppShellNavigationTest {
     @Test
     fun exportSheet_showsAvailableActions_andDisablesUnavailableOnes() {
         setShellContent(
-            canShareAllFiles = true,
+            canShareAllFiles = false,
             canSharePacketFile = true,
             canShareCsvFile = true,
             canShareRawFile = false,
@@ -171,7 +171,7 @@ class AppShellNavigationTest {
 
         composeRule.onNodeWithText("Export").assertIsEnabled().performClick()
 
-        composeRule.onNodeWithText("Session ZIP").assertIsEnabled()
+        composeRule.onNodeWithText("Session ZIP").assertIsNotEnabled()
         composeRule.onNodeWithText("Compiled binary").assertIsEnabled()
         composeRule.onNodeWithText("Channel CSV").assertIsEnabled()
         composeRule.onNodeWithText("Raw data stream").assertIsNotEnabled()

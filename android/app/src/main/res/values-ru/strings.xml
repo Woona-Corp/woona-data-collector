@@ -220,4 +220,5 @@
     <string name="nav_records">Записи</string>
     <string name="new_connection">Новое соединение</string>
     <string name="server_sync_waiting">Ожидает выгрузки</string>
+    <string name="export_finish_capture_first">Остановите и завершите запись перед экспортом ZIP сессии. Снимки отдельных файлов остаются доступны.</string>
 </resources>

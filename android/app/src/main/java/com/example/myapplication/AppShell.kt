@@ -134,7 +134,7 @@ fun DeviceAppShell(
     var isExportSheetVisible by rememberSaveable { mutableStateOf(false) }
     var showSessionCharts by rememberSaveable { mutableStateOf(false) }
     val selectedDestination = AppDestination.entries.firstOrNull { it.name == selectedDestinationName } ?: AppDestination.ANIMALS
-    val canExportAnyFile = canShareAllFiles && uiState.exportPhase == null
+    val canExportAnyFile = (canShareAllFiles || canSharePacketFile || canShareCsvFile || canShareRawFile || canShareLogFile) && uiState.exportPhase == null
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(

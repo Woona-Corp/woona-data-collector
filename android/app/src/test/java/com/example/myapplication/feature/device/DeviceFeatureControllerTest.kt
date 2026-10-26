@@ -531,6 +531,35 @@ class DeviceFeatureControllerTest {
     }
 
     @Test
+    fun sessionZipCannotStopAnOngoingVideoButSingleFileSnapshotsRemainAvailable() {
+        val root = kotlin.io.path.createTempDirectory("woona-live-export").toFile()
+        try {
+            val packet = File(root, "packets.bin").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+            val state = DeviceUiStateHolder()
+            val capture = FakePacketCaptureController(currentFile = packet)
+            val ble = FakeBleSessionController()
+            val controller = DeviceFeatureController(ble, capture, FakeFileShareIntentFactory(), uiStateHolder = state)
+            for (phase in listOf(VideoCaptureState.STARTING, VideoCaptureState.RECORDING, VideoCaptureState.STOPPING)) {
+                when (phase) {
+                    VideoCaptureState.STARTING -> state.videoStarting()
+                    VideoCaptureState.RECORDING -> state.videoStarted(0.0)
+                    else -> state.videoStopping()
+                }
+                val original = packet.readBytes()
+                assertFalse(controller.canShareAllFiles())
+                assertTrue(controller.canSharePacketFile())
+                org.junit.Assert.assertNull(controller.createSessionArchive(File(root, "out")))
+                assertEquals(phase, controller.uiState.videoState)
+                org.junit.Assert.assertArrayEquals(original, packet.readBytes())
+                assertFalse(capture.stopCaptureCalled)
+                assertFalse(capture.flushCalled)
+                assertEquals(0, ble.disconnectCalls)
+                assertFalse(File(root, "out").exists())
+            }
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test
     fun createSessionArchive_packagesAllAvailableSessionArtifacts() {
         val packetFile = File("/tmp/archive-packet.bin").apply {
             writeBytes(

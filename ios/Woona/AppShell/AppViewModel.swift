@@ -33,6 +33,9 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var selectedSensorType = 2
     @Published private(set) var selectedChannel = 1
     @Published private(set) var chart = ChartUiState()
+    @Published private(set) var availableSessionExportKinds: Set<ExportKind> = []
+    @Published private(set) var sessionExportAvailabilityRevision: UInt64 = 0
+    private var exportAvailabilityReadGeneration: UInt64 = 0
     @Published private(set) var exportPhase: ExportPhase?
     @Published private(set) var preparedExport: PreparedExport?
     @Published private(set) var isCompleteArchiveExporting = false
@@ -506,7 +509,7 @@ final class AppViewModel: ObservableObject {
         guard downloadingRecordingID == nil, removingLocalRecordingID == nil, let store else { return }
         downloadingRecordingID = recordingID
         Task {
-            defer { downloadingRecordingID = nil }
+            defer { downloadingRecordingID = nil; reloadRecentRecordings() }
             do {
                 let client = try serverClient()
                 for artifact in try store.missingArtifacts(recordingID: recordingID) where artifact.uploadState == "available" {
@@ -519,7 +522,6 @@ final class AppViewModel: ObservableObject {
                         sha256: artifact.sha256
                     )
                 }
-                reloadRecentRecordings()
                 appendDiagnostic("Server files downloaded and verified")
             } catch { showError("Server download failed", error: error) }
         }
@@ -627,6 +629,7 @@ final class AppViewModel: ObservableObject {
         captureErrorMessage = nil
         captureStopInProgress = false
         hasPreparedActiveCapture = false
+        invalidateSessionExportAvailability()
         resetCaptureClockAnchor()
         connect(to: device)
     }
@@ -653,6 +656,7 @@ final class AppViewModel: ObservableObject {
                 packetUpdateBatcher.clearPending()
                 await packetProcessor.resetSession()
                 hasPreparedActiveCapture = true
+                invalidateSessionExportAvailability()
                 packetUpdateBatcher.clearPending()
                 await replayController.startReplay(bytes)
             } catch {
@@ -675,6 +679,7 @@ final class AppViewModel: ObservableObject {
         captureErrorMessage = nil
         captureStopInProgress = false
         hasPreparedActiveCapture = false
+        invalidateSessionExportAvailability()
         resetCaptureClockAnchor()
         startReplay(from: fileURL)
     }
@@ -1008,6 +1013,46 @@ final class AppViewModel: ObservableObject {
         completeArchiveTask?.cancel()
     }
 
+    var canOpenSessionExport: Bool { ExportKind.allCases.contains { canExportSessionFile($0) } }
+
+    func canExportSessionFile(_ kind: ExportKind) -> Bool {
+        guard exportPhase == nil, removingLocalRecordingID == nil,
+              availableSessionExportKinds.contains(kind) else { return false }
+        if kind == .all { return activeRecording == nil && !captureStopInProgress }
+        return activeRecording == nil || hasPreparedActiveCapture
+    }
+
+    private func invalidateSessionExportAvailability() {
+        availableSessionExportKinds = []
+        sessionExportAvailabilityRevision &+= 1
+        exportAvailabilityReadGeneration &+= 1
+    }
+
+    // Public for lifecycle refresh and tests. File presence is checked directly;
+    // packet counters and saved upload status never stand in for local bytes.
+    func refreshExportAvailability() async {
+        exportAvailabilityReadGeneration &+= 1
+        let generation = exportAvailabilityReadGeneration
+        let account = selectedAccountID; let animal = selectedDogProfile?.id
+        let activeID = activeRecording?.id
+        let saved: RecordingArchive?
+        if activeID == nil, let recording = recentRecordings.first(where: { exportableRecordingIDs.contains($0.id) }) {
+            saved = try? store?.recordingArchive(recordingID: recording.id)
+        } else { saved = nil }
+        let useCurrent = activeID == nil || hasPreparedActiveCapture
+        let currentPacket = useCurrent ? await packetProcessor.currentPacketFile() : nil
+        let currentRaw = useCurrent ? await packetProcessor.currentRawFile() : nil
+        let currentLog = useCurrent ? await packetProcessor.currentLogFile() : nil
+        guard !Task.isCancelled, generation == exportAvailabilityReadGeneration,
+              selectedAccountID == account, selectedDogProfile?.id == animal,
+              activeRecording?.id == activeID else { return }
+        availableSessionExportKinds = sessionExportKinds(
+            packetFile: saved == nil ? currentPacket : saved?.files.first { $0.url.lastPathComponent == "packets.bin" }?.url,
+            rawFile: saved == nil ? currentRaw : saved?.files.first { $0.url.lastPathComponent == "raw_fragments.binlog" }?.url,
+            logFile: saved == nil ? currentLog : saved?.files.first { $0.url.lastPathComponent == "diagnostics.log" }?.url,
+            archiveFiles: activeID == nil && !captureStopInProgress ? saved?.files.map(\.url) ?? [] : [])
+    }
+
     func prepareExport(_ kind: ExportKind) {
         guard exportPhase == nil, removingLocalRecordingID == nil else { return }
         if kind == .all {
@@ -1247,6 +1292,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func reloadRecentRecordings() {
+        defer { invalidateSessionExportAvailability() }
         if let overview = try? store?.syncOverview() {
             uploadPending = overview.pending; uploadRunning = overview.uploading; uploadSynced = overview.synced; uploadFailed = overview.failed; uploadLastError = overview.lastError
         }
@@ -1645,6 +1691,13 @@ final class AppViewModel: ObservableObject {
         lastPacketIssue = update.lastPacketIssue ?? lastPacketIssue
         rejectionBreakdown = update.rejectionBreakdown ?? rejectionBreakdown
         rebuildChartState()
+        // Counters only trigger a fresh filesystem check when a writer may have
+        // opened. They never determine whether an export action is enabled.
+        if (update.packetsReceived > 0 && !availableSessionExportKinds.contains(.packetDump)) ||
+           (update.fragmentsReceived > 0 && !availableSessionExportKinds.contains(.rawFragments)) ||
+           (!update.diagnosticEvents.isEmpty && !availableSessionExportKinds.contains(.diagnosticLog)) {
+            invalidateSessionExportAvailability()
+        }
         for event in update.diagnosticEvents {
             appendDiagnostic(event.message)
         }
@@ -1981,6 +2034,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func resetSessionUi(keepConnectionState: Bool = false) {
+        invalidateSessionExportAvailability()
         currentSessionWallClockStartMillis = Self.currentWallClockMillis()
         clearChartHistory()
         resetCounters()
@@ -2457,7 +2511,7 @@ enum ExportPhase: String, Equatable {
     case openingShareSheet = "Opening share sheet"
 }
 
-enum ExportKind: String, CaseIterable, Identifiable, Equatable {
+enum ExportKind: String, CaseIterable, Identifiable, Equatable, Hashable {
     case all
     case packetDump
     case channelCsv
@@ -2523,7 +2577,6 @@ private struct ExportArtifactSnapshot {
     let logFile: URL?
 }
 
-
 @MainActor
 final class BackgroundSyncRegistration {
     static let shared = BackgroundSyncRegistration()
@@ -2550,4 +2603,19 @@ enum BackgroundSyncExecution {
             completion(success && !Task.isCancelled)
         }
     }
+}
+
+func sessionExportKinds(packetFile: URL?, rawFile: URL?, logFile: URL?, archiveFiles: [URL]) -> Set<ExportKind> {
+    func present(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        var directory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &directory) &&
+            !directory.boolValue && FileManager.default.isReadableFile(atPath: url.path)
+    }
+    var kinds: Set<ExportKind> = []
+    if present(packetFile) { kinds.formUnion([.packetDump, .channelCsv]) }
+    if present(rawFile) { kinds.insert(.rawFragments) }
+    if present(logFile) { kinds.insert(.diagnosticLog) }
+    if archiveFiles.contains(where: { present($0) }) { kinds.insert(.all) }
+    return kinds
 }

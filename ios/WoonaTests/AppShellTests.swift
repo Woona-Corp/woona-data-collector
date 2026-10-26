@@ -278,6 +278,49 @@ final class AppShellTests: XCTestCase {
         try await exerciseFixture()
     }
 
+    func testSessionExportAvailabilityUsesLocalFilesAfterRestartDownloadAndRemoval() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        @MainActor func exerciseFixture() async throws {
+            let store = try WoonaStore(rootDirectory: directory)
+            var animal = DogQuestionnaire(); animal.schemaVersion = 2; animal.animalId = "export-fixture"; animal.numberOrName = "Synthetic export animal"
+            let profile = try store.saveProfile(animal)
+            var questionnaire = SessionQuestionnaire(); questionnaire.schemaVersion = 2; questionnaire.sessionLabel = "Raw-only session"; questionnaire.plannedActivities = ["Покой"]; questionnaire.videoRequested = false
+            let recording = try store.createRecording(profile: profile, source: "replay", questionnaire: questionnaire)
+            let raw = store.directory(for: recording).appendingPathComponent("raw_fragments.binlog")
+            try Data("synthetic raw bytes".utf8).write(to: raw)
+            try store.finalize(recording: recording, status: "failed", files: [("raw", raw, "raw_fragments.binlog", "application/octet-stream")], syncJSON: Data("{}".utf8))
+            let model = AppViewModel(store: store, uiTesting: true)
+            await model.refreshExportAvailability()
+            XCTAssertEqual(model.packetsReceived, 0, "Historical files need no current packet counters")
+            XCTAssertTrue(model.canOpenSessionExport)
+            XCTAssertTrue(model.canExportSessionFile(.all))
+            XCTAssertTrue(model.canExportSessionFile(.rawFragments))
+            XCTAssertFalse(model.canExportSessionFile(.packetDump))
+            XCTAssertFalse(model.canExportSessionFile(.channelCsv))
+            for file in try store.artifacts(recordingID: recording.id) {
+                try FileManager.default.removeItem(at: directory.appendingPathComponent(file.relativePath))
+            }
+            await model.refreshExportAvailability()
+            XCTAssertFalse(model.canOpenSessionExport, "Stale DB artifact metadata cannot enable an empty export")
+            XCTAssertTrue(model.availableSessionExportKinds.isEmpty)
+            // A successfully downloaded file may exist without new sensor packets.
+            try Data("synthetic raw bytes".utf8).write(to: raw)
+            await model.refreshExportAvailability()
+            XCTAssertTrue(model.canExportSessionFile(.rawFragments))
+            XCTAssertTrue(model.canExportSessionFile(.all))
+            var second = animal; second.animalId = "other-export-animal"; second.numberOrName = "No local sessions"
+            let other = try store.saveProfile(second)
+            model.selectDogProfile(other)
+            await model.refreshExportAvailability()
+            XCTAssertFalse(model.canOpenSessionExport, "Changing the animal must invalidate the previous files")
+            model.selectDogProfile(profile)
+            await model.refreshExportAvailability()
+            XCTAssertTrue(model.canExportSessionFile(.rawFragments))
+        }
+        try await exerciseFixture()
+    }
+
     func testApplyingAccountWithoutServerFiltersLocalDogs() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

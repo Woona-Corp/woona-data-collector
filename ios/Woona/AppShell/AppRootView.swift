@@ -51,6 +51,9 @@ struct AppRootView: View {
         }
         .tint(usesDarkPalette ? WoonaPalette.color(0x7ACCC5) : WoonaPalette.color(0x146B74))
         .preferredColorScheme(preferredColorScheme)
+        .task(id: "\(appState.selectedTab)-\(appState.sessionExportAvailabilityRevision)") {
+            await appState.refreshExportAvailability()
+        }
         .sheet(item: Binding(
             get: { appState.preparedExport },
             set: { _ in appState.clearPreparedExport() }

@@ -49,7 +49,7 @@ struct ChartsView: View {
                     Button(appState.text(.export)) {
                         isExportOptionsPresented = true
                     }
-                    .disabled(appState.exportPhase != nil)
+                    .disabled(!appState.canOpenSessionExport)
                 }
             }
             .sheet(isPresented: $isExportOptionsPresented, onDismiss: preparePendingExport) {
