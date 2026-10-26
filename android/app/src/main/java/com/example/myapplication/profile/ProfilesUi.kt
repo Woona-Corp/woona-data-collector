@@ -310,7 +310,7 @@ fun ProfilesOverview(
                 if (localArtifacts.isNotEmpty()) {
                     androidx.compose.material3.TextButton(
                         onClick = { pendingLocalRemoval = recording },
-                        enabled = localRemovalEnabled && recording.serverSyncState == "synced" && recording.endedAtUtc != null,
+                        enabled = localRemovalEnabled && recording.serverSyncState == "synced" && recording.status.value in setOf("completed", "failed", "interrupted"),
                     ) { Text(tr(language, "Remove from device", "Удалить с устройства")) }
                     if (recording.serverSyncState != "synced") Text(tr(language,
                         "Local files can be removed after the server confirms the full upload.",

@@ -17,9 +17,9 @@ import org.junit.Test
 class RecordingHistoryActionsTest {
     @get:Rule val compose = createComposeRule()
 
-    private fun show(state: String, onRemove: (String) -> Unit = {}) {
-        val record = Recording("session", "dog", "dog-v1", RecordingSource.LIVE, RecordingStatus.FAILED,
-            "5", true, "2026-10-25T12:06:00Z", "2026-10-25T12:16:00Z", "UTC", null, "session",
+    private fun show(state: String, unknownEnd: Boolean = false, status: RecordingStatus = RecordingStatus.FAILED, onRemove: (String) -> Unit = {}) {
+        val record = Recording("session", "dog", "dog-v1", RecordingSource.LIVE, status,
+            "5", true, "2026-10-25T12:06:00Z", if (unknownEnd) null else "2026-10-25T12:16:00Z", "UTC", null, "session",
             artifacts = listOf(Artifact("file", "session", ArtifactType.PACKET, "packets.bin", "application/octet-stream", "session/packets.bin", 1, "hash", "both", "available", 1, "2026-10-25T12:06:00Z")),
             serverSyncState = state, captureErrorCode = "gatt_error", captureErrorMessage = "Ошибка GATT-подключения: 8")
         compose.setContent {
@@ -50,6 +50,16 @@ class RecordingHistoryActionsTest {
         compose.onNodeWithText("Удалить с устройства").performClick()
         compose.onAllNodesWithText("Удалить с устройства").onLast().performClick()
         compose.runOnIdle { assertEquals(listOf("session"), calls) }
+    }
+
+    @Test fun terminalImportedSessionWithoutMachineEndHasRemovalAction() {
+        show("synced", unknownEnd = true, status = RecordingStatus.COMPLETED)
+        compose.onNodeWithText("Удалить с устройства").performScrollTo().assertIsEnabled()
+    }
+
+    @Test fun activeSessionWithoutMachineEndCannotRemoveLocalFiles() {
+        show("synced", unknownEnd = true, status = RecordingStatus.RECORDING)
+        compose.onNodeWithText("Удалить с устройства").performScrollTo().assertIsNotEnabled()
     }
 
     @Test fun pendingUploadsCannotBeRemoved() {
