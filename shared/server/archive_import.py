@@ -86,8 +86,14 @@ def inspect_archive(archive: Path, *, expected_sha256: str, recording_id: str, d
             raise ValueError('Source profile UUID must exactly equal the reviewed existing animal UUID')
         if sync != manifest.get('synchronization'):
             raise ValueError('Original sync differs from manifest synchronization')
-        if profile['questionnaire'] != sync.get('dogQuestionnaire') or record['questionnaire'] != sync.get('sessionQuestionnaire'):
-            raise ValueError('Original questionnaire snapshots disagree')
+        if profile['questionnaire'] != sync.get('dogQuestionnaire'):
+            raise ValueError('Original animal questionnaire snapshots disagree')
+        original_session = sync.get('sessionQuestionnaire') or {}
+        exported_session = record['questionnaire']
+        completion_fields = sorted(key for key in set(original_session) | set(exported_session)
+                                   if original_session.get(key) != exported_session.get(key))
+        if set(completion_fields) - {'endTime', 'durationMinutes'}:
+            raise ValueError('Session questionnaire changes require review; only final completion fields are automatic')
         if record.get('source') not in ('live', 'replay') or record.get('status') not in ('completed', 'failed', 'interrupted'):
             raise ValueError('Original capture status/source is absent or unsupported')
         declared = manifest.get('files', [])
@@ -178,6 +184,7 @@ def inspect_archive(archive: Path, *, expected_sha256: str, recording_id: str, d
             'manifestSha256': hashlib.sha256(bundle.read('manifest.json')).hexdigest(),
             'manifest': manifest, 'sync': sync, 'startedAtUtc': start.isoformat(),
             'anchorAtUtc': anchor.isoformat(), 'artifacts': artifacts, 'captureQuality': quality,
+            'completionFieldsFinalizedAfterCapture': completion_fields,
             'unknowns': ['original_capture_device_not_exported', 'recording_end_timestamp_not_exported',
                          'hardware_calibration_not_measured']}
 
@@ -259,6 +266,7 @@ def apply_plan(engine, storage_root: Path, plan):
             'original_capture_sync': sync,
             'archive_import': {'schema_version': 1, 'source_id': plan['sourceId'], 'archive_sha256': plan['archiveSha256'],
                 'manifest_sha256': plan['manifestSha256'], 'source_profile_id': profile['id'],
+                'completion_fields_finalized_after_capture': plan.get('completionFieldsFinalizedAfterCapture', []),
                 'source_recording_id': record['id'], 'source_manifest': plan['manifest'],
                 'imported_at_utc': created.isoformat(), 'unknowns': plan['unknowns'],
                 'calibration': {'measured': False, 'offset_ns': None, 'reason': 'not_measured_in_source'},
