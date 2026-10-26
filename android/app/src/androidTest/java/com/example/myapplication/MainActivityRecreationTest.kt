@@ -55,12 +55,12 @@ class MainActivityRecreationTest {
 
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             composeRule.onNode(
-                hasText("Overview") and SemanticsMatcher.expectValue(
+                hasText("Session") and SemanticsMatcher.expectValue(
                     androidx.compose.ui.semantics.SemanticsProperties.Role,
                     androidx.compose.ui.semantics.Role.Tab,
                 ),
             ).performClick()
-            composeRule.onNode(hasScrollAction()).performScrollToNode(hasText("Upload binary (debug)"))
+            composeRule.onNodeWithText("New connection").performClick()
             composeRule
                 .onNodeWithText("Upload binary (debug)")
                 .performScrollTo()

@@ -109,6 +109,7 @@ class MainActivity : ComponentActivity() {
     private var serverSyncState by mutableStateOf(ServerSyncUiState())
     private var connectionCheck = com.example.myapplication.sync.ConnectionCheck.NOT_CHECKED
     private var checkedConfiguration: com.example.myapplication.sync.ServerSettings? = null
+    private var reportConfiguration: com.example.myapplication.sync.ServerSettings? = null
     private var connectionCheckedAt: String? = null
     private var connectionCheckError: String? = null
     private var workersRunning = 0
@@ -274,7 +275,9 @@ class MainActivity : ComponentActivity() {
                         selectedThemeMode = selectedThemeMode,
                         serverSyncState = serverSyncState,
                         onStartScan = {
-                            if (selectedProfileId == null) {
+                            if (accountBusy || isServerRestoreInProgress) {
+                                deviceFeatureController.showErrorOnMainThread(if (selectedLanguage == AppLanguage.RUSSIAN) "Дождитесь завершения операции с аккаунтом или восстановления" else "Wait for the account or restore operation to finish", null)
+                            } else if (selectedProfileId == null) {
                                 editingProfile = null
                                 isDogQuestionnaireVisible = true
                             } else {
@@ -285,8 +288,10 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onConnect = { address ->
-                            pendingLiveAddress = address
-                            isSessionQuestionnaireVisible = true
+                            if (!accountBusy && !isServerRestoreInProgress) {
+                                pendingLiveAddress = address
+                                isSessionQuestionnaireVisible = true
+                            }
                         },
                         onTransportProfileSelect = { profile ->
                             transportPreferences.setSelectedTransportProfile(profile)
@@ -384,6 +389,7 @@ class MainActivity : ComponentActivity() {
                                 serverReports = serverRecordingReports,
                                 onCheckServerRecording = ::checkRecordingOnServer,
                                 section = section,
+                                canSelectProfile = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive(),
                                 profiles = dogProfiles,
                                 selectedProfileId = selectedProfileId,
                                 recordings = recentRecordings,
@@ -448,11 +454,14 @@ class MainActivity : ComponentActivity() {
                                 isDogQuestionnaireVisible = false
                             },
                             onSave = { questionnaire ->
-                                val saved = woonaDatabase.saveProfile(
+                                val saved = runCatching { woonaDatabase.saveProfile(
                                     questionnaire = questionnaire,
                                     profileId = editingProfile?.id,
                                     accountId = serverSettingsStore.get().accountId,
-                                )
+                                ) }.getOrElse { error ->
+                                    deviceFeatureController.showErrorOnMainThread(if (selectedLanguage == AppLanguage.RUSSIAN) "Анкета животного не сохранена; черновик остается открытым" else "Animal questionnaire was not saved; the draft stays open", error)
+                                    return@DogQuestionnaireDialog
+                                }
                                 editingProfile = null
                                 isDogQuestionnaireVisible = false
                                 refreshProfilesAndRecordings(saved.id)
@@ -668,6 +677,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun selectProfile(profileId: String) {
+        if (accountBusy || isServerRestoreInProgress || deviceFeatureController.isCaptureActive()) return
         if (dogProfiles.none { it.id == profileId }) return
         selectedProfileId = profileId
         profilePreferences.edit().putString(LAST_PROFILE_ID_KEY, profileId).apply()
@@ -713,6 +723,10 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshServerState() {
         val settings = serverSettingsStore.get()
+        if (reportConfiguration != null && reportConfiguration != settings) {
+            serverRecordingReports = emptyMap()
+            reportConfiguration = settings
+        }
         if (checkedConfiguration != null && checkedConfiguration != settings && connectionCheck != com.example.myapplication.sync.ConnectionCheck.CHECKING) {
             connectionCheck = com.example.myapplication.sync.ConnectionCheck.NOT_CHECKED
             connectionCheckedAt = null; connectionCheckError = null
@@ -758,14 +772,16 @@ class MainActivity : ComponentActivity() {
             return
         }
         serverRecordingReports = serverRecordingReports + (id to (null to true))
+        reportConfiguration = settings
         val language = selectedLanguage
         backgroundExecutor.execute {
             val result = runCatching { com.example.myapplication.sync.recordingServerReport(ServerApiClient(settings).syncStatus(id), language) }
             runOnUiThread {
-                if (settings.accountId != serverSettingsStore.get().accountId) {
+                if (settings != serverSettingsStore.get()) {
                     serverRecordingReports = serverRecordingReports - id
                 } else {
-                    val report = result.getOrElse { com.example.myapplication.localization.recordingUploadErrorText(it.message, language) + "\n" + it.message.orEmpty() }
+                    val stamp = (if (language == AppLanguage.RUSSIAN) "Проверено: " else "Checked: ") + java.time.Instant.now().toString() + " · " + settings.baseUrl + "\n"
+                    val report = stamp + result.getOrElse { com.example.myapplication.localization.recordingUploadErrorText(it.message, language) + "\n" + it.message.orEmpty() }
                     serverRecordingReports = serverRecordingReports + (id to (report to false))
                 }
             }
@@ -805,19 +821,20 @@ class MainActivity : ComponentActivity() {
         backgroundExecutor.execute {
             val result = runCatching { serverOperationLock.withLock {
                 if (identifier != null && settings.isConfigured) ServerApiClient(settings).applyAccount(identifier)
-                if (settings.isConfigured) ServerApiClient(settings).fetchRestoreSnapshot() else null
+                val snapshot = if (settings.isConfigured) ServerApiClient(settings).fetchRestoreSnapshot() else null
+                snapshot?.let { woonaDatabase.restoreServerMetadata(it.dogs, it.recordings) }
+                snapshot
             }
             }
             runOnUiThread {
                 accountBusy = false
                 result.onSuccess { snapshot ->
                     if (deviceFeatureController.isCaptureActive()) { toast("Дождитесь завершения записи"); return@onSuccess }
-                    snapshot?.let { woonaDatabase.restoreServerMetadata(it.dogs, it.recordings) }
                     serverSettingsStore.setAccount(identifier)
                     editingProfile = null; editingRecording = null; heartQuestionnaireRecordingId = null
                     isDogQuestionnaireVisible = false
                     refreshProfilesAndRecordings(); refreshServerState()
-                }.onFailure { toast("Не удалось применить аккаунт: ${it.message}") }
+                }.onFailure { deviceFeatureController.showErrorOnMainThread(if (selectedLanguage == AppLanguage.RUSSIAN) "Не удалось применить аккаунт. Прежний аккаунт и локальные записи сохранены" else "Account change failed. The previous account and local recordings are preserved", it) }
             }
         }
     }
@@ -841,7 +858,7 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 accountBusy = false
                 result.onSuccess { refreshProfilesAndRecordings(dogId); ServerSyncScheduler.enqueuePending(applicationContext) }
-                    .onFailure { toast("Не удалось связать собаку: ${it.message}") }
+                    .onFailure { deviceFeatureController.showErrorOnMainThread(if (selectedLanguage == AppLanguage.RUSSIAN) "Не удалось связать животное с аккаунтом" else "Failed to link the animal to this account", it) }
             }
         }
     }
@@ -863,8 +880,8 @@ class MainActivity : ComponentActivity() {
             }
             runOnUiThread {
                 result.onSuccess { editingRecording = null; heartQuestionnaireRecordingId = null; handleRecordingChanged() }
-                    .onFailure { error -> toast(if (error is com.example.myapplication.sync.ServerHttpException && error.status == 409)
-                        "Анкета изменена на сервере. Закройте редактор и восстановите данные, затем повторите изменения." else "Анкета не сохранена: ${error.message}") }
+                    .onFailure { error -> deviceFeatureController.showErrorOnMainThread(if (error is com.example.myapplication.sync.ServerHttpException && error.status == 409)
+                        "Анкета изменена на сервере. Закройте редактор и восстановите данные, затем повторите изменения." else if (selectedLanguage == AppLanguage.RUSSIAN) "Анкета не сохранена. Черновик остается в редакторе; проверьте причину и повторите" else "Questionnaire was not saved. Its draft stays in the editor; review the cause and retry", error) }
             }
         }
     }

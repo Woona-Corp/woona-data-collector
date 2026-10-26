@@ -89,8 +89,8 @@ class AppShellNavigationTest {
     fun operationFailureDetailsRemainVisibleAcrossAllTabs() {
         val details = "Download failed: java.net.SocketTimeoutException: read timed out"
         setShellContent(uiState = DeviceUiState(errorMessage = details))
-        composeRule.onNodeWithText(details).performScrollTo().assertIsDisplayed()
-        navTab("Charts").performClick()
+        composeRule.onNodeWithText(details).scrollToIfNeeded().assertIsDisplayed()
+        chartControl().performClick()
         composeRule.onNodeWithText(details).assertIsDisplayed()
         navTab("Settings").performClick()
         composeRule.onNodeWithText(details).assertIsDisplayed()
@@ -112,13 +112,14 @@ class AppShellNavigationTest {
     }
 
     @Test
-    fun overview_isDefaultDestination() {
-        setShellContent()
-
+    fun animalsIsDefaultAndAllFiveDestinationsAreVisible() {
+        setShellContent(openSession = false)
+        navTab("Animals").assertIsSelected()
+        for (label in listOf("Session", "Video", "Recordings", "Settings")) navTab(label).assertIsNotSelected()
+        composeRule.onNodeWithText("New connection").assertDoesNotExist()
+        navTab("Session").performClick()
+        composeRule.onNodeWithText("New connection").assertIsDisplayed().performClick()
         composeRule.onNodeWithText("BLE devices").assertIsDisplayed()
-        navTab("Overview").assertIsSelected()
-        navTab("Charts").assertIsNotSelected()
-        navTab("Settings").assertIsNotSelected()
     }
 
     @Test
@@ -127,9 +128,10 @@ class AppShellNavigationTest {
             uiState = DeviceUiState(showCaptureUi = true),
         )
 
-        navTab("Charts").performClick()
-        navTab("Charts").assertIsSelected()
-        navTab("Overview").assertIsNotSelected()
+        chartControl().performClick()
+        chartControl().assertIsSelected()
+        navTab("Animals").assertIsNotSelected()
+        navTab("Session").assertIsSelected()
         composeRule.onNodeWithText("Y Reset").scrollToIfNeeded().assertIsDisplayed()
 
         navTab("Settings").performClick()
@@ -138,8 +140,9 @@ class AppShellNavigationTest {
         composeRule.onNodeWithText("Theme").assertIsDisplayed()
         composeRule.onNodeWithText("Export").assertDoesNotExist()
 
-        navTab("Overview").performClick()
-        navTab("Overview").assertIsSelected()
+        navTab("Session").performClick()
+        navTab("Session").assertIsSelected()
+        composeRule.onNode(hasTestTag("session.summary")).performClick()
         composeRule.onNodeWithText("Connection").assertIsDisplayed()
     }
 
@@ -182,7 +185,7 @@ class AppShellNavigationTest {
             onShareAllFiles = { exportAllClicks++ },
         )
 
-        navTab("Charts").performClick()
+        chartControl().performClick()
         composeRule.onNodeWithText("Export").assertIsEnabled().performClick()
         composeRule.onNodeWithText("Session ZIP").assertIsEnabled().performClick()
 
@@ -214,7 +217,7 @@ class AppShellNavigationTest {
             uiState = DeviceUiState(showCaptureUi = true),
         )
 
-        navTab("Charts").performClick()
+        chartControl().performClick()
 
         composeRule.onNodeWithText("Y Reset").scrollToIfNeeded().assertIsDisplayed()
         composeRule
@@ -241,7 +244,7 @@ class AppShellNavigationTest {
             ),
         )
 
-        navTab("Charts").performClick()
+        chartControl().performClick()
         composeRule.onNodeWithContentDescription("Open fullscreen chart").performClick()
 
         composeRule.onNodeWithText("Fullscreen chart").assertIsDisplayed()
@@ -256,7 +259,7 @@ class AppShellNavigationTest {
             uiState = DeviceUiState(showCaptureUi = true),
         )
 
-        navTab("Charts").performClick()
+        chartControl().performClick()
         composeRule.onNodeWithContentDescription("Open fullscreen chart").performClick()
 
         composeRule.onNodeWithText("Fullscreen chart").assertIsDisplayed()
@@ -433,6 +436,7 @@ class AppShellNavigationTest {
         onShareRawFile: () -> Unit = {},
         onShareLogFile: () -> Unit = {},
         onThemeModeSelect: (AppThemeMode) -> Unit = {},
+        openSession: Boolean = true,
     ) {
         composeRule.setContent {
             AppLocalizationProvider(
@@ -480,12 +484,18 @@ class AppShellNavigationTest {
                 }
             }
         }
+        if (openSession) navTab("Session").performClick()
     }
 
     private fun checkbox(label: String) = composeRule.onNode(
         isToggleable() and hasAnySibling(hasText(label)),
         useUnmergedTree = true,
     )
+
+    private fun chartControl(): SemanticsNodeInteraction {
+        if (!composeRule.onNode(hasTestTag("session.charts")).isDisplayed()) navTab("Session").performClick()
+        return composeRule.onNode(hasTestTag("session.charts"))
+    }
 
     private fun navTab(label: String) = composeRule.onNode(
         hasText(label) and SemanticsMatcher.expectValue(

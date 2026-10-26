@@ -169,11 +169,19 @@ fun DeviceAppShell(
                 )
             },
         ) { innerPadding ->
-            Box(
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding),
             ) {
+                uiState.errorMessage?.takeIf { it.isNotBlank() }?.let { error ->
+                    Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth().padding(8.dp), shape = RoundedCornerShape(12.dp)) {
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text(error, modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                Box(modifier = Modifier.weight(1f)) {
                 when (selectedDestination) {
                     AppDestination.ANIMALS, AppDestination.VIDEO, AppDestination.RECORDINGS -> Column(
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
@@ -187,12 +195,12 @@ fun DeviceAppShell(
                     }
                     AppDestination.SESSION -> Column(modifier = Modifier.fillMaxSize()) {
                         Row(modifier = Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(selected = !showSessionCharts, onClick = { showSessionCharts = false }, label = { Text(appStringResource(R.string.nav_session)) })
+                            FilterChip(selected = !showSessionCharts, onClick = { showSessionCharts = false }, label = { Text(appStringResource(R.string.nav_session)) }, modifier = Modifier.testTag("session.summary"))
                             FilterChip(selected = showSessionCharts, onClick = { showSessionCharts = true }, label = { Text(appStringResource(R.string.nav_charts)) }, modifier = Modifier.testTag("session.charts"))
                         }
                         Box(modifier = Modifier.weight(1f)) {
                         if (!showSessionCharts) DeviceScreenEntryPoint.Overview(
-                            uiState = uiState,
+                            uiState = uiState.copy(errorMessage = null),
                             onStartScan = onStartScan,
                             onConnect = onConnect,
                             onDisconnect = onDisconnect,
@@ -200,7 +208,7 @@ fun DeviceAppShell(
                             onReplayRequest = onReplayRequest,
                             profileContent = { overviewProfileContent(ProfileScreenSection.SESSION) },
                         ) else DeviceScreenEntryPoint.Charts(
-                        uiState = uiState,
+                        uiState = uiState.copy(errorMessage = null),
                         onSensorSelect = onSensorSelect,
                         onChannelSelect = onChannelSelect,
                         onChartWindowSelect = onChartWindowSelect,
@@ -218,7 +226,7 @@ fun DeviceAppShell(
                     }
 
                     AppDestination.SETTINGS -> DeviceScreenEntryPoint.Settings(
-                        uiState = uiState,
+                        uiState = uiState.copy(errorMessage = null),
                         selectedLanguage = selectedLanguage,
                         selectedThemeMode = selectedThemeMode,
                         serverSyncState = serverSyncState,
@@ -231,6 +239,7 @@ fun DeviceAppShell(
                         onServerRestore = onServerRestore,
             onServerCheck = onServerCheck,
                     )
+                }
                 }
             }
         }

@@ -55,7 +55,7 @@ class AppShellInsetsTest {
         composeRule.waitForIdle()
 
         val titleBounds = composeRule
-            .onAllNodesWithText("Overview")
+            .onAllNodesWithText("Animals")
             .fetchSemanticsNodes()
             .minByOrNull { it.boundsInRoot.top }
             ?.boundsInRoot
@@ -128,7 +128,8 @@ class AppShellInsetsTest {
             ),
         )
 
-        composeRule.onNodeWithText("Charts").performClick()
+        composeRule.onNode(hasTestTag("tab.session")).performClick()
+        composeRule.onNode(hasTestTag("session.charts")).performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) {
             composeRule.onAllNodesWithText("900k").fetchSemanticsNodes().isNotEmpty() &&
                 composeRule.onAllNodesWithText("Y Reset").fetchSemanticsNodes().isNotEmpty()
@@ -162,7 +163,8 @@ class AppShellInsetsTest {
             ),
         )
 
-        composeRule.onNodeWithText("Charts").performClick()
+        composeRule.onNode(hasTestTag("tab.session")).performClick()
+        composeRule.onNode(hasTestTag("session.charts")).performClick()
         composeRule.onNodeWithContentDescription("Open fullscreen chart").performClick()
         composeRule.onNodeWithText("Fullscreen chart").assertExists()
         val fullscreenControlMatcher = hasAnyAncestor(hasTestTag(CHART_FULLSCREEN_CONTROLS_TEST_TAG))
@@ -228,7 +230,8 @@ class AppShellInsetsTest {
             ),
         )
 
-        composeRule.onNodeWithText("Charts").performClick()
+        composeRule.onNode(hasTestTag("tab.session")).performClick()
+        composeRule.onNode(hasTestTag("session.charts")).performClick()
         composeRule.onNodeWithText("Y Reset").performScrollTo().assertIsDisplayed()
         composeRule
             .onNodeWithText("No data for the selected sensor/channel")

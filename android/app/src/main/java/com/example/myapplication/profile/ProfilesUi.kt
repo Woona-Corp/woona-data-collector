@@ -116,6 +116,7 @@ fun ProfilesOverview(
     onAddReference: (String) -> Unit = {},
     onEditQuestionnaire: (Recording) -> Unit = {},
     section: ProfileScreenSection = ProfileScreenSection.ALL,
+    canSelectProfile: Boolean = true,
     showingAllRecordings: Boolean = false,
     onShowAllRecordings: () -> Unit = {},
     serverReports: Map<String, Pair<String?, Boolean>> = emptyMap(),
@@ -155,6 +156,7 @@ fun ProfilesOverview(
     }
 
     if (section in setOf(ProfileScreenSection.ALL, ProfileScreenSection.ANIMALS)) {
+    if (!canSelectProfile) Text(tr(language, "Finish the active recording or account operation before changing the animal.", "Завершите текущую запись или операцию с аккаунтом перед сменой животного."))
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -169,22 +171,23 @@ fun ProfilesOverview(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onSelectProfile(profile.id) },
+                        .clickable(enabled = canSelectProfile) { onSelectProfile(profile.id) },
                 ) {
                     RadioButton(
                         selected = profile.id == selectedProfileId,
+                        enabled = canSelectProfile,
                         onClick = { onSelectProfile(profile.id) },
                     )
                     Text(profile.numberOrName, modifier = Modifier.padding(top = 12.dp))
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onCreateProfile) {
+                Button(onClick = onCreateProfile, enabled = canSelectProfile) {
                     Text(tr(language, "New dog", "Новая собака"))
                 }
                 OutlinedButton(
                     onClick = { selected?.let(onEditProfile) },
-                    enabled = selected != null,
+                    enabled = selected != null && canSelectProfile,
                 ) {
                     Text(tr(language, "Edit", "Изменить"))
                 }

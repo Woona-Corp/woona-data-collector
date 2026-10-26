@@ -80,6 +80,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var connectionCheckError: String?
     @Published private(set) var serverTransferStatuses: [UUID: ServerTransferStatus] = [:]
     @Published private(set) var transferStatusErrors: [UUID: String] = [:]
+    @Published private(set) var transferCheckedAt: [UUID: String] = [:]
     @Published private(set) var checkingTransferIDs: Set<UUID> = []
     private var networkMonitor: NWPathMonitor?
 
@@ -116,21 +117,26 @@ final class AppViewModel: ObservableObject {
 
     func checkRecordingTransfer(_ id: UUID) {
         guard !checkingTransferIDs.contains(id) else { return }
-        let account = selectedAccountID
+        let configuration = ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID)
+        let token = serverToken
         checkingTransferIDs.insert(id)
+        serverTransferStatuses[id] = nil; transferStatusErrors[id] = nil; transferCheckedAt[id] = nil
         Task {
             defer { checkingTransferIDs.remove(id) }
             do {
-                let status = try await serverClient(accountID: account).syncStatus(id)
-                guard selectedAccountID == account else { return }
+                let status = try await WoonaServerClient(configuration: configuration, token: token).syncStatus(id)
+                guard configuration == ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID), token == serverToken else { return }
                 serverTransferStatuses[id] = status
-                transferStatusErrors[id] = nil
+                transferCheckedAt[id] = WoonaStore.iso8601(Date())
             } catch {
-                guard selectedAccountID == account else { return }
+                guard configuration == ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID), token == serverToken else { return }
+                serverTransferStatuses[id] = nil
                 transferStatusErrors[id] = recordingUploadErrorText(error.localizedDescription, language: selectedLanguage) + "\n" + error.localizedDescription
             }
         }
     }
+
+    var canSelectAnimal: Bool { activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
 
     var canChangeAccount: Bool {
         completeArchiveTask == nil && !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
@@ -230,7 +236,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func saveDogProfile(_ questionnaire: DogQuestionnaire, replacing profile: DogProfile? = nil) {
-        guard !isAccountOperationRunning, let store else { return }
+        guard canSelectAnimal, let store else { return }
         guard profile == nil || profile?.accountID == selectedAccountID else { return }
         do {
             let saved = try store.saveProfile(questionnaire, replacing: profile, accountID: selectedAccountID)
@@ -244,7 +250,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func selectDogProfile(_ profile: DogProfile) {
-        guard profile.accountID == selectedAccountID else { return }
+        guard canSelectAnimal, profile.accountID == selectedAccountID else { return }
         serverRecordings = []
         selectedDogProfile = profile
         showingAllRecordings = false
@@ -256,6 +262,7 @@ final class AppViewModel: ObservableObject {
     func saveServerSettings() {
         guard canChangeAccount else { return }
         connectionCheck = "not_checked"; connectionCheckedAt = nil; connectionCheckError = nil
+        serverTransferStatuses = [:]; transferStatusErrors = [:]; transferCheckedAt = [:]
         serverBaseURL = serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         serverToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
         UserDefaults.standard.set(serverBaseURL, forKey: "serverBaseURL")
@@ -1072,7 +1079,10 @@ final class AppViewModel: ObservableObject {
             unassignedDogProfiles = allProfiles.filter { $0.accountID == nil }
             let id = preferredID ?? selectedDogProfile?.id
             selectedDogProfile = id.flatMap { id in dogProfiles.first { $0.id == id } } ?? dogProfiles.first
-            if previousDogID != selectedDogProfile?.id || previousAccountID != selectedDogProfile?.accountID { serverRecordings = [] }
+            if previousDogID != selectedDogProfile?.id || previousAccountID != selectedDogProfile?.accountID {
+                serverRecordings = []
+                serverTransferStatuses = [:]; transferStatusErrors = [:]; transferCheckedAt = [:]
+            }
             if let selectedDogProfile {
                 UserDefaults.standard.set(selectedDogProfile.id.uuidString, forKey: "selectedDogID")
             }

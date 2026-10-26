@@ -258,6 +258,9 @@ struct ServerRecordingTransferView: View {
             if appState.checkingTransferIDs.contains(recordingID) { ProgressView() }
             if let error = appState.transferStatusErrors[recordingID] { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
             if let status = appState.serverTransferStatuses[recordingID] {
+                if let date = appState.transferCheckedAt[recordingID] {
+                    Text((ru ? "Проверено: " : "Checked: ") + recordingDisplayTime(date) + " · " + appState.serverBaseURL).font(.caption)
+                }
                 if let transfer = status.transfer {
                     Text((ru ? "Доставка: " : "Transfer: ") + transfer.status).font(.caption)
                     Text(ru ? "Передано \(transfer.uploadedBytes) из \(transfer.totalBytes) байт; проверено \(transfer.verifiedFiles) из \(transfer.totalFiles) файлов." : "Transferred \(transfer.uploadedBytes) of \(transfer.totalBytes) bytes; verified \(transfer.verifiedFiles) of \(transfer.totalFiles) files.").font(.caption)
@@ -367,6 +370,9 @@ struct OverviewView: View {
                     }
                 }
                 if section == .animals {
+                if !appState.canSelectAnimal {
+                    Text(russian ? "Завершите текущую запись или операцию с аккаунтом перед сменой животного." : "Finish the active recording or account operation before changing the animal.").font(.footnote)
+                }
                 AppCard(title: appState.selectedLanguage == .russian ? "Активная собака" : "Active dog") {
                     if appState.dogProfiles.isEmpty {
                         Text(appState.selectedLanguage == .russian ? "Создайте обязательную анкету перед записью" : "Create the required questionnaire before recording")
@@ -385,6 +391,7 @@ struct OverviewView: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(profile.numberOrName)
+                            .disabled(!appState.canSelectAnimal)
                             .accessibilityIdentifier("dog.select." + profile.id.uuidString)
                             .accessibilityAddTraits(appState.selectedDogProfile?.id == profile.id ? [.isSelected] : [])
                         }
@@ -395,13 +402,14 @@ struct OverviewView: View {
                             dogEditorPresentation = DogProfileEditorPresentation(profile: nil)
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(!appState.canSelectAnimal)
                         .accessibilityIdentifier("dog.new")
                         Button(appState.selectedLanguage == .russian ? "Изменить" : "Edit") {
                             guard let profile = appState.selectedDogProfile else { return }
                             dogEditorPresentation = DogProfileEditorPresentation(profile: profile)
                         }
                         .accessibilityIdentifier("dog.edit")
-                        .disabled(appState.selectedDogProfile == nil)
+                        .disabled(appState.selectedDogProfile == nil || !appState.canSelectAnimal)
                     }
                     // Keep New and Edit as separate visible actions on both platforms.
                     .buttonStyle(.bordered)
