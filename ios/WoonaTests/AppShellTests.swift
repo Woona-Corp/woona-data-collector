@@ -30,6 +30,8 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(forbidden.contains("Permission was denied"))
         XCTAssertTrue(recordingUploadErrorText("invalid_bearer_token", language: .russian).contains("Токен"))
         XCTAssertTrue(recordingUploadErrorText("artifact_hash_mismatch", language: .russian).contains("Контрольная сумма"))
+        XCTAssertTrue(recordingUploadErrorText("HTTP 409: profile_content_already_exists", language: .russian).contains("Восстановите профили"))
+        XCTAssertTrue(recordingUploadErrorText("profile_content_already_exists", language: .english).contains("do not create it again"))
         XCTAssertTrue(recordingUploadErrorText("local_copy_changed", language: .russian).contains("Удаление отменено"))
         XCTAssertTrue(recordingUploadErrorText("Server token is missing", language: .russian).contains("токен"))
         XCTAssertEqual(recordingUploadErrorText("Unexpected future failure", language: .english), "Unexpected future failure")

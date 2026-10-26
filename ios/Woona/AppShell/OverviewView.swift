@@ -84,6 +84,7 @@ private func errorText(_ language: AppLanguage, _ ru: String, _ en: String) -> S
 }
 
 private let serverReasons: [String: (String, String)] = [
+    "profile_content_already_exists": ("Эти ответы анкеты уже сохранены на сервере. Восстановите профили и выберите текущую карточку; не создавайте её повторно", "These questionnaire answers are already saved on the server. Restore profiles and select the current profile; do not create it again"),
     "account_header_mismatch": ("Аккаунт запроса не совпадает с аккаунтом животного", "The request account does not match the animal account"),
     "dog_account_conflict": ("Аккаунт запроса не совпадает с аккаунтом животного", "The request account does not match the animal account"),
     "account_required": ("Не выбран аккаунт", "No account is selected"),
@@ -587,6 +588,9 @@ struct OverviewView: View {
                 .padding(12)
             }
             .background(Color(uiColor: .systemGroupedBackground))
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if section == .session { SessionSectionPicker() }
+            }
             .navigationTitle(screenTitle)
             .navigationBarTitleDisplayMode(.inline)
             .onChange(of: appState.recentRecordings) { _, records in
@@ -648,11 +652,13 @@ struct OverviewView: View {
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(appState.text(.export)) {
-                        isExportOptionsPresented = true
+                if section == .session || section == .recordings {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(appState.text(.export)) {
+                            isExportOptionsPresented = true
+                        }
+                        .disabled(appState.exportPhase != nil)
                     }
-                    .disabled(appState.exportPhase != nil)
                 }
             }
             .fileImporter(

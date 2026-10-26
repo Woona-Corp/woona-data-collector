@@ -1197,7 +1197,10 @@ final class AppViewModel: ObservableObject {
             let revision = try await serverClient(accountID: profile.accountID).upload(profile: profile, store: store)
             try store.setServerRevision(dogID: profile.id, revision: revision)
             reloadProfiles(selecting: profile.id)
-        } catch { showError("Profile upload failed", error: error) }
+        } catch {
+            let explanation = recordingUploadErrorText(error.localizedDescription, language: selectedLanguage)
+            showError(explanation == error.localizedDescription ? "Profile upload failed" : explanation, error: error)
+        }
     }
 
     private func reloadServerRecordings() async {

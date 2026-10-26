@@ -184,16 +184,22 @@ final class OverviewParityTests: XCTestCase {
     func testFiveTabsPreserveSelectionAndSeparateFunctions() {
         let tabs = ["overview", "session", "video", "recordings", "settings"]
         for tab in tabs { XCTAssertTrue(app.buttons["tab." + tab].exists) }
+        XCTAssertFalse(app.navigationBars.buttons["Export"].exists)
         attachScreen("Animals-EnglishLight")
         app.buttons["tab.video"].tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "No active video")).firstMatch.exists)
         XCTAssertFalse(app.textFields["account.input"].exists)
+        XCTAssertFalse(app.navigationBars.buttons["Export"].exists)
         attachScreen("Video-EnglishLight")
         app.buttons["tab.recordings"].tap()
         XCTAssertTrue(app.staticTexts["No recordings for this dog"].exists)
+        XCTAssertTrue(app.navigationBars.buttons["Export"].exists)
         attachScreen("Recordings-EnglishLight")
         app.buttons["tab.session"].tap()
         XCTAssertFalse(app.textFields["account.input"].exists)
+        XCTAssertTrue(app.navigationBars.buttons["Export"].exists)
+        XCTAssertTrue(app.navigationBars["Session"].exists)
+        XCTAssertGreaterThanOrEqual(app.segmentedControls["session.section"].frame.minY, app.navigationBars["Session"].frame.maxY)
         attachScreen("Session-EnglishLight")
         app.buttons["tab.settings"].tap()
         XCTAssertTrue(app.buttons["server.configure"].exists)
@@ -206,6 +212,9 @@ final class OverviewParityTests: XCTestCase {
     func testFullscreenKeepsChartSelection() {
         app.buttons["tab.session"].tap()
         app.segmentedControls["session.section"].buttons["Charts"].tap()
+        XCTAssertTrue(app.navigationBars["Session"].exists)
+        XCTAssertTrue(app.navigationBars.buttons["Export"].exists)
+        XCTAssertGreaterThanOrEqual(app.segmentedControls["session.section"].frame.minY, app.navigationBars["Session"].frame.maxY)
         app.segmentedControls.buttons["AXL"].tap()
         app.segmentedControls.buttons["Channel 2"].tap()
         app.buttons["chart.fullscreen.open"].tap()

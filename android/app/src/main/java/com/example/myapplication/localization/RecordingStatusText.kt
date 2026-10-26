@@ -5,6 +5,7 @@ import com.example.myapplication.localization.AppLanguage
 private fun errorText(language: AppLanguage, ru: String, en: String) = if (language == AppLanguage.RUSSIAN) ru else en
 
 private val serverReasons = mapOf(
+    "profile_content_already_exists" to ("Эти ответы анкеты уже сохранены на сервере. Восстановите профили и выберите текущую карточку; не создавайте её повторно" to "These questionnaire answers are already saved on the server. Restore profiles and select the current profile; do not create it again"),
     "account_header_mismatch" to ("Аккаунт запроса не совпадает с аккаунтом животного" to "The request account does not match the animal account"),
     "dog_account_conflict" to ("Аккаунт запроса не совпадает с аккаунтом животного" to "The request account does not match the animal account"),
     "account_required" to ("Не выбран аккаунт" to "No account is selected"),
