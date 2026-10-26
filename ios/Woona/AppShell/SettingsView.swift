@@ -103,7 +103,7 @@ struct SettingsView: View {
                 }
                 }.padding(12)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Color.woonaBackground)
             .navigationTitle(appState.text(.settings))
             .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $isServerEditorPresented) {

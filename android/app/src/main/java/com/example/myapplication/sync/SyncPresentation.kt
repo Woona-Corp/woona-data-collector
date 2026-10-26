@@ -42,7 +42,7 @@ fun recordingServerReport(status: org.json.JSONObject, language: AppLanguage): S
         if (!transfer.isNull("lastProgressAtUtc")) appendLine((if (ru) "Последнее продвижение: " else "Last progress: ") + transfer.optString("lastProgressAtUtc"))
         appendLine((if (ru) "Следующее действие: " else "Next action: ") + nextTransferActionText(transfer.optString("nextAction"), ru))
         status.optJSONObject("quality")?.let { quality ->
-            appendLine(if (quality.optString("status") == "warnings") { if (ru) "Качество потока: есть предупреждения" else "Stream quality: warnings present" } else if (quality.optString("status") == "not_audited") { if (ru) "Качество потока: не проверено" else "Stream quality: not checked" } else { if (ru) "Качество потока: диагностика проверена" else "Stream quality: diagnostics checked" })
+            appendLine(if (quality.optString("status") == "warnings") { if (ru) "Качество потока: есть предупреждения" else "Stream quality: warnings present" } else if (quality.optString("status") == "not_audited") { if (ru) "Качество потока: не проверено" else "Stream quality: not checked" } else if (quality.optString("status") == "audited") { if (ru) "Качество потока: диагностика проверена" else "Stream quality: diagnostics checked" } else { (if (ru) "Качество потока: " else "Stream quality: ") + quality.optString("status") })
             quality.optJSONArray("warnings")?.let { warnings -> for (i in 0 until warnings.length()) {
                 val warning = warnings.getJSONObject(i)
                 val code = warning.optString("code")

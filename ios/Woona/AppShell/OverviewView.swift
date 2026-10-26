@@ -20,7 +20,7 @@ struct AppCard<Content: View>: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color.woonaSurface, in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -271,7 +271,7 @@ struct ServerRecordingTransferView: View {
                     Text((ru ? "Следующее действие: " : "Next action: ") + transferNextAction(transfer.nextAction, ru: ru)).font(.caption)
                 } else { Text((ru ? "Сервер вернул прежний формат статуса: " : "Server returned the earlier status format: ") + status.ingestStatus).font(.caption) }
                 if let quality = status.quality {
-                    Text(quality.status == "warnings" ? (ru ? "Качество потока: есть предупреждения" : "Stream quality: warnings present") : (ru ? "Качество потока: " : "Stream quality: ") + (quality.status == "not_audited" ? (ru ? "не проверено" : "not checked") : (ru ? "диагностика проверена" : "diagnostics checked")))
+                    Text(quality.status == "warnings" ? (ru ? "Качество потока: есть предупреждения" : "Stream quality: warnings present") : (ru ? "Качество потока: " : "Stream quality: ") + (quality.status == "not_audited" ? (ru ? "не проверено" : "not checked") : (quality.status == "audited" ? (ru ? "диагностика проверена" : "diagnostics checked") : quality.status)))
                         .font(.caption).foregroundStyle(quality.status == "warnings" ? Color.orange : Color.secondary)
                     ForEach(Array(quality.warnings.enumerated()), id: \.offset) { _, warning in
                         Text(qualityWarningText(warning.code, count: warning.count, ru: ru)).font(.caption)
@@ -619,7 +619,7 @@ struct OverviewView: View {
                 }
                 .padding(12)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Color.woonaBackground)
             .navigationTitle(screenTitle)
             .navigationBarTitleDisplayMode(.inline)
             .onChange(of: appState.recentRecordings) { _, records in

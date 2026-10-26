@@ -34,6 +34,18 @@ class CompleteArchiveExporterTest {
             assertTrue(manifest.contains("Physically deleted"))
         }
     }
+    @Test fun insufficientSpaceFailsBeforeCopyingAndPreservesSparseSource() = fixture { base, root, snapshot ->
+        val source = File(root, "large-video.mp4")
+        val size = 2L * 1024 * 1024 * 1024 * 1024
+        java.io.RandomAccessFile(source, "rw").use { it.setLength(size) }
+        val failure = assertThrows(IOException::class.java) {
+            CompleteArchiveExporter().export(listOf(CompleteArchiveExporter.Root("data/Woona", root)), snapshot, File(base, "out.zip"), "{}")
+        }
+        assertTrue(failure.message.orEmpty().contains("Not enough free space"))
+        assertEquals(size, source.length())
+        assertFalse(File(base, "out.zip").exists())
+        assertFalse(File(base, "out.zip.part").exists())
+    }
     @Test fun emptyInstallationStillExportsDatabaseAndManifest() = fixture { base, root, snapshot ->
         val output = CompleteArchiveExporter().export(listOf(CompleteArchiveExporter.Root("data/Woona", root)), snapshot, File(base, "out.zip"), "{}")
         ZipFile(output).use { assertEquals(2, it.size()) }

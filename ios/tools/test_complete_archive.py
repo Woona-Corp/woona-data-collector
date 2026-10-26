@@ -201,6 +201,14 @@ class CompleteArchiveCompatibilityTests(unittest.TestCase):
                     count += len(chunk)
             self.assertEqual(count, 4_294_967_296 + 65_537)
 
+    def test_insufficient_space_preserves_sources_without_creating_partial_archive(self):
+        source = self.root / "large-video.mp4"
+        size = 2 * 1024 ** 4
+        with source.open("wb") as stream:
+            stream.truncate(size)  # Sparse file: no large disk allocation or copy.
+        self.run_export(success=False, reason="Not enough free space")
+        self.assertEqual(source.stat().st_size, size)
+
     def test_unfinalized_history_from_previous_crash_is_exportable_and_explicit(self):
         self.db.execute("UPDATE recordings SET status='recording'")
         self.db.commit()

@@ -15,6 +15,12 @@ private val DarkColorScheme = darkColorScheme(
     tertiary = androidx.compose.ui.graphics.Color(0xFFE9BE7C),
     background = androidx.compose.ui.graphics.Color(0xFF101E27),
     surface = androidx.compose.ui.graphics.Color(0xFF182C38),
+    surfaceContainer = androidx.compose.ui.graphics.Color(0xFF182C38),
+    surfaceVariant = androidx.compose.ui.graphics.Color(0xFF263E49),
+    secondaryContainer = androidx.compose.ui.graphics.Color(0xFF204D50),
+    onSecondaryContainer = androidx.compose.ui.graphics.Color(0xFFBDEFE8),
+    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFFB1C6D0),
+    error = androidx.compose.ui.graphics.Color(0xFFFFB4AB),
     onSurface = androidx.compose.ui.graphics.Color(0xFFE3EDF1),
 )
 private val LightColorScheme = lightColorScheme(

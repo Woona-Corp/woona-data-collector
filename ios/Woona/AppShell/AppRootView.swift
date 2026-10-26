@@ -1,8 +1,10 @@
 import SwiftUI
+import UIKit
 
 struct AppRootView: View {
     @EnvironmentObject private var appState: AppViewModel
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var systemColorScheme
 
     var body: some View {
         ZStack {
@@ -51,9 +53,10 @@ struct AppRootView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .background(Color.woonaSurface)
         }
-        .tint(Color(red: 20.0 / 255, green: 107.0 / 255, blue: 116.0 / 255))
+        .tint(usesDarkPalette ? WoonaPalette.color(0x7ACCC5) : WoonaPalette.color(0x146B74))
+        .foregroundStyle(Color.woonaInk)
         .preferredColorScheme(preferredColorScheme)
         .sheet(item: Binding(
             get: { appState.preparedExport },
@@ -77,13 +80,17 @@ struct AppRootView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
-            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-            .background(selected ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 18))
+            .foregroundStyle(selected ? Color.woonaSelectionText : Color.woonaMuted)
+            .background(selected ? Color.woonaSelection : .clear, in: RoundedRectangle(cornerRadius: 18))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
         .accessibilityIdentifier("tab.\(tab)")
         .accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+
+    private var usesDarkPalette: Bool {
+        appState.selectedThemeMode == .dark || (appState.selectedThemeMode == .system && systemColorScheme == .dark)
     }
 
     private var preferredColorScheme: ColorScheme? {
@@ -126,4 +133,23 @@ private struct ExportProgressOverlay: View {
         }
         .transition(.opacity)
     }
+}
+
+/// The same fixed palette as Android and the approved HTML prototype.
+enum WoonaPalette {
+    static func color(_ rgb: UInt32) -> Color { Color(uiColor: uiColor(rgb)) }
+    static func uiColor(_ rgb: UInt32) -> UIColor {
+        UIColor(red: CGFloat((rgb >> 16) & 255) / 255, green: CGFloat((rgb >> 8) & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: 1)
+    }
+    static func adaptive(light: UInt32, dark: UInt32) -> Color {
+        Color(uiColor: UIColor { traits in uiColor(traits.userInterfaceStyle == .dark ? dark : light) })
+    }
+}
+extension Color {
+    static var woonaSurface: Color { WoonaPalette.adaptive(light: 0xFFFFFF, dark: 0x182C38) }
+    static var woonaBackground: Color { WoonaPalette.adaptive(light: 0xF4F7FA, dark: 0x101E27) }
+    static var woonaInk: Color { WoonaPalette.adaptive(light: 0x172B3C, dark: 0xE3EDF1) }
+    static var woonaMuted: Color { WoonaPalette.adaptive(light: 0x65778A, dark: 0xB1C6D0) }
+    static var woonaSelection: Color { WoonaPalette.adaptive(light: 0xE3F4F1, dark: 0x204D50) }
+    static var woonaSelectionText: Color { WoonaPalette.adaptive(light: 0x10555E, dark: 0xBDEFE8) }
 }

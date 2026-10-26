@@ -78,6 +78,25 @@ final class CompleteDataArchiveTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
     }
 
+    func testInsufficientSpacePreservesOriginalAndDoesNotPublishArchive() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = try fixture(base)
+        let source = root.appendingPathComponent("large-video.mp4")
+        XCTAssertTrue(FileManager.default.createFile(atPath: source.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: source)
+        let size: UInt64 = 2 * 1_024 * 1_024 * 1_024 * 1_024
+        try handle.truncate(atOffset: size)
+        try handle.close()
+        let destination = base.appendingPathComponent("out.zip")
+        XCTAssertThrowsError(try CompleteDataArchive(dataDirectory: root).create(in: destination)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Not enough free space"), error.localizedDescription)
+        }
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: source.path)[.size] as? NSNumber)?.uint64Value, size)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.appendingPathExtension("part").path))
+    }
+
     private func fixture(_ base: URL) throws -> URL {
         let root = base.appendingPathComponent("Woona", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

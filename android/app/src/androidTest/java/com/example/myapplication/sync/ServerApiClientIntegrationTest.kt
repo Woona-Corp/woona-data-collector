@@ -477,7 +477,10 @@ class ServerApiClientIntegrationTest {
         assertArrayEquals(rawBytes, target.readBytes())
         client.downloadArtifact(raw.id, raw.sizeBytes, raw.sha256, target)
         val conflicting = File(directory, "conflicting.bin").apply { writeText("keep local data") }
-        assertTrue(runCatching { client.downloadArtifact(raw.id, raw.sizeBytes, raw.sha256, conflicting) }.exceptionOrNull() is IllegalArgumentException)
+        val conflict = org.junit.Assert.assertThrows(ServerTransferException::class.java) {
+            client.downloadArtifact(raw.id, raw.sizeBytes, raw.sha256, conflicting)
+        }
+        assertEquals("local_artifact_conflict", conflict.code)
         assertEquals("keep local data", conflicting.readText())
         val corrupt = File(directory, "corrupt.bin")
         File(directory, "${corrupt.name}.download.part").writeBytes(byteArrayOf(0, 0, 0))
