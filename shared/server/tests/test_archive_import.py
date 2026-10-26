@@ -131,7 +131,7 @@ class ArchiveImportApiTest(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.manifest, self.share, self.archive = make_archive(self.root)
         profile = {'dog': self.manifest['dog'], 'profileVersion': self.manifest['dogProfileVersion']}
-        request('PUT', '/v1/dogs/' + self.manifest['dog']['id'], profile)
+        request('PUT', '/v1/dogs/' + self.manifest['dog']['id'] + '/profile-versions/' + self.manifest['dogProfileVersion']['id'], profile)
         self.plan = inspect_archive(self.archive, expected_sha256=hashlib.sha256(self.archive.read_bytes()).hexdigest(),
             recording_id=self.share['recording']['id'], dog_id=self.share['profile']['id'],
             source_id='synthetic:test', staging=self.root / 'staging', reserve_bytes=0)
