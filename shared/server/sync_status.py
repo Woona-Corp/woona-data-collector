@@ -19,6 +19,16 @@ def iso(value):
     return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
+def calibration_status(sync, artifacts=()) -> dict:
+    """A legacy numeric offset is not proof that calibration was measured."""
+    value = sync.get('calibration_offset_ns')
+    from server.alignment import verified_alignment
+    measured = value is not None and sync.get('sensor_clock_quality') == 'calibrated' and verified_alignment(sync, artifacts) is not None
+    return {'measured': measured, 'offsetNs': value if measured else None,
+            'reason': 'hash_bound_calibration_verified' if measured else 'not_measured_in_source',
+            'compatibilityPlaceholder': value is None}
+
+
 def artifact_status(row, storage_root: Path) -> dict:
     """HEAD-compatible acknowledged offset, without hashing large files on every poll."""
     expected = row['expected_size_bytes']
