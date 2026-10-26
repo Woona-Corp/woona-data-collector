@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
 from server.eligibility import activity_exclusion_reasons
+from server.video_presentation import presentation_for_video
 
 def file_url(relative: str) -> str:
     return "/data/local-files/?d=" + quote(relative, safe="/")
@@ -56,7 +57,7 @@ def app_tasks(database_url: str) -> list[dict]:
             SELECT r.id, r.started_at, r.dog_id, r.dog_profile_version_id,
                    r.ingest_status, r.capture_status, r.capture_error_code,
                    r.session_questionnaire, v.questionnaire AS dog_questionnaire,
-                   d.number_or_name, rs.alignment, a.artifact_type, a.file_name,
+                   d.number_or_name, rs.alignment, a.id AS artifact_id, a.artifact_type, a.file_name,
                    a.server_relative_path, a.expected_size_bytes, a.sha256
             FROM recordings r JOIN dogs d ON d.id=r.dog_id
             JOIN dog_profile_versions v ON v.id=r.dog_profile_version_id
@@ -88,6 +89,12 @@ def app_tasks(database_url: str) -> list[dict]:
                                   "dog_profile_version_id": str(first["dog_profile_version_id"]),
                                   "dog": first["number_or_name"], "session": questionnaire["sessionLabel"]})
         result[-1]["meta"].update({"dog_questionnaire": first["dog_questionnaire"], "session_questionnaire": questionnaire})
+        video = next(row for row in members if row['artifact_type'] == 'video')
+        presentation = presentation_for_video(recording_id, video['artifact_id'], video['sha256'])
+        if presentation:
+            result[-1]['data']['original_video'] = result[-1]['data']['video']
+            result[-1]['data']['video'] = file_url('woona/' + presentation['relative_path'])
+            result[-1]['meta']['video_presentation'] = presentation
         result[-1]['meta']['alignment'] = first['alignment']
         if first['alignment'] and first['alignment'].get('data_quality'):
             result[-1]['meta']['data_quality'] = first['alignment']['data_quality']
@@ -157,6 +164,23 @@ def _sync_unlocked() -> dict[str, tuple[int, int]]:
     for offset in range(0, len(missing), 50):
         request_json("POST", f"/api/projects/{project_id}/import", missing[offset:offset + 50])
     rows = paged(f"/api/tasks?project={project_id}")
+    by_source = {row['data'].get('source_id'): row for row in rows}
+    for candidate in expected:
+        presentation = candidate['meta'].get('video_presentation')
+        current = by_source.get(candidate['data']['source_id'])
+        if not presentation or not current:
+            continue
+        if (current['data'].get('video') == candidate['data']['video'] and
+                current.get('meta', {}).get('video_presentation') == presentation):
+            continue
+        detail = request_json('GET', f"/api/tasks/{current['id']}/")
+        if detail['data'].get('video') not in (candidate['data']['original_video'], candidate['data']['video']):
+            raise RuntimeError('Presentation change conflicts with current task video')
+        request_json('PATCH', f"/api/tasks/{current['id']}/", {
+            'data': {**detail['data'], 'original_video': candidate['data']['original_video'],
+                     'video': candidate['data']['video']},
+            'meta': {**detail.get('meta', {}), 'video_presentation': presentation},
+        })
     actual = [row["data"].get("source_id") for row in rows]
     if not {item["data"]["source_id"] for item in expected}.issubset(actual):
         raise RuntimeError("import not verified")

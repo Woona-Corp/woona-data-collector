@@ -26,6 +26,13 @@ class DatasetExportTest(unittest.TestCase):
         self.assertNotIn('feature_questionnaire', corrected)
         self.assertFalse(build_dataset([canonical], [task], inventory, project, 'ble')['records'])
         self.assertTrue(build_dataset([canonical], [task], inventory, project)['records'])
+        canonical['meta']['video_presentation'] = {'source_sha256': 'video', 'sha256': 'derived'}
+        with self.assertRaisesRegex(ValueError, 'presentation mismatch'):
+            build_dataset([canonical], [task], inventory, project)
+        task['meta']['video_presentation'] = deepcopy(canonical['meta']['video_presentation'])
+        presented = build_dataset([canonical], [task], inventory, project)['records'][0]
+        self.assertEqual(presented['video_presentation']['sha256'], 'derived')
+        self.assertEqual(next(a['sha256'] for a in presented['artifacts'] if a['artifact_type'] == 'video'), 'video')
         task['meta']['dataset_admission'] = {'status': 'excluded'}
         self.assertFalse(build_dataset([canonical], [task], inventory, project)['records'])
         del task['meta']['dataset_admission']

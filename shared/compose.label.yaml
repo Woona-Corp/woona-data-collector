@@ -66,6 +66,8 @@ services:
       dockerfile: server/Dockerfile
     command: ["python", "-m", "server.label_sync"]
     restart: unless-stopped
+    volumes:
+      - ${WOONA_STORAGE_ROOT_HOST:?set WOONA_STORAGE_ROOT_HOST}:/srv/woona:ro
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-woona}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-woona}
       LABEL_STUDIO_URL: http://label_studio:8080

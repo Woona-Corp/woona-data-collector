@@ -76,6 +76,8 @@ def build_dataset(canonical, tasks, inventory, project, mode='video'):
                 raise ValueError('Label Studio questionnaire mismatch: ' + rid)
         if task['data'].get('video') != data['video']:
             raise ValueError('Label Studio video mismatch: ' + rid)
+        if task.get('meta', {}).get('video_presentation') != meta.get('video_presentation'):
+            raise ValueError('Label Studio video presentation mismatch: ' + rid)
         files = row['artifacts']
         required = {'packet', 'packet_timeline', 'raw', 'diagnostic', 'sync', 'video'}
         if not required <= {a['artifact_type'] for a in files if a['storage_status'] == 'available'}:
@@ -93,6 +95,9 @@ def build_dataset(canonical, tasks, inventory, project, mode='video'):
                         'label_task_id': task['id'], 'annotation_frame_rate': frame_rate(project, task),
                         'segments': spans, 'artifacts': files, 'data_quality': quality})
         records[-1]['alignment'] = proof
+        if meta.get('video_presentation'):
+            records[-1]['video_presentation'] = dict(meta['video_presentation'])
+            records[-1]['video_presentation']['download_url'] = data['video']
         if mode == 'ble':
             for span in records[-1]['segments']:
                 span['sensor_intervals'] = sensor_intervals(span,proof)
@@ -136,6 +141,15 @@ def export(output, mode='video'):
             if checksum != artifact['sha256']:
                 raise ValueError('Checksum mismatch: ' + artifact['id'])
             artifact['download_url'] = 'https://' + os.environ['LABEL_STUDIO_HOST_HEADER'] + '/v1/artifacts/' + artifact['id'] + '/content'
+        presentation = row.get('video_presentation')
+        if presentation:
+            path = (storage / presentation['relative_path']).resolve()
+            if not path.is_relative_to(storage / 'derived') or not path.is_file() or path.stat().st_size != presentation['size_bytes']:
+                raise ValueError('Presentation file missing or wrong size')
+            with path.open('rb') as stream:
+                if hashlib.file_digest(stream, 'sha256').hexdigest() != presentation['sha256']:
+                    raise ValueError('Presentation checksum mismatch')
+            presentation['download_url'] = 'https://' + os.environ['LABEL_STUDIO_HOST_HEADER'] + presentation['download_url']
     output.parent.mkdir(parents=True, exist_ok=True)
     pending = output.with_name(output.name + '.tmp')
     pending.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str)); pending.replace(output)

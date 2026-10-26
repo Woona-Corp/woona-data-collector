@@ -38,3 +38,5 @@ PostgreSQL databases, canonical storage and Label Studio media with SHA-256.
 Restore verification requires database counts, `/v1/integrity`, local-file reads
 and annotation counts. Separate Drive sources and recovered-recording roots
 are no longer part of the runtime.
+
+Verified orientation derivatives and dataset export: [VIDEO_PRESENTATION.md](VIDEO_PRESENTATION.md).
