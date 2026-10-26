@@ -73,6 +73,10 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var uploadSynced = 0
     @Published private(set) var uploadFailed = 0
     @Published private(set) var uploadLastError: String?
+    @Published private(set) var profileUploadPending = 0
+    @Published private(set) var profileUploadFailed = 0
+    @Published private(set) var profileUploadLastError: String?
+    private var syncingProfileVersionIDs: Set<UUID> = []
     @Published private(set) var networkAvailable: Bool?
     @Published private(set) var networkUnmetered: Bool?
     @Published private(set) var connectionCheck = "not_checked"
@@ -85,6 +89,7 @@ final class AppViewModel: ObservableObject {
     private var networkMonitor: NWPathMonitor?
     private let backgroundSchedulingEnabled: Bool
     @Published private(set) var backgroundSyncStatus = "not_requested"
+    @Published private(set) var isBackgroundSyncRunning = false
     @Published private(set) var backgroundSyncError: String?
 
     var backgroundSyncExplanation: String {
@@ -106,10 +111,10 @@ final class AppViewModel: ObservableObject {
         if isAccountOperationRunning { return ru ? "Выполняется операция с аккаунтом или восстановление. Существующие локальные файлы сохраняются." : "An account or restore operation is running. Existing local files are preserved." }
         if networkAvailable == false { return ru ? "Нет интернета. Очередь сохранена; отправка продолжится после подключения." : "No internet. The queue is saved and will resume when connected." }
         if serverWifiOnly && networkUnmetered == false { return ru ? "Отправка ждёт Wi-Fi или сети без тарификации. Подключите её либо отключите ограничение." : "Uploads are waiting for Wi-Fi or an unmetered network. Connect or disable the restriction." }
-        if uploadFailed > 0 { return ru ? "Есть ошибки доставки. Откройте причину в записи; повторите отправку после устранения причины." : "Some transfers failed. Open the recording for its cause; retry after correcting it." }
+        if uploadFailed > 0 || profileUploadFailed > 0 { return ru ? "Есть ошибки доставки. Откройте причину в Настройках или карточке сессии; повторите отправку после устранения причины." : "Some transfers failed. Check its cause in Settings or the session details; retry after correcting it." }
         if !syncingRecordingIDs.isEmpty || uploadingProfileCount > 0 { return ru ? "Обрабатываем очередь: подготовка, передача и проверка целостности. Переданные байты ещё не подтверждают копию." : "Processing the queue: preparation, transfer and integrity checks. Transferred bytes alone do not confirm a verified copy." }
         if uploadRunning > 0 { return ru ? "Сохранены незавершённые передачи. Фоновая задача сейчас не выполняется; проверьте ограничения сети. Данные не считаются загруженными." : "Unfinished transfers are saved. No background job is currently running; check network restrictions. Data is not marked uploaded." }
-        if uploadPending > 0 { return ru ? "Сессии ожидают запуска, анкеты или повтора. Нажмите «Повторить выгрузку». Незавершённая анкета сессии должна быть заполнена." : "Sessions are waiting for their questionnaire, a start or a retry. Use Retry uploads. Complete any unfinished session questionnaire." }
+        if uploadPending > 0 || profileUploadPending > 0 { return ru ? "Анкеты и сессии ожидают запуска или повтора. Нажмите «Повторить выгрузку». Незавершённая анкета сессии должна быть заполнена." : "Profiles and sessions are waiting to start or retry. Use Retry uploads. Complete any unfinished session questionnaire." }
         return ru ? "Локальная очередь пуста. Это не проверка доступности сервера и не статус разметки Label Studio." : "The local queue is empty. This does not verify server availability or Label Studio annotation status."
     }
 
@@ -153,26 +158,38 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    var canSelectAnimal: Bool { activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
+    var canSelectAnimal: Bool { !isBackgroundSyncRunning && activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
     var transferNetworkAllowsWork: Bool {
         networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting
+    }
+
+    // BG launch can precede the first NWPathMonitor callback. Waiting is bounded,
+    // cancellable and never turns an unknown path into an invented connection.
+    func awaitFirstTransferNetwork(timeout: TimeInterval = 24) async -> Bool {
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        while networkAvailable == nil || (serverWifiOnly && networkUnmetered == nil) {
+            guard !Task.isCancelled, Date() < deadline else { return false }
+            do { try await Task.sleep(nanoseconds: 50_000_000) }
+            catch { return false }
+        }
+        return !Task.isCancelled && transferNetworkAllowsWork
     }
 
     func updateTransferNetworkPath(available: Bool, unmetered: Bool) {
         let wasAllowed = transferNetworkAllowsWork
         networkAvailable = available
         networkUnmetered = unmetered
-        if !wasAllowed && transferNetworkAllowsWork { schedulePendingSync() }
+        if !wasAllowed && transferNetworkAllowsWork && !isBackgroundSyncRunning { schedulePendingSync() }
     }
 
     var canChangeAccount: Bool {
-        completeArchiveTask == nil && !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
+        !isBackgroundSyncRunning && completeArchiveTask == nil && !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
         !captureStopInProgress && activeRecording == nil && syncingRecordingIDs.isEmpty &&
         uploadingProfileCount == 0 && scheduledSyncCount == 0 && downloadingRecordingID == nil && removingLocalRecordingID == nil
     }
 
     var canChangeNetworkPolicy: Bool {
-        completeArchiveTask == nil && !isAccountOperationRunning && !isRecording && activeRecording == nil &&
+        !isBackgroundSyncRunning && completeArchiveTask == nil && !isAccountOperationRunning && !isRecording && activeRecording == nil &&
         !captureStopInProgress && !isReplayRunning && syncingRecordingIDs.isEmpty && uploadingProfileCount == 0 &&
         downloadingRecordingID == nil && removingLocalRecordingID == nil
     }
@@ -237,10 +254,13 @@ final class AppViewModel: ObservableObject {
     @Published private var syncingRecordingIDs = Set<UUID>()
 
     private let questionnaireClientFactory: ((String?) throws -> WoonaServerClient)?
+    private let syncClientFactory: ((String?) throws -> WoonaServerClient)?
 
     init(store: WoonaStore? = try? WoonaStore(), uiTesting: Bool = false,
-         questionnaireClientFactory: ((String?) throws -> WoonaServerClient)? = nil) {
+         questionnaireClientFactory: ((String?) throws -> WoonaServerClient)? = nil,
+         syncClientFactory: ((String?) throws -> WoonaServerClient)? = nil) {
         self.questionnaireClientFactory = questionnaireClientFactory
+        self.syncClientFactory = syncClientFactory
         self.backgroundSchedulingEnabled = !uiTesting &&
             ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil && NSClassFromString("XCTestCase") == nil
         self.store = store
@@ -419,6 +439,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func schedulePendingSync() {
+        guard !isBackgroundSyncRunning else { return }
         scheduledSyncCount += 1
         Task {
             defer { scheduledSyncCount -= 1 }
@@ -439,11 +460,15 @@ final class AppViewModel: ObservableObject {
         guard !Task.isCancelled, transferNetworkAllowsWork, !serverToken.isEmpty, let store else { return false }
         do {
             var success = true
+            for profile in try store.pendingProfiles() {
+                guard !Task.isCancelled else { return false }
+                if !(await uploadProfile(profile)) { success = false }
+            }
             for recording in try store.pendingRecordings() {
                 guard !Task.isCancelled else { return false }
                 if !(await sync(recording: recording)) { success = false }
             }
-            reloadRecentRecordings()
+            reloadProfiles()
             return success && !Task.isCancelled
         } catch {
             appendDiagnostic("Pending sync unavailable: \(error.localizedDescription)")
@@ -516,7 +541,16 @@ final class AppViewModel: ObservableObject {
             backgroundSyncError = "Background handler is not registered (com.woona.apps.sync). Foreground uploads remain available."
             return
         }
-        guard !serverToken.isEmpty else { return }
+        guard !serverToken.isEmpty, let store else { return }
+        do {
+            let profiles = try store.pendingProfiles()
+            let recordings = try store.pendingRecordings()
+            guard !profiles.isEmpty || !recordings.isEmpty else { return }
+        } catch {
+            backgroundSyncStatus = "failed"
+            backgroundSyncError = error.localizedDescription
+            return
+        }
         let request = BGProcessingTaskRequest(identifier: Self.backgroundSyncIdentifier)
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
@@ -1190,6 +1224,10 @@ final class AppViewModel: ObservableObject {
             let previousDogID = selectedDogProfile?.id
             let previousAccountID = selectedDogProfile?.accountID
             let allProfiles = try store.profiles()
+            let profileQueue = try store.profileSyncOverview()
+            profileUploadPending = profileQueue.pending
+            profileUploadFailed = profileQueue.failed
+            profileUploadLastError = profileQueue.lastError
             let inventory = try store.localInventory()
             localProfileCount = inventory.profiles; localRecordingCount = inventory.recordings
             hiddenProfileCount = allProfiles.filter { $0.accountID != selectedAccountID }.count
@@ -1241,23 +1279,38 @@ final class AppViewModel: ObservableObject {
     }
 
     private func serverClient(accountID: String?) throws -> WoonaServerClient {
-        try WoonaServerClient(
+        if let syncClientFactory { return try syncClientFactory(accountID) }
+        return try WoonaServerClient(
             configuration: ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: accountID),
             token: serverToken
         )
     }
 
-    private func uploadProfile(_ profile: DogProfile) async {
-        guard !serverToken.isEmpty, let store else { return }
+    @discardableResult
+    private func uploadProfile(_ profile: DogProfile) async -> Bool {
+        guard !Task.isCancelled, transferNetworkAllowsWork, !serverToken.isEmpty, let store,
+              !syncingProfileVersionIDs.contains(profile.profileVersionID) else {
+            if !Task.isCancelled { scheduleBackgroundSync() }
+            return false
+        }
         uploadingProfileCount += 1
-        defer { uploadingProfileCount -= 1 }
+        syncingProfileVersionIDs.insert(profile.profileVersionID)
+        defer {
+            uploadingProfileCount -= 1
+            syncingProfileVersionIDs.remove(profile.profileVersionID)
+            reloadProfiles()
+            if !Task.isCancelled { scheduleBackgroundSync() }
+        }
         do {
-            let revision = try await serverClient(accountID: profile.accountID).upload(profile: profile, store: store)
-            try store.setServerRevision(dogID: profile.id, revision: revision)
-            reloadProfiles(selecting: profile.id)
+            _ = try await serverClient(accountID: profile.accountID).upload(profile: profile, store: store)
+            let state = try store.profileSyncState(versionID: profile.profileVersionID)
+            return !Task.isCancelled && state == "synced"
         } catch {
-            let explanation = recordingUploadErrorText(error.localizedDescription, language: selectedLanguage)
-            showError(explanation == error.localizedDescription ? "Profile upload failed" : explanation, error: error)
+            if !Task.isCancelled {
+                let explanation = recordingUploadErrorText(error.localizedDescription, language: selectedLanguage)
+                showError(explanation == error.localizedDescription ? "Profile upload failed" : explanation, error: error)
+            }
+            return false
         }
     }
 
@@ -1393,6 +1446,24 @@ final class AppViewModel: ObservableObject {
         return false
     }
 
+    func performBackgroundSync(networkTimeout: TimeInterval = 24) async -> Bool {
+        guard !isBackgroundSyncRunning else { return false }
+        isBackgroundSyncRunning = true
+        defer { isBackgroundSyncRunning = false }
+        backgroundSyncStatus = "running"
+        let networkAllowed = await awaitFirstTransferNetwork(timeout: networkTimeout)
+        let canRun = networkAllowed && syncingRecordingIDs.isEmpty && uploadingProfileCount == 0 &&
+            scheduledSyncCount == 0 && !isAccountOperationRunning
+        let success: Bool
+        if canRun { success = await resumePendingSync() }
+        else { success = false }
+        scheduleBackgroundSync()
+        if backgroundSyncStatus != "failed" {
+            backgroundSyncStatus = success && !Task.isCancelled ? "completed" : "incomplete"
+        }
+        return success && !Task.isCancelled
+    }
+
     // Called once by the real app entry point, never by AppViewModel initialization.
     func registerBackgroundSync() {
         guard backgroundSchedulingEnabled else { backgroundSyncStatus = "disabled"; return }
@@ -1402,20 +1473,7 @@ final class AppViewModel: ObservableObject {
                     guard let task = task as? BGProcessingTask else { task.setTaskCompleted(success: false); return }
                     let operation = BackgroundSyncExecution.start(work: {
                         guard let owner = BackgroundSyncRegistration.shared.owner else { return false }
-                        owner.backgroundSyncStatus = "running"
-                        // Do not claim completion for unrelated foreground operations
-                        // that this task does not own or await.
-                        let canRun = owner.syncingRecordingIDs.isEmpty && owner.uploadingProfileCount == 0 &&
-                            owner.scheduledSyncCount == 0 && !owner.isAccountOperationRunning
-                        let success: Bool
-                        if canRun { success = await owner.resumePendingSync() }
-                        else { success = false }
-                        // A fresh request is only permission to run again, not proof of execution.
-                        owner.scheduleBackgroundSync()
-                        if owner.backgroundSyncStatus != "failed" {
-                            owner.backgroundSyncStatus = success && !Task.isCancelled ? "completed" : "incomplete"
-                        }
-                        return success
+                        return await owner.performBackgroundSync()
                     }, completion: { task.setTaskCompleted(success: $0) })
                     task.expirationHandler = { operation.cancel() }
                 }

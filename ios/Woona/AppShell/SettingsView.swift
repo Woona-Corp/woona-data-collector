@@ -59,6 +59,12 @@ struct SettingsView: View {
 
                 AppCard(title: appState.selectedLanguage == .russian ? "Серверное хранилище" : "Server storage") {
                     Text(appState.uploadQueueExplanation).font(.footnote)
+                    Text(russian ? "Анкеты: \(appState.profileUploadPending) ожидают · \(appState.profileUploadFailed) ошибок" : "Profiles: \(appState.profileUploadPending) waiting · \(appState.profileUploadFailed) failed").font(.footnote)
+                    if let error = appState.profileUploadLastError {
+                        DisclosureGroup(russian ? "Ошибка отправки анкеты" : "Profile upload error") {
+                            Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                        }
+                    }
                     Text(appState.backgroundSyncExplanation).font(.footnote)
                     if let error = appState.backgroundSyncError {
                         DisclosureGroup(russian ? "Подробности фонового запуска" : "Background scheduling details") {
