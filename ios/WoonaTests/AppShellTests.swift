@@ -220,7 +220,7 @@ final class AppShellTests: XCTestCase {
             return XCTFail("Revision conflicts must retain their own recovery path")
         }
         XCTAssertEqual(status, 409)
-        XCTAssertEqual(message, "Reload revision")
+        XCTAssertEqual(message, "revision_conflict: Reload revision")
         guard case .requestFailed(500, _) = ServerSyncError.responseError(status: 500,
                 data: Data(#"{"code":"animal_id_already_exists"}"#.utf8)) else {
             return XCTFail("Server failures must not be treated as identity conflicts")

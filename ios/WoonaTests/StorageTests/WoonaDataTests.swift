@@ -283,6 +283,11 @@ final class WoonaDataTests: XCTestCase {
             id = record.id
             try store.finalize(recording: record, status: "failed", files: [], syncJSON: Data(#"{"captureErrorCode":"gatt_error","captureErrorMessage":"GATT status 8"}"#.utf8))
             try store.updateRecordingSync(id, state: "synced")
+            XCTAssertEqual(try store.recording(id: id)?.serverSyncState, "pending", "Unverified artifacts must never produce a confirmed upload")
+            for artifact in try store.artifacts(recordingID: id) {
+                try store.updateArtifactProgress(artifact.id, uploadedBytes: artifact.sizeBytes, state: "available")
+            }
+            try store.updateRecordingSync(id, state: "synced")
         }
         let reopened = try WoonaStore(rootDirectory: root)
         let record = try XCTUnwrap(reopened.recording(id: id))
