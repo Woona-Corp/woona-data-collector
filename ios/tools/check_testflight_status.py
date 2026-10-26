@@ -90,7 +90,8 @@ def main():
                 report = {'version': version, 'build_number': build_number, 'build_id': build['id'],
                     'processing_state': attrs.get('processingState'), 'expired': attrs.get('expired'),
                     'internal_build_state': detail.get('internalBuildState'),
-                    'external_build_state': detail.get('externalBuildState'), 'groups': groups,
+                    'external_build_state': detail.get('externalBuildState'),
+                    'auto_notify_enabled': detail.get('autoNotifyEnabled'), 'groups': groups,
                     'available_groups': available_groups, 'physical_installation_verified': False}
                 print(json.dumps(report), flush=True)
                 if attrs.get('processingState') == 'VALID':
