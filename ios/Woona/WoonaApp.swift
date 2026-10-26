@@ -32,6 +32,11 @@ struct WoonaApp: App {
                     try? Data("Synthetic UI history fixture".utf8).write(to: file)
                     try? store.finalize(recording: recording, status: "failed", files: [("packet", file, "packets.bin", "application/octet-stream")],
                                         syncJSON: Data(#"{"captureErrorCode":"gatt_error","captureErrorMessage":"GATT status 8"}"#.utf8))
+                    // This synthetic history represents a confirmed upload. Match
+                    // the real invariant instead of forcing a false synced label.
+                    for artifact in (try? store.artifacts(recordingID: recording.id)) ?? [] {
+                        try? store.updateArtifactProgress(artifact.id, uploadedBytes: artifact.sizeBytes, state: "available")
+                    }
                     try? store.updateRecordingSync(recording.id, state: "synced")
                 }
             }
