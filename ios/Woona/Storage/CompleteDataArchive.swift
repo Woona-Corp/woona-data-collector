@@ -113,14 +113,17 @@ struct CompleteDataArchive: Sendable {
             guard FileManager.default.fileExists(atPath: root.directory.path) else { continue }
             let base = root.directory.resolvingSymlinksInPath().standardizedFileURL
             guard try root.directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { throw completeArchiveError("Symbolic data root is not exportable") }
-            func visit(_ directory: URL) throws {
+            // FileManager can return /private/var URLs for a /var source on Apple
+            // platforms. Derive entry names from directory components, never from
+            // the character length of a differently normalized absolute prefix.
+            func visit(_ directory: URL, prefix: String = "") throws {
                 for child in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]).sorted(by: { $0.path < $1.path }) {
-                    let relative = String(child.path.dropFirst(base.path.count + 1))
+                    let relative = prefix + child.lastPathComponent
                     if root.prefix == "data/Woona", ["woona.sqlite", "woona.sqlite-wal", "woona.sqlite-shm", "woona.sqlite-journal"].contains(relative) { continue }
                     if root.legacyOnly && !Self.legacyData(relative) { continue }
                     let properties = try child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
                     guard properties.isSymbolicLink != true, child.resolvingSymlinksInPath().path.hasPrefix(base.path + "/") else { throw completeArchiveError("Symbolic link or escaping path is not exportable: \(relative)") }
-                    if properties.isDirectory == true { try visit(child) }
+                    if properties.isDirectory == true { try visit(child, prefix: relative + "/") }
                     else { values.append(try source(name: root.prefix + "/" + Self.portablePath(relative), url: child, sourcePath: root.prefix + "/" + relative)) }
                 }
             }

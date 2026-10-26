@@ -297,7 +297,7 @@ final class WoonaDataTests: XCTestCase {
         let local = try store.createRecording(profile: dog, source: "live", questionnaire: completeSession())
         let packet = store.directory(for: local).appendingPathComponent("packets.bin")
         try Data("packet data".utf8).write(to: packet)
-        try store.finalize(recording: local, status: "failed", files: [("packet", packet, "application/octet-stream")], syncJSON: Data("{}".utf8))
+        try store.finalize(recording: local, status: "failed", files: [("packet", packet, "packets.bin", "application/octet-stream")], syncJSON: Data("{}".utf8))
         let saved = try XCTUnwrap(store.recording(id: local.id))
         let remote = ServerRecordingDetail(id: saved.id, dogId: dog.id,
             profileVersion: .init(id: dog.profileVersionID, schemaVersion: dog.questionnaire.schemaVersion, validationState: "complete", questionnaire: dog.questionnaire,

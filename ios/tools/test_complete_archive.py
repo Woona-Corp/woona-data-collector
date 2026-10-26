@@ -141,6 +141,10 @@ class CompleteArchiveCompatibilityTests(unittest.TestCase):
         self.run_export()
         with zipfile.ZipFile(self.base / "out.zip") as archive:
             self.assertIsNone(archive.testzip())
+            self.assertEqual(set(archive.namelist()), {
+                "manifest.json", "data/Woona/woona.sqlite", "data/Woona/ble_dump_old.bin",
+                "data/Woona/reference-ECG%3A 100%25.csv", "data/Woona/recordings/собака/video.mp4.part",
+            })
             self.assertEqual(archive.read("data/Woona/reference-ECG%3A 100%25.csv"), b"reference")
             self.assertEqual(archive.read("data/Woona/recordings/собака/video.mp4.part"), payload)
             manifest = json.loads(archive.read("manifest.json"))

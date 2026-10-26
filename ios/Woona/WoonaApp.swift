@@ -30,7 +30,7 @@ struct WoonaApp: App {
                 if let recording = try? store.createRecording(profile: dog, source: "live", questionnaire: questionnaire) {
                     let file = store.directory(for: recording).appendingPathComponent("packets.bin")
                     try? Data("Synthetic UI history fixture".utf8).write(to: file)
-                    try? store.finalize(recording: recording, status: "failed", files: [("packet", file, "application/octet-stream")],
+                    try? store.finalize(recording: recording, status: "failed", files: [("packet", file, "packets.bin", "application/octet-stream")],
                                         syncJSON: Data(#"{"captureErrorCode":"gatt_error","captureErrorMessage":"GATT status 8"}"#.utf8))
                     try? store.updateRecordingSync(recording.id, state: "synced")
                 }
