@@ -358,6 +358,9 @@ class MainActivity : ComponentActivity() {
                         onServerRestore = ::restoreServerData,
                         onServerCheck = ::checkServerConnection,
                         onDisconnect = ::stopSession,
+                        onV2Discovery = deviceFeatureController::onV2DiscoveryRequested,
+                        onV2LiveStart = deviceFeatureController::onV2LiveStartRequested,
+                        onV2LiveStop = deviceFeatureController::onV2LiveStopRequested,
                         onSensorSelect = deviceFeatureController::onSensorSelected,
                         onChannelSelect = deviceFeatureController::onChannelSelected,
                         onChartWindowSelect = deviceFeatureController::onChartWindowSelected,
@@ -653,7 +656,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleCapture() {
-        when (deviceFeatureController.uiState.videoState) {
+        val state = deviceFeatureController.uiState
+        if (state.v2DiscoveryRequested) {
+            if (!state.v2Ready) {
+                deviceFeatureController.showErrorOnMainThread(
+                    "V2 is not ready: complete HELLO / STREAMS / STATUS first"
+                )
+            } else if (state.v2LiveRunning) {
+                deviceFeatureController.onV2LiveStopRequested()
+            } else {
+                deviceFeatureController.onV2LiveStartRequested()
+            }
+            return
+        }
+        when (state.videoState) {
             VideoCaptureState.STARTING,
             VideoCaptureState.RECORDING,
             VideoCaptureState.DEGRADED,

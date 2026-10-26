@@ -102,6 +102,9 @@ fun DeviceOverviewScreen(
     onStartScan: () -> Unit,
     onConnect: (String) -> Unit,
     onDisconnect: () -> Unit,
+    onV2Discovery: () -> Unit = {},
+    onV2LiveStart: () -> Unit = {},
+    onV2LiveStop: () -> Unit = {},
     showReplayAction: Boolean,
     onReplayRequest: () -> Unit,
     profileContent: @Composable () -> Unit = {},
@@ -155,8 +158,56 @@ fun DeviceOverviewScreen(
             }
         }
 
+        // V2 controls live by the main Start session action in ProfilesOverview.
+
         item {
             EventLogSection(uiState = uiState)
+        }
+    }
+}
+
+/** Explicit V2 diagnostic flow: never confuse preview with a persisted recording. */
+@Composable
+private fun V2LivePreviewCard(
+    uiState: DeviceUiState,
+    onDiscovery: () -> Unit,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+) {
+    Card(colors = appCardColors()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Woona V2 (diagnostic preview)", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "V2 preview is not yet saved or uploaded. Switching to V2 ends Legacy output until disconnect.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            when {
+                !uiState.v2DiscoveryRequested -> Button(onClick = onDiscovery) {
+                    Text("Switch to V2")
+                }
+                uiState.v2DiscoveryError != null -> {
+                    Text(uiState.v2DiscoveryError, color = MaterialTheme.colorScheme.error)
+                    Text("Disconnect, reset the F405 test device, then reconnect to retry.",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                !uiState.v2Ready -> Text("Negotiating HELLO / STREAMS / STATUS…")
+                uiState.v2LiveRunning -> OutlinedButton(onClick = onStop) {
+                    Text("Stop V2 preview")
+                }
+                else -> Button(onClick = onStart, enabled = uiState.v2StreamMask and 3L != 0L) {
+                    Text("Start V2 IMU preview")
+                }
+            }
+            if (uiState.v2Ready) {
+                Text(
+                    "V2 streams: 0x${uiState.v2StreamMask.toString(16)}  ·  " +
+                        "blocks: ${uiState.v2PreviewBlocks}  ·  gaps: ${uiState.v2SequenceGaps}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }
@@ -1442,7 +1493,13 @@ private fun ChartFullscreenControls(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                listOf("T" to 1, "AXL" to 2, "GIR" to 3, "MIC" to 4).forEach { (label, sensorType) ->
+                val sensorItems = if (uiState.v2Ready) {
+                    listOf("AXL" to 2, "GIR" to 3, "MIC" to 4,
+                        "AMB" to 5, "PZ" to 6).filter { (_, type) ->
+                        uiState.v2StreamMask and (1L shl (type - 2)) != 0L
+                    }
+                } else listOf("T" to 1, "AXL" to 2, "GIR" to 3, "MIC" to 4)
+                sensorItems.forEach { (label, sensorType) ->
                     FullscreenControlButton(
                         text = label,
                         selected = uiState.selectedSensorType == sensorType,
@@ -1757,7 +1814,12 @@ private fun SensorSelector(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
             ) {
-                val sensors = listOf("T" to 1, "AXL" to 2, "GIR" to 3, "MIC" to 4)
+                val sensors = if (uiState.v2Ready) {
+                    listOf("AXL" to 2, "GIR" to 3, "MIC" to 4,
+                        "AMB" to 5, "PZ" to 6).filter { (_, type) ->
+                        uiState.v2StreamMask and (1L shl (type - 2)) != 0L
+                    }
+                } else listOf("T" to 1, "AXL" to 2, "GIR" to 3, "MIC" to 4)
                 sensors.forEach { (name, type) ->
                     FilterChip(
                         selected = uiState.selectedSensorType == type,
@@ -2293,6 +2355,9 @@ object DeviceScreenEntryPoint {
         onStartScan: () -> Unit,
         onConnect: (String) -> Unit,
         onDisconnect: () -> Unit,
+        onV2Discovery: () -> Unit = {},
+        onV2LiveStart: () -> Unit = {},
+        onV2LiveStop: () -> Unit = {},
         showReplayAction: Boolean,
         onReplayRequest: () -> Unit,
         profileContent: @Composable () -> Unit = {},
@@ -2303,6 +2368,9 @@ object DeviceScreenEntryPoint {
             onStartScan = onStartScan,
             onConnect = onConnect,
             onDisconnect = onDisconnect,
+            onV2Discovery = onV2Discovery,
+            onV2LiveStart = onV2LiveStart,
+            onV2LiveStop = onV2LiveStop,
             showReplayAction = showReplayAction,
             onReplayRequest = onReplayRequest,
             profileContent = profileContent,

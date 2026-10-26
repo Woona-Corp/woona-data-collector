@@ -71,6 +71,9 @@ enum class ExportPhase(
     PACKAGING_ARCHIVE(R.string.export_phase_packaging_archive),
 }
 
+/** Destination of the next V2 session. STORAGE is not yet integrated into Android export. */
+enum class V2RecordingTarget { LIVE, STORAGE }
+
 enum class VideoCaptureState {
     IDLE,
     WAITING_FOR_SENSOR,
@@ -95,6 +98,16 @@ data class DeviceUiState(
     val isReplayRunning: Boolean = false,
     val isScanning: Boolean = false,
     val isConnected: Boolean = false,
+    val v2DiscoveryRequested: Boolean = false,
+    val v2DiscoveryError: String? = null,
+    val v2Ready: Boolean = false,
+    val v2StreamMask: Long = 0,
+    val v2Capabilities: Long = 0L,
+    val v2SelectedStreamMask: Long = 0L,
+    val v2RecordingTarget: V2RecordingTarget = V2RecordingTarget.LIVE,
+    val v2LiveRunning: Boolean = false,
+    val v2PreviewBlocks: Long = 0,
+    val v2SequenceGaps: Long = 0,
     val packetsReceived: Long = 0L,
     val packetsLost: Long = 0L,
     val packetsRejected: Long = 0L,
@@ -166,6 +179,85 @@ class DeviceUiStateHolder {
         uiState = uiState.copy(transportProfile = profile)
     }
 
+    fun onV2DiscoveryRequested() {
+        uiState = uiState.copy(
+            v2DiscoveryRequested = true,
+            v2DiscoveryError = null,
+            v2Ready = false,
+            v2StreamMask = 0L,
+            errorMessage = null,
+        )
+    }
+
+    fun onV2DiscoveryReady(streamMask: Long, capabilities: Long) {
+        val defaultMask = (streamMask and 0x03L).takeIf { it != 0L }
+            ?: java.lang.Long.lowestOneBit(streamMask)
+        uiState = uiState.copy(
+            v2DiscoveryRequested = true,
+            v2DiscoveryError = null,
+            v2Ready = true,
+            v2StreamMask = streamMask,
+            v2Capabilities = capabilities,
+            v2SelectedStreamMask = defaultMask,
+            v2RecordingTarget = V2RecordingTarget.LIVE,
+            errorMessage = null,
+        )
+    }
+
+    fun onV2DiscoveryFailed(reason: String) {
+        // HELLO may already have switched the firmware; never offer automatic
+        // fallback to Legacy on this connection.
+        uiState = uiState.copy(
+            v2DiscoveryRequested = true,
+            v2DiscoveryError = reason,
+            v2Ready = false,
+            v2LiveRunning = false,
+        )
+    }
+
+    fun selectV2RecordingTarget(target: V2RecordingTarget) {
+        if (uiState.v2LiveRunning) return
+        if (target == V2RecordingTarget.STORAGE && uiState.v2Capabilities and (1L shl 1) == 0L) return
+        uiState = uiState.copy(v2RecordingTarget = target)
+    }
+
+    fun toggleV2Stream(streamId: Int) {
+        if (uiState.v2LiveRunning || streamId !in 1..32) return
+        val bit = 1L shl (streamId - 1)
+        if (uiState.v2StreamMask and bit == 0L) return
+        val next = uiState.v2SelectedStreamMask xor bit
+        if (next == 0L) return // A session requires at least one data stream.
+        uiState = uiState.copy(v2SelectedStreamMask = next)
+    }
+
+    fun onV2LiveStarted() {
+        clearChartHistory()
+        uiState = uiState.copy(
+            v2LiveRunning = true,
+            v2PreviewBlocks = 0L,
+            v2SequenceGaps = 0L,
+            chart = buildChartUiState(uiState.selectedSensorType, uiState.selectedChannel),
+        )
+    }
+
+    fun onV2LiveStopped() {
+        uiState = uiState.copy(v2LiveRunning = false)
+    }
+
+    /** Visual preview only. Persistent V2 recording will use a separate file format. */
+    fun onV2LivePreview(
+        samplesByStream: Map<ChartStreamKey, List<ChartPoint>>,
+        receivedBlocks: Int,
+        sequenceGaps: Int,
+    ) {
+        appendChartSamples(samplesByStream)
+        uiState = uiState.copy(
+            v2PreviewBlocks = uiState.v2PreviewBlocks + receivedBlocks,
+            v2SequenceGaps = uiState.v2SequenceGaps + sequenceGaps,
+            chart = buildChartUiState(uiState.selectedSensorType, uiState.selectedChannel),
+        )
+    }
+
     fun onSessionStateChanged(state: BleSessionState) {
         if (uiState.isReplayPreparing || uiState.isReplayRunning) return
 
@@ -187,6 +279,14 @@ class DeviceUiStateHolder {
                 showCaptureUi = false,
                 isReplayRunning = false,
                 exportPhase = null,
+                v2DiscoveryRequested = false,
+                v2DiscoveryError = null,
+                v2Ready = false,
+                v2StreamMask = 0L,
+                v2Capabilities = 0L,
+                v2SelectedStreamMask = 0L,
+                v2RecordingTarget = V2RecordingTarget.LIVE,
+                v2LiveRunning = false,
             )
         } else {
             updatedState
