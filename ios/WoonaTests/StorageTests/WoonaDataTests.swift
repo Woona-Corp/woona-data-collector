@@ -1106,6 +1106,54 @@ final class WoonaDataTests: XCTestCase {
         } catch ServerSyncError.requestFailed(let status, _) { XCTAssertEqual(status, 409) }
     }
 
+    @MainActor
+    func testImportedServerQuestionnaireConflictPreservesDraftAndLostResponseRetryReconciles() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root); RecordingSyncProtocol.handler = nil }
+        let store = try WoonaStore(rootDirectory: root)
+        let dog = try store.saveProfile(completeDog())
+        let id = UUID()
+        var original = completeSession(); original.videoRequested = false
+        var desired = original; desired.sessionLabel = "My retained draft"
+        let profileJSON = try JSONSerialization.jsonObject(with: WoonaStore.encoder.encode(dog.questionnaire))
+        func detail(_ answers: SessionQuestionnaire, revision: Int) throws -> [String: Any] {
+            ["id": id.uuidString, "dogId": dog.id.uuidString,
+             "profileVersion": ["id": dog.profileVersionID.uuidString, "schemaVersion": 1, "validationState": "complete",
+                "questionnaire": profileJSON, "contentSha256": dog.contentSha256, "clientCreatedAtUtc": dog.createdAtUTC],
+             "source": "replay", "captureStatus": "completed", "ingestStatus": "complete",
+             "startedAtUtc": "2026-10-25T10:00:00Z", "endedAtUtc": NSNull(), "timezone": "UTC",
+             "sessionLabel": answers.sessionLabel, "questionnaireSchemaVersion": 1, "questionnaireValidationState": "complete",
+             "sessionQuestionnaire": try JSONSerialization.jsonObject(with: WoonaStore.sessionQuestionnaireData(answers)),
+             "videoRequested": false, "sync": [:], "artifacts": [], "questionnaireRevision": revision]
+        }
+        let initial = try JSONDecoder().decode(ServerRecordingDetail.self, from: JSONSerialization.data(withJSONObject: detail(original, revision: 1)))
+        XCTAssertTrue(try store.restoreRemoteRecording(initial))
+        let displayed = try XCTUnwrap(store.recording(id: id)); XCTAssertNil(displayed.endedAtUTC)
+        let syncBefore = try store.syncJSON(recordingID: id)
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [RecordingSyncProtocol.self]
+        let client = try WoonaServerClient(configuration: .init(baseURL: "https://sync.test", wifiOnly: false), token: "fixture", sessionConfiguration: configuration)
+        let model = AppViewModel(store: store, uiTesting: true, questionnaireClientFactory: { _ in client })
+        XCTAssertTrue(model.canEditQuestionnaire(displayed))
+        var committed = original; committed.sessionLabel = "Another operator's edit"
+        var reads = 0; var writes = 0
+        RecordingSyncProtocol.handler = { request in
+            if request.httpMethod == "PUT" { writes += 1; return (409, ["code": "questionnaire_revision_conflict"]) }
+            reads += 1; return (200, try detail(committed, revision: 4))
+        }
+        do { try await model.saveSessionQuestionnaire(desired, displayedRecording: displayed); XCTFail("Different server answers need review") }
+        catch let conflict as QuestionnaireRevisionConflict { XCTAssertEqual(conflict.revision, 4); XCTAssertEqual(conflict.questionnaire.sessionLabel, committed.sessionLabel) }
+        XCTAssertEqual(try store.recording(id: id)?.questionnaire, original)
+        XCTAssertEqual(desired.sessionLabel, "My retained draft")
+        // Simulate the previous request committing before its response was lost.
+        committed = desired; committed.savedAtLocal = "server-timestamp"
+        try await model.saveSessionQuestionnaire(desired, displayedRecording: displayed)
+        XCTAssertEqual(reads, 2); XCTAssertEqual(writes, 2)
+        XCTAssertEqual(try store.recording(id: id)?.questionnaire, committed)
+        XCTAssertEqual(try store.recording(id: id)?.questionnaireRevision, 4)
+        XCTAssertNil(try store.recording(id: id)?.endedAtUTC)
+        XCTAssertEqual(try store.syncJSON(recordingID: id), syncBefore, "Revision recovery must not overwrite the original capture manifest")
+    }
+
     private func completeDog() -> DogQuestionnaire {
         var dog = DogQuestionnaire()
         dog.numberOrName = "Rex"

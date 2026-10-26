@@ -440,17 +440,17 @@ struct OverviewView: View {
                             let captureCode = recording.captureErrorCode ?? remote?.captureErrorCode
                             let captureMessage = recording.captureErrorMessage ?? remote?.captureErrorMessage
                             VStack(alignment: .leading, spacing: 8) {
-                                if recording.endedAtUTC != nil {
+                                if ["completed", "failed", "interrupted"].contains(recording.status) {
                                     Button(appState.selectedLanguage == .russian ? "Изменить анкету" : "Edit questionnaire") { editingSession = recording }
                                         .disabled(!appState.canEditQuestionnaire(recording))
                                     if recording.questionnaire?.sessionKind == "heart", recording.questionnaire?.readyForSync == false {
-                                        Button("Заполнить анкету по сердцебиению") { heartRecording = recording }
+                                        Button("Заполнить анкету по сердцебиению") { heartRecording = recording }.disabled(!appState.canEditQuestionnaire(recording))
                                     }
                                     Button("Добавить ЭКГ / ЧСС / интервалы") {
                                         referenceRecording = recording
                                         isReferenceImporterPresented = true
                                     }
-                                    .disabled(recording.serverSyncState == "remote")
+                                    .disabled(recording.serverSyncState == "remote" || !appState.canEditQuestionnaire(recording))
                                 }
                                 VStack(alignment: .leading) {
                                     Text(recording.sessionLabel)
@@ -591,7 +591,7 @@ struct OverviewView: View {
             .navigationBarTitleDisplayMode(.inline)
             .onChange(of: appState.recentRecordings) { _, records in
                 if heartRecording == nil, !isSessionEditorPresented {
-                    heartRecording = records.first { $0.endedAtUTC != nil && $0.questionnaire?.sessionKind == "heart" && $0.questionnaire?.readyForSync == false }
+                    heartRecording = records.first { ["completed", "failed", "interrupted"].contains($0.status) && $0.questionnaire?.sessionKind == "heart" && $0.questionnaire?.readyForSync == false }
                 }
             }
             .confirmationDialog(russian ? "Удалить файлы сессии с устройства?" : "Remove session files from this device?", isPresented: Binding(
@@ -621,18 +621,18 @@ struct OverviewView: View {
             .sheet(item: $editingSession) { recording in
                 if let questionnaire = recording.questionnaire {
                     if questionnaire.schemaVersion == 1 {
-                        LegacySessionQuestionnaireEditor(language: appState.selectedLanguage, source: recording.source, initial: questionnaire) {
-                            appState.saveSessionQuestionnaire($0, displayedRecording: recording)
+                        LegacySessionQuestionnaireEditor(language: appState.selectedLanguage, source: recording.source, initial: questionnaire) { answers, revision in
+                            try await appState.saveSessionQuestionnaire(answers, displayedRecording: recording, expectedRevision: revision)
                         }
                     } else {
-                        SessionQuestionnaireEditor(language: appState.selectedLanguage, source: recording.source, initial: questionnaire) {
-                            appState.saveSessionQuestionnaire($0, displayedRecording: recording)
+                        SessionQuestionnaireEditor(language: appState.selectedLanguage, source: recording.source, initial: questionnaire) { answers, revision in
+                            try await appState.saveSessionQuestionnaire(answers, displayedRecording: recording, expectedRevision: revision)
                         }
                     }
                 }
             }
             .sheet(item: $heartRecording) { recording in
-                HeartQuestionnaireEditor(initial: appState.heartQuestionnaireDraft(recordingID: recording.id)) { appState.saveHeartQuestionnaire($0, recordingID: recording.id) }
+                HeartQuestionnaireEditor(initial: appState.heartQuestionnaireDraft(recordingID: recording.id), language: appState.selectedLanguage) { heart, revision in try await appState.saveHeartQuestionnaire(heart, displayedRecording: recording, expectedRevision: revision) }
             }
             .fileImporter(isPresented: $isReferenceImporterPresented, allowedContentTypes: [.data, .item], allowsMultipleSelection: false) { result in
                 switch result {
@@ -643,7 +643,7 @@ struct OverviewView: View {
             .sheet(isPresented: $isReferenceEditorPresented) {
                 if let url = referenceURL, let recording = referenceRecording {
                     ReferenceAttachmentEditor(url: url) { type, metadata in
-                        appState.attachReference(recordingID: recording.id, type: type, url: url, metadata: metadata)
+                        try await appState.attachReference(recordingID: recording.id, type: type, url: url, metadata: metadata)
                     }
                 }
             }
@@ -690,12 +690,12 @@ struct OverviewView: View {
                 SessionQuestionnaireEditor(
                     language: appState.selectedLanguage,
                     source: pendingReplayURL == nil ? "live" : "replay"
-                ) { questionnaire in
+                ) { questionnaire, _ in
                     if let device = pendingDevice {
-                        appState.connect(to: device, questionnaire: questionnaire)
+                        try appState.connect(to: device, questionnaire: questionnaire)
                     } else if let url = pendingReplayURL {
-                        appState.startReplay(from: url, questionnaire: questionnaire)
-                    }
+                        try appState.startReplay(from: url, questionnaire: questionnaire)
+                    } else { throw WoonaStoreError.invalidData("Устройство или файл больше не выбран / No device or replay file selected") }
                     pendingDevice = nil
                     pendingReplayURL = nil
                 }

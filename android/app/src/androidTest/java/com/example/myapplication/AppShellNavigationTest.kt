@@ -411,11 +411,53 @@ class AppShellNavigationTest {
         checkbox("Аллюр/движение").assertIsOn()
         composeRule.onNodeWithText("Validate and save").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onNodeWithText("java.io.IOException: database unavailable").isDisplayed()
+            composeRule.onNodeWithText("java.io.IOException: database unavailable", substring = true).isDisplayed()
         }
-        composeRule.onNodeWithText("java.io.IOException: database unavailable").assertIsDisplayed()
+        composeRule.onNodeWithText("java.io.IOException: database unavailable", substring = true).assertIsDisplayed()
         composeRule.onNodeWithText("Session questionnaire").assertIsDisplayed()
         composeRule.onNodeWithText("Failure draft").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun asynchronousSessionFailureKeepsDraftAndDisablesDuplicateSaveAndCancel() {
+        val outcome = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var attempts = 0
+        composeRule.setContent { MaterialTheme {
+            SessionQuestionnaireDialog(AppLanguage.ENGLISH, onDismiss = { error("Cannot dismiss in flight") },
+                initial = com.example.myapplication.data.SessionQuestionnaire(schemaVersion = 2, sessionLabel = "Async draft", plannedActivities = listOf("Покой")),
+                onSave = { attempts++; outcome.await() })
+        } }
+        composeRule.onNodeWithText("Validate and save").performClick()
+        composeRule.onNodeWithText("Saving and checking the result…").assertIsDisplayed()
+        composeRule.onNodeWithText("Validate and save").assertIsNotEnabled()
+        composeRule.onNodeWithText("Cancel").assertIsNotEnabled()
+        composeRule.runOnIdle { assertEquals(1, attempts); outcome.completeExceptionally(java.io.IOException("database unavailable")) }
+        composeRule.waitUntil(5_000) { composeRule.onNodeWithText("database unavailable", substring = true).isDisplayed() }
+        composeRule.onNodeWithText("Async draft").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Validate and save").assertIsEnabled()
+    }
+
+    @Test
+    fun revisionConflictCanLoadServerAnswersAndRestoreTheOriginalDraftBeforeRetry() {
+        val original = com.example.myapplication.data.SessionQuestionnaire(schemaVersion = 2, sessionLabel = "My draft", plannedActivities = listOf("Покой"))
+        var saved: com.example.myapplication.data.SessionQuestionnaire? = null
+        var savedRevision: Int? = null
+        composeRule.setContent { MaterialTheme {
+            SessionQuestionnaireDialog(AppLanguage.ENGLISH, onDismiss = {}, initial = original, onSave = {},
+                onSaveAtRevision = { answers, revision ->
+                    if (revision == null) throw com.example.myapplication.sync.QuestionnaireRevisionConflict(original.copy(sessionLabel = "Server version"), 5)
+                    saved = answers; savedRevision = revision
+                })
+        } }
+        composeRule.onNodeWithText("Validate and save").performClick()
+        composeRule.onNodeWithText("HTTP 409:", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Validate and save").assertIsNotEnabled()
+        composeRule.onNodeWithText("Load server answers and retain my draft").performClick()
+        composeRule.onNodeWithText("Server version").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Restore my edits").performClick()
+        composeRule.onNodeWithText("My draft").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Validate and save").performClick()
+        composeRule.runOnIdle { assertEquals("My draft", saved?.sessionLabel); assertEquals(5, savedRevision) }
     }
 
     @Test

@@ -1285,14 +1285,14 @@ class WoonaDatabase(
     fun saveHeartQuestionnaire(recordingId: String, heart: HeartQuestionnaire) {
         require(heart.validate().isValid)
         val recording = requireNotNull(recording(recordingId))
-        require(recording.endedAtUtc != null && recording.questionnaire?.sessionKind == "heart")
+        require(recording.status in setOf(RecordingStatus.COMPLETED, RecordingStatus.FAILED, RecordingStatus.INTERRUPTED) && recording.questionnaire?.sessionKind == "heart")
         saveSessionQuestionnaire(recordingId, recording.questionnaire.copy(heartQuestionnaire = heart))
     }
 
     fun saveSessionQuestionnaire(recordingId: String, questionnaire: SessionQuestionnaire) {
         val recording = requireNotNull(recording(recordingId))
         val original = requireNotNull(recording.questionnaire)
-        require(recording.endedAtUtc != null && recording.serverSyncState != "synced" && recording.serverSyncState != "uploading")
+        require(recording.status in setOf(RecordingStatus.COMPLETED, RecordingStatus.FAILED, RecordingStatus.INTERRUPTED) && recording.serverSyncState != "synced" && recording.serverSyncState != "uploading")
         require(questionnaire.validate().isValid)
         require(original.animalId == questionnaire.animalId && original.videoRequested == questionnaire.videoRequested && original.sessionKind == questionnaire.sessionKind)
         val sync = File(recordingDirectory(recording.relativeDirectory), "sync.json")
@@ -1315,7 +1315,7 @@ class WoonaDatabase(
     fun attachReference(recordingId: String, type: ArtifactType, name: String, input: java.io.InputStream, metadata: ReferenceMetadata) {
         require(type in setOf(ArtifactType.ECG, ArtifactType.HEART_RATE, ArtifactType.RR) && metadata.validate().isValid)
         val recording = requireNotNull(recording(recordingId))
-        require(recording.endedAtUtc != null)
+        require(recording.status in setOf(RecordingStatus.COMPLETED, RecordingStatus.FAILED, RecordingStatus.INTERRUPTED))
         val cleanName = name.map { if (it == '/' || it == '\\' || it.isISOControl()) '_' else it }.joinToString("").ifBlank { "data.bin" }
         val safeName = String(cleanName.toByteArray(Charsets.UTF_8).takeLast(180).toByteArray(), Charsets.UTF_8)
         val target = File(recordingDirectory(recording.relativeDirectory), "reference-${UUID.randomUUID()}-$safeName")

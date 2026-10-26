@@ -32,6 +32,24 @@ class WoonaDatabaseTest {
         assertEquals("permanent_error", history.serverSyncState)
     }
 
+    @Test
+    fun terminalImportedUnknownEndCanEditAndAttachReferenceWithoutInventingEndTime() {
+        val dog = database.saveProfile(completeDogQuestionnaire("Imported"))
+        val original = completeSessionQuestionnaire()
+        val session = database.beginRecording(dog.id, RecordingSource.LIVE, original)
+        database.writableDatabase.execSQL("UPDATE recordings SET status='completed', ended_at_utc=NULL WHERE id=?", arrayOf(session.id))
+        database.saveSessionQuestionnaire(session.id, requireNotNull(database.recording(session.id)?.questionnaire).copy(sessionLabel = "Edited import"))
+        assertEquals("Edited import", database.recording(session.id)?.sessionLabel)
+        assertEquals(null, database.recording(session.id)?.endedAtUtc)
+        val metadata = ReferenceMetadata("Synthetic reference", "2026-10-25T10:00:00Z", "2026-10-25T10:01:00Z", null, null)
+        database.attachReference(session.id, ArtifactType.RR, "fixture.csv", "utc,rr\n0,800\n".byteInputStream(), metadata)
+        assertEquals(1, database.recording(session.id)?.artifacts?.count { it.type == ArtifactType.RR })
+        assertEquals(null, database.recording(session.id)?.endedAtUtc)
+        database.writableDatabase.execSQL("UPDATE recordings SET status='recording' WHERE id=?", arrayOf(session.id))
+        try { database.saveSessionQuestionnaire(session.id, original); throw AssertionError("Active capture must stay protected") }
+        catch (_: IllegalArgumentException) { }
+    }
+
     private fun verifiedLocalAndRemote(): Pair<RecordingSyncRecord, RemoteRecording> {
         val initial = completedPacketRecording("Remove local")
         val full = requireNotNull(database.recordingSyncRecord(initial.id))

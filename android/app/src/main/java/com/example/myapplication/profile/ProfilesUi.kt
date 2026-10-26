@@ -5,6 +5,11 @@ import com.example.myapplication.localization.recordingUploadText
 import com.example.myapplication.localization.recordingSourceText
 import com.example.myapplication.localization.recordingUploadErrorText
 
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
@@ -42,6 +47,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import com.example.myapplication.sync.QuestionnaireRevisionConflict
 import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshots.SnapshotStateMap
@@ -242,12 +250,12 @@ fun ProfilesOverview(
                 val localArtifacts = recording.artifacts.filter { it.localPresence in setOf("local", "both") }
                 val remoteArtifacts = recording.artifacts.filter { it.localPresence == "remote_only" }
                 val dataLabels = recordingDataLabels(recording, language)
-                if (recording.endedAtUtc != null) {
-                    OutlinedButton(onClick = { onEditQuestionnaire(recording) }, enabled = recording.serverSyncState != "uploading") { Text(tr(language, "Edit questionnaire", "Изменить анкету")) }
+                if (recording.status.value in setOf("completed", "failed", "interrupted")) {
+                    OutlinedButton(onClick = { onEditQuestionnaire(recording) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text(tr(language, "Edit questionnaire", "Изменить анкету")) }
                     if (recording.questionnaire?.sessionKind == "heart" && !recording.questionnaire.readyForSync()) {
-                        Button(onClick = { onHeartQuestionnaire(recording.id) }) { Text("Заполнить анкету по сердцебиению") }
+                        Button(onClick = { onHeartQuestionnaire(recording.id) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text("Заполнить анкету по сердцебиению") }
                     }
-                    OutlinedButton(onClick = { onAddReference(recording.id) }) { Text("Добавить ЭКГ / ЧСС / интервалы") }
+                    OutlinedButton(onClick = { onAddReference(recording.id) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text("Добавить ЭКГ / ЧСС / интервалы") }
                 }
                 Text(
                     "${recording.sessionLabel} · ${recordingDisplayTime(recording.startedAtUtc)}",
@@ -943,14 +951,21 @@ private fun QuestionnaireDialog(
     firstErrorKey: String?,
     canDismiss: Boolean,
     onDismiss: () -> Unit,
-    onSave: () -> Unit,
+    onSave: suspend () -> Unit,
+    externalError: String? = null,
+    onReviewedRevision: (Int) -> Unit = {},
+    onUseServerAnswers: ((SessionQuestionnaire) -> Unit)? = null,
+    onRestoreDraft: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     var operationError by rememberSaveable { mutableStateOf<String?>(null) }
+    var isSaving by remember { mutableStateOf(false) }
+    var conflict by remember { mutableStateOf<QuestionnaireRevisionConflict?>(null) }
+    val scope = rememberCoroutineScope()
     Dialog(
-        onDismissRequest = { if (canDismiss) onDismiss() },
+        onDismissRequest = { if (canDismiss && !isSaving) onDismiss() },
         properties = DialogProperties(
-            dismissOnBackPress = canDismiss,
+            dismissOnBackPress = canDismiss && !isSaving,
             dismissOnClickOutside = false,
             // Use native window bounds; Compose 1.7's custom fullscreen measurement can exceed them.
             usePlatformDefaultWidth = true,
@@ -1002,7 +1017,7 @@ private fun QuestionnaireDialog(
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (canDismiss) {
-                            TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
+                            TextButton(onClick = onDismiss, enabled = !isSaving, modifier = Modifier.weight(1f)) {
                                 Text(tr(language, "Cancel", "Отмена"))
                             }
                         }
@@ -1010,20 +1025,45 @@ private fun QuestionnaireDialog(
                             focusManager.clearFocus()
                             keyboard?.hide()
                             operationError = null
-                            runCatching(onSave).onFailure { operationError = it.toString() }
-                        }, modifier = Modifier.weight(1f)) {
+                            isSaving = true
+                            scope.launch {
+                                try { onSave() }
+                                catch (error: QuestionnaireRevisionConflict) { conflict = error }
+                                catch (error: Exception) {
+                                    operationError = tr(language,
+                                        "Save has not been confirmed. Your draft remains open; review the cause and retry.",
+                                        "Сохранение не подтверждено. Черновик остаётся открытым; проверьте причину и повторите.") + "\n" + error.toString()
+                                } finally { isSaving = false }
+                            }
+                        }, enabled = !isSaving && conflict == null, modifier = Modifier.weight(1f)) {
                             Text(tr(language, "Validate and save", "Проверить и сохранить"))
                         }
                     }
-                    operationError?.let { error ->
+                    if (isSaving) Text(tr(language, "Saving and checking the result…", "Сохраняем и проверяем результат…"), modifier = Modifier.testTag("questionnaire.saving"))
+                    conflict?.let { latest ->
+                        Text(tr(language, "HTTP 409: server revision ${latest.revision}. Your draft remains in this window. Review the server answers before choosing a version. Original capture files are preserved.",
+                            "HTTP 409: на сервере версия ${latest.revision}. Ваш черновик остаётся в этом окне. Проверьте ответы сервера перед выбором версии. Исходные файлы записи сохраняются."), color = MaterialTheme.colorScheme.error)
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text(latest.questionnaire.toJson(), modifier = Modifier.heightIn(max = 120.dp).verticalScroll(rememberScrollState()).testTag("questionnaire.serverAnswers"))
+                        }
+                        TextButton(onClick = { onReviewedRevision(latest.revision); conflict = null
+                            operationError = tr(language, "Your edits are retained. Press Save to replace the reviewed server answers.", "Ваши правки оставлены. Нажмите Сохранить, чтобы заменить проверенные ответы сервера.")
+                        }) { Text(tr(language, "Keep my edits for revision ${latest.revision}", "Оставить мои правки для версии ${latest.revision}")) }
+                        onUseServerAnswers?.let { use -> TextButton(onClick = { use(latest.questionnaire); onReviewedRevision(latest.revision); conflict = null; operationError = null }) {
+                            Text(tr(language, "Load server answers and retain my draft", "Загрузить ответы сервера и сохранить мой черновик"))
+                        } }
+                    }
+                    onRestoreDraft?.let { restore -> TextButton(onClick = restore, enabled = !isSaving) { Text(tr(language, "Restore my edits", "Вернуть мои правки")) } }
+                    (operationError ?: externalError)?.let { error ->
                         androidx.compose.foundation.text.selection.SelectionContainer {
                             Text(error, color = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.testTag("questionnaire.saveError"))
                         }
                     }
                 }
+                Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 LazyColumn(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
@@ -1032,6 +1072,9 @@ private fun QuestionnaireDialog(
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { content() }
                         }
                     }
+                }
+                if (isSaving) Box(Modifier.fillMaxSize().clearAndSetSemantics { }.clickable(
+                    interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}))
                 }
             }
         }
@@ -1553,7 +1596,9 @@ fun DogQuestionnaireDialog(
 }
 
 @Composable
-fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onSave: (SessionQuestionnaire) -> Unit, initial: SessionQuestionnaire? = null) {
+fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onSave: suspend (SessionQuestionnaire) -> Unit, initial: SessionQuestionnaire? = null,
+    onSaveAtRevision: (suspend (SessionQuestionnaire, Int?) -> Unit)? = null,
+    externalError: String? = null) {
     val values = rememberSaveable(saver = questionnaireValuesSaver) { mutableStateMapOf<String, String>().apply {
         put("sessionDate", java.time.LocalDate.now().toString())
         put("videoRequested", "yes")
@@ -1570,6 +1615,8 @@ fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onS
         }
     } }
     var errors by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var reviewedRevision by rememberSaveable { mutableStateOf<Int?>(null) }
+    var retainedDraft by rememberSaveable { mutableStateOf<String?>(null) }
     QuestionnaireDialog(
         title = tr(language, "Session questionnaire", "Анкета сессии"),
         subtitle = "Собака связывается с выбранной карточкой. Фактические время и длительность записываются автоматически.",
@@ -1585,8 +1632,22 @@ fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onS
                 sessionKind = values["sessionKind"] ?: "activity",
             )
             errors = result.validate().errors
-            if (errors.isEmpty()) onSave(if (initial == null) result else result.copy(animalId = initial.animalId, videoRequested = initial.videoRequested, sessionKind = initial.sessionKind, heartQuestionnaire = initial.heartQuestionnaire))
+            if (errors.isEmpty()) {
+                val candidate = if (initial == null) result else result.copy(animalId = initial.animalId, videoRequested = initial.videoRequested, sessionKind = initial.sessionKind, heartQuestionnaire = values["reviewedHeart"]?.let { com.example.myapplication.data.sessionQuestionnaireFromJson(it).heartQuestionnaire } ?: initial.heartQuestionnaire)
+                if (onSaveAtRevision != null) onSaveAtRevision(candidate, reviewedRevision) else onSave(candidate)
+            }
         },
+        externalError = externalError,
+        onReviewedRevision = { reviewedRevision = it },
+        onUseServerAnswers = { latest ->
+            retainedDraft = org.json.JSONArray(retainedDraft ?: "[]").put(org.json.JSONObject(values.toMap())).toString()
+            values.loadSessionAnswers(latest); values["reviewedHeart"] = latest.toJson()
+        },
+        onRestoreDraft = if (retainedDraft == null) null else ({
+            val stack = org.json.JSONArray(requireNotNull(retainedDraft)); val saved = stack.getJSONObject(stack.length() - 1); values.clear()
+            saved.keys().forEach { values[it] = saved.getString(it) }
+            retainedDraft = if (stack.length() <= 1) null else org.json.JSONArray((0 until stack.length() - 1).map { stack.getJSONObject(it) }).toString()
+        }),
     ) {
         if (initial == null) Choice(values, "sessionKind", "Вид сессии", listOf("activity" to "Активность", "heart" to "Сердцебиение"), onChange = { if (it == "heart") values["videoRequested"] = "no" })
         Field(values, "sessionLabel", "Номер сессии *", error = errors["sessionLabel"])
@@ -1619,7 +1680,8 @@ fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onS
 }
 
 @Composable
-fun HeartQuestionnaireDialog(language: AppLanguage, initial: HeartQuestionnaire? = null, onDismiss: () -> Unit, onSave: (HeartQuestionnaire) -> Unit) {
+fun HeartQuestionnaireDialog(language: AppLanguage, initial: HeartQuestionnaire? = null, onDismiss: () -> Unit, onSave: suspend (HeartQuestionnaire) -> Unit,
+    onSaveAtRevision: (suspend (HeartQuestionnaire, Int?) -> Unit)? = null) {
     val values = rememberSaveable(saver = questionnaireValuesSaver) { mutableStateMapOf<String, String>().apply {
         initial?.answers?.let { putAll(it) }
         initial?.let { put("acuteHeartRateFactors", it.acuteHeartRateFactors.joinToString(LIST_SEPARATOR)) }
@@ -1630,6 +1692,8 @@ fun HeartQuestionnaireDialog(language: AppLanguage, initial: HeartQuestionnaire?
         initial?.referenceMeasuredAtUtc?.let { put("referenceMeasuredAtUtc", it) }
     } }
     var errors by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var reviewedRevision by rememberSaveable { mutableStateOf<Int?>(null) }
+    var retainedDraft by rememberSaveable { mutableStateOf<String?>(null) }
     QuestionnaireDialog("Анкета по активности и сердцебиению",
         "Опишите состояние собаки и условия записи. Анкета не ставит диагноз и не изменяет карточку собаки. Заполните все обязательные вопросы; если ответ неизвестен, выберите «Неизвестно».",
         language, HEART_OPTIONS.keys.count { !values[it].isNullOrBlank() } to 6, errors.size, errors.keys.firstOrNull(), true, onDismiss, {
@@ -1641,8 +1705,22 @@ fun HeartQuestionnaireDialog(language: AppLanguage, initial: HeartQuestionnaire?
                 referenceMeasuredAtUtc = values.text("referenceMeasuredAtUtc"),
             )
             errors = result.validate().errors
-            if (errors.isEmpty()) onSave(result)
-        }) {
+            if (errors.isEmpty()) { if (onSaveAtRevision != null) onSaveAtRevision(result, reviewedRevision) else onSave(result) }
+        }, onReviewedRevision = { reviewedRevision = it }, onUseServerAnswers = { latest ->
+            retainedDraft = org.json.JSONArray(retainedDraft ?: "[]").put(org.json.JSONObject(values.toMap())).toString()
+            values.clear(); latest.heartQuestionnaire?.let { heart ->
+                values.putAll(heart.answers); values["acuteHeartRateFactors"] = heart.acuteHeartRateFactors.joinToString(LIST_SEPARATOR)
+                heart.knownHeartConditionDetails?.let { values["knownHeartConditionDetails"] = it }
+                heart.heartRelevantMedicationDetails?.let { values["heartRelevantMedicationDetails"] = it }
+                heart.referenceArtifact?.let { values["referenceArtifact"] = it }
+                heart.referenceBpm?.let { values["referenceBpm"] = it.toString() }
+                heart.referenceMeasuredAtUtc?.let { values["referenceMeasuredAtUtc"] = it }
+            }
+        }, onRestoreDraft = if (retainedDraft == null) null else ({
+            val stack = org.json.JSONArray(requireNotNull(retainedDraft)); val saved = stack.getJSONObject(stack.length() - 1); values.clear()
+            saved.keys().forEach { values[it] = saved.getString(it) }
+            retainedDraft = if (stack.length() <= 1) null else org.json.JSONArray((0 until stack.length() - 1).map { stack.getJSONObject(it) }).toString()
+        })) {
         Text("1. Сведения о сердце и препаратах", fontWeight = FontWeight.SemiBold)
         Choice(values, "knownHeartCondition", "1.1. Диагностировал ли ветеринар заболевание сердца или нарушение ритма? *", HEART_OPTIONS.getValue("knownHeartCondition"), errors["knownHeartCondition"])
         if (values["knownHeartCondition"] == "yes") Field(values, "knownHeartConditionDetails", "Какой диагноз? (необязательно)")
@@ -1679,7 +1757,7 @@ private fun MutableMap<String, String>.sheetDouble(key: String): Double? = text(
 
 @Composable
 fun ReferenceAttachmentDialog(language: AppLanguage, fileName: String, onDismiss: () -> Unit,
-    onSave: (com.example.myapplication.data.ArtifactType, com.example.myapplication.data.ReferenceMetadata) -> Unit) {
+    onSave: suspend (com.example.myapplication.data.ArtifactType, com.example.myapplication.data.ReferenceMetadata) -> Unit) {
     val values = rememberSaveable(saver = questionnaireValuesSaver) { mutableStateMapOf<String, String>() }
     var errors by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     QuestionnaireDialog("Добавить контрольную запись", fileName, language, 0 to 4, errors.size, errors.keys.firstOrNull(), true, onDismiss, {
@@ -1696,4 +1774,16 @@ fun ReferenceAttachmentDialog(language: AppLanguage, fileName: String, onDismiss
         Field(values, "notes", "Временная привязка / примечания", error = errors["notes"], singleLine = false)
         Text("Оригинальный файл сохраняется без преобразований. ЧСС без интервалов подходит только для сравнения среднего темпа.")
     }
+}
+
+private fun MutableMap<String, String>.loadSessionAnswers(value: SessionQuestionnaire) {
+    clear()
+    val json = org.json.JSONObject(value.toJson())
+    json.keys().forEach { key ->
+        if (!json.isNull(key)) {
+            val item = json.get(key)
+            put(key, if (item is org.json.JSONArray) (0 until item.length()).joinToString(LIST_SEPARATOR) { item.getString(it) } else item.toString())
+        }
+    }
+    put("videoRequested", if (value.videoRequested) "yes" else "no")
 }

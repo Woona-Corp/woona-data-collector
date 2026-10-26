@@ -897,7 +897,7 @@ final class WoonaStore {
     }
 
     func saveSessionQuestionnaire(recordingID: UUID, questionnaire: SessionQuestionnaire, revision: Int? = nil) throws {
-        guard let recording = try recording(id: recordingID), recording.endedAtUTC != nil,
+        guard let recording = try recording(id: recordingID), ["completed", "failed", "interrupted"].contains(recording.status),
               let original = recording.questionnaire,
               questionnaire.validate().isValid, questionnaire.readyForSync,
               questionnaire.animalId == original.animalId, questionnaire.videoRequested == original.videoRequested,
@@ -916,7 +916,7 @@ final class WoonaStore {
     }
 
     func saveHeartQuestionnaire(recordingID: UUID, heart: HeartQuestionnaire) throws {
-        guard heart.validate().isValid, let recording = try recording(id: recordingID), recording.endedAtUTC != nil,
+        guard heart.validate().isValid, let recording = try recording(id: recordingID), ["completed", "failed", "interrupted"].contains(recording.status),
               var questionnaire = recording.questionnaire, questionnaire.sessionKind == "heart" else {
             throw WoonaStoreError.invalidData("Анкета не заполнена или запись ещё не завершена")
         }
@@ -926,7 +926,7 @@ final class WoonaStore {
 
     func attachReference(recordingID: UUID, type: String, sourceURL: URL, metadata: ReferenceMetadata) throws {
         guard ["ecg", "heart_rate", "rr"].contains(type), metadata.validate().isValid,
-              let recording = try recording(id: recordingID), recording.endedAtUTC != nil, recording.serverSyncState != "remote" else {
+              let recording = try recording(id: recordingID), ["completed", "failed", "interrupted"].contains(recording.status), recording.serverSyncState != "remote" else {
             throw WoonaStoreError.invalidData("Завершите исходную выгрузку и укажите контрольную запись с временной привязкой")
         }
         let access = sourceURL.startAccessingSecurityScopedResource()

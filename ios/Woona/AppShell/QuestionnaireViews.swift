@@ -8,6 +8,73 @@ func questionnaireSaveError(_ error: Error, language: AppLanguage) -> String {
     return prefix + "\n" + error.localizedDescription
 }
 
+// A failed response can follow a committed server save. A retry reconciles answers
+// before treating a revision conflict as a new edit; capture files never change here.
+struct QuestionnaireRevisionConflict: LocalizedError {
+    let questionnaire: SessionQuestionnaire
+    let revision: Int
+    var errorDescription: String? { "HTTP 409: questionnaire_revision_conflict — анкета изменена на сервере / questionnaire changed on the server" }
+}
+
+func questionnaireAnswersMatch(_ lhs: SessionQuestionnaire, _ rhs: SessionQuestionnaire) -> Bool {
+    var left = lhs; var right = rhs
+    left.savedAtLocal = nil; right.savedAtLocal = nil
+    return left == right
+}
+
+@MainActor
+final class QuestionnaireSaveState: ObservableObject {
+    @Published var isSaving = false
+    @Published var error: String?
+    @Published var conflict: QuestionnaireRevisionConflict?
+    @Published var expectedRevision: Int?
+
+    func save(language: AppLanguage, operation: () async throws -> Void) async -> Bool {
+        guard !isSaving else { return false }
+        isSaving = true; error = nil; conflict = nil
+        defer { isSaving = false }
+        do { try await operation(); return true }
+        catch let conflict as QuestionnaireRevisionConflict { self.conflict = conflict; return false }
+        catch {
+            self.error = (language == .russian
+                ? "Сохранение не подтверждено. Черновик остаётся открытым. Проверьте причину и повторите."
+                : "Save has not been confirmed. Your draft remains open. Review the cause and retry.") + "\n" + error.localizedDescription
+            return false
+        }
+    }
+}
+
+private struct QuestionnaireSaveStatus: View {
+    @ObservedObject var state: QuestionnaireSaveState
+    let language: AppLanguage
+    var useServer: ((SessionQuestionnaire) -> Void)? = nil
+    var restoreDraft: (() -> Void)? = nil
+    private var russian: Bool { language == .russian }
+    @ViewBuilder var body: some View {
+        if state.isSaving {
+            ProgressView(russian ? "Сохраняем и проверяем результат…" : "Saving and checking the result…")
+        }
+        if let error = state.error { Text(error).foregroundStyle(.red).textSelection(.enabled).accessibilityIdentifier("questionnaire.saveError") }
+        if let conflict = state.conflict {
+            Text(russian ? "HTTP 409: на сервере уже версия \(conflict.revision). Ваш черновик сохранён в этом окне. Сравните ответы и выберите версию; исходные файлы записи не изменяются." : "HTTP 409: the server has revision \(conflict.revision). Your draft is retained in this window. Compare answers and choose a version; original capture files are preserved.")
+                .foregroundStyle(.red)
+            DisclosureGroup(russian ? "Ответы на сервере" : "Server answers") {
+                Text(String(decoding: (try? WoonaStore.sessionQuestionnaireData(conflict.questionnaire)) ?? Data(), as: UTF8.self)).font(.caption).textSelection(.enabled)
+            }
+            Button(russian ? "Оставить мои правки для версии \(conflict.revision)" : "Keep my edits for revision \(conflict.revision)") {
+                state.expectedRevision = conflict.revision; state.conflict = nil
+                state.error = russian ? "Ваши правки оставлены. Нажмите Сохранить, чтобы заменить проверенные ответы сервера." : "Your edits are retained. Press Save to replace the reviewed server answers."
+            }
+            if let useServer {
+                Button(russian ? "Загрузить ответы сервера и сохранить мой черновик" : "Load server answers and retain my draft") {
+                    useServer(conflict.questionnaire); state.expectedRevision = conflict.revision; state.conflict = nil; state.error = nil
+                }
+            }
+        }
+        if let restoreDraft { Button(russian ? "Вернуть мои правки" : "Restore my edits", action: restoreDraft) }
+    }
+}
+
 private struct LegacyDogQuestionnaireEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft: DogQuestionnaire
@@ -199,12 +266,14 @@ struct LegacySessionQuestionnaireEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft = SessionQuestionnaire()
     @State private var errors: [String: String] = [:]
+    @StateObject private var saveState = QuestionnaireSaveState()
+    @State private var retainedDrafts: [SessionQuestionnaire] = []
     let language: AppLanguage
     let source: String
-    let onSave: (SessionQuestionnaire) -> Void
+    let onSave: (SessionQuestionnaire, Int?) async throws -> Void
     let initial: SessionQuestionnaire?
 
-    init(language: AppLanguage, source: String, initial: SessionQuestionnaire? = nil, onSave: @escaping (SessionQuestionnaire) -> Void) {
+    init(language: AppLanguage, source: String, initial: SessionQuestionnaire? = nil, onSave: @escaping (SessionQuestionnaire, Int?) async throws -> Void) {
         self.language = language
         self.source = source
         self.initial = initial
@@ -216,6 +285,14 @@ struct LegacySessionQuestionnaireEditor: View {
         NavigationStack {
             ScrollViewReader { proxy in
                 Form {
+                    QuestionnaireSaveStatus(state: saveState, language: language,
+                        useServer: { latest in
+                            retainedDrafts.append(draft)
+                            draft = latest
+                        }, restoreDraft: retainedDrafts.isEmpty ? nil : {
+                            if let retainedDraft = retainedDrafts.popLast() { draft = retainedDraft }
+                        })
+
                     Section {
                         ProgressView(value: progress)
                         Toggle(language == .russian ? "Записывать видео" : "Record video", isOn: $draft.videoRequested)
@@ -250,7 +327,7 @@ struct LegacySessionQuestionnaireEditor: View {
                 }
                 .onAppear { if initial == nil && source == "replay" { draft.videoRequested = false } }
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button(language == .russian ? "Отмена" : "Cancel") { dismiss() } }
+                    ToolbarItem(placement: .cancellationAction) { Button(language == .russian ? "Отмена" : "Cancel") { dismiss() }.disabled(saveState.isSaving) }
                     ToolbarItem(placement: .confirmationAction) {
                         Button(language == .russian ? "Продолжить" : "Continue") {
                             var candidate = draft
@@ -266,11 +343,12 @@ struct LegacySessionQuestionnaireEditor: View {
                                 return
                             }
                             draft = candidate
-                            onSave(candidate)
-                            dismiss()
-                        }
+                            Task { if await saveState.save(language: language, operation: { try await onSave(candidate, saveState.expectedRevision) }) { dismiss() } }
+                        }.disabled(saveState.isSaving || saveState.conflict != nil)
                     }
                 }
+                .disabled(saveState.isSaving)
+            .interactiveDismissDisabled(saveState.isSaving)
                 .navigationTitle(language == .russian ? "Анкета сессии" : "Session questionnaire")
             }
         }
@@ -456,13 +534,15 @@ struct SessionQuestionnaireEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft = SessionQuestionnaire()
     @State private var errors: [String: String] = [:]
+    @StateObject private var saveState = QuestionnaireSaveState()
+    @State private var retainedDrafts: [SessionQuestionnaire] = []
     @State private var isHeartEditorPresented = false
     let language: AppLanguage
     let source: String
-    let onSave: (SessionQuestionnaire) -> Void
+    let onSave: (SessionQuestionnaire, Int?) async throws -> Void
     let initial: SessionQuestionnaire?
 
-    init(language: AppLanguage, source: String, initial: SessionQuestionnaire? = nil, onSave: @escaping (SessionQuestionnaire) -> Void) {
+    init(language: AppLanguage, source: String, initial: SessionQuestionnaire? = nil, onSave: @escaping (SessionQuestionnaire, Int?) async throws -> Void) {
         self.language = language
         self.source = source
         self.initial = initial
@@ -473,6 +553,14 @@ struct SessionQuestionnaireEditor: View {
     var body: some View {
         NavigationStack {
             Form {
+                    QuestionnaireSaveStatus(state: saveState, language: language,
+                        useServer: { latest in
+                            retainedDrafts.append(draft)
+                            draft = latest
+                        }, restoreDraft: retainedDrafts.isEmpty ? nil : {
+                            if let retainedDraft = retainedDrafts.popLast() { draft = retainedDraft }
+                        })
+
                 Section("Вид сессии") {
                     Picker("Вид сессии", selection: Binding(get: { draft.sessionKind ?? "activity" }, set: { draft.sessionKind = $0; if $0 == "heart" { draft.videoRequested = false } })) {
                         Text("Активность").tag("activity")
@@ -528,19 +616,22 @@ struct SessionQuestionnaireEditor: View {
             }
             .onAppear { if initial != nil { return }; draft.schemaVersion = 2; draft.plannedActivities = draft.plannedActivities ?? []; draft.surfaces = draft.surfaces ?? []; if source == "replay" { draft.videoRequested = false } }
             .sheet(isPresented: $isHeartEditorPresented) {
-                HeartQuestionnaireEditor(initial: draft.heartQuestionnaire ?? HeartQuestionnaire()) { draft.heartQuestionnaire = $0.normalized() }
+                HeartQuestionnaireEditor(initial: draft.heartQuestionnaire ?? HeartQuestionnaire()) { heart, _ in draft.heartQuestionnaire = heart.normalized() }
             }
             .navigationTitle("Анкета сессии")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.disabled(saveState.isSaving) }
                 ToolbarItem(placement: .confirmationAction) { Button(initial == nil ? "Продолжить" : "Сохранить") {
                     errors = draft.validate().errors
                     if initial != nil && !draft.readyForSync { errors["heartQuestionnaire"] = "Заполните ответы по сердцебиению" }
                     guard errors.isEmpty else { return }
                     draft.savedAtLocal = sheetSavedAt()
-                    onSave(draft); dismiss()
-                } }
+                    let candidate = draft
+                    Task { if await saveState.save(language: language, operation: { try await onSave(candidate, saveState.expectedRevision) }) { dismiss() } }
+                }.disabled(saveState.isSaving || saveState.conflict != nil) }
             }
+            .disabled(saveState.isSaving)
+            .interactiveDismissDisabled(saveState.isSaving)
         }
     }
     private func text(_ key: WritableKeyPath<SessionQuestionnaire, String?>) -> Binding<String> {
@@ -580,12 +671,32 @@ struct HeartQuestionnaireEditor: View {
     @State private var bpm = ""
     @State private var measuredAt = ""
     @State private var errors: [String: String] = [:]
+    @StateObject private var saveState = QuestionnaireSaveState()
+    @State private var retainedDrafts: [HeartQuestionnaire] = []
+    let language: AppLanguage
     let initial: HeartQuestionnaire
-    let onSave: (HeartQuestionnaire) -> Void
+    let onSave: (HeartQuestionnaire, Int?) async throws -> Void
+
+    init(initial: HeartQuestionnaire, language: AppLanguage = .russian,
+         onSave: @escaping (HeartQuestionnaire, Int?) async throws -> Void) {
+        self.initial = initial; self.language = language; self.onSave = onSave
+        _draft = State(initialValue: initial)
+        _bpm = State(initialValue: initial.referenceBpm.map { String($0.bpm) } ?? "")
+        _measuredAt = State(initialValue: initial.referenceBpm?.measuredAtUtc ?? "")
+    }
 
     var body: some View {
+
         NavigationStack {
             Form {
+                    QuestionnaireSaveStatus(state: saveState, language: language,
+                        useServer: { latest in
+                            retainedDrafts.append(draft)
+                            draft = latest.heartQuestionnaire ?? HeartQuestionnaire(); bpm = draft.referenceBpm.map { String($0.bpm) } ?? ""; measuredAt = draft.referenceBpm?.measuredAtUtc ?? ""
+                        }, restoreDraft: retainedDrafts.isEmpty ? nil : {
+                            if let retainedDraft = retainedDrafts.popLast() { draft = retainedDraft; bpm = draft.referenceBpm.map { String($0.bpm) } ?? ""; measuredAt = draft.referenceBpm?.measuredAtUtc ?? "" }
+                        })
+
                 Text("Опишите состояние собаки и условия записи. Анкета не ставит диагноз и не изменяет карточку собаки. Заполните все обязательные вопросы; если ответ неизвестен, выберите «Неизвестно».")
                 Section("1. Сведения о сердце и препаратах") {
                     choice("1.1. Диагностировал ли ветеринар заболевание сердца или нарушение ритма? *", "knownHeartCondition", $draft.knownHeartCondition)
@@ -620,21 +731,19 @@ struct HeartQuestionnaireEditor: View {
                 ForEach(errors.keys.sorted(), id: \.self) { key in Text(errors[key]!).foregroundStyle(.red) }
             }
             .navigationTitle("Анкета по активности и сердцебиению")
-            .onAppear {
-                if draft.referenceMethod == nil {
-                    draft = initial
-                    bpm = initial.referenceBpm.map { String($0.bpm) } ?? ""
-                    measuredAt = initial.referenceBpm?.measuredAtUtc ?? ""
-                }
-            }
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Позже") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Позже") { dismiss() }.disabled(saveState.isSaving) }
                 ToolbarItem(placement: .confirmationAction) { Button("Сохранить") {
                     if draft.referenceMethod?.key == "bpm_only" { draft.referenceBpm = HeartBpm(bpm: Double(bpm.replacingOccurrences(of: ",", with: ".")) ?? .nan, measuredAtUtc: measuredAt) }
                     errors = draft.validate().errors
-                    if errors.isEmpty { onSave(draft.normalized()); dismiss() }
-                } }
+                    if errors.isEmpty {
+                        let candidate = draft.normalized()
+                        Task { if await saveState.save(language: language, operation: { try await onSave(candidate, saveState.expectedRevision) }) { dismiss() } }
+                    }
+                }.disabled(saveState.isSaving || saveState.conflict != nil) }
             }
+            .disabled(saveState.isSaving)
+            .interactiveDismissDisabled(saveState.isSaving)
         }
     }
     private func choice(_ title: String, _ key: String, _ binding: Binding<HeartAnswer?>) -> some View {
@@ -654,12 +763,14 @@ struct ReferenceAttachmentEditor: View {
     @State private var metadata = ReferenceMetadata()
     @State private var offset = ""
     @State private var errors: [String: String] = [:]
+    @StateObject private var saveState = QuestionnaireSaveState()
     let url: URL
-    let onSave: (String, ReferenceMetadata) -> Void
+    let onSave: (String, ReferenceMetadata) async throws -> Void
 
     var body: some View {
         NavigationStack {
             Form {
+                QuestionnaireSaveStatus(state: saveState, language: .russian)
                 Text(url.lastPathComponent)
                 Picker("Тип данных *", selection: $type) {
                     Text("Выберите тип").tag("")
@@ -677,14 +788,19 @@ struct ReferenceAttachmentEditor: View {
             }
             .navigationTitle("Добавить контрольную запись")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.disabled(saveState.isSaving) }
                 ToolbarItem(placement: .confirmationAction) { Button("Добавить") {
                     metadata.offsetFromRecordingMs = offset.isEmpty ? nil : Double(offset.replacingOccurrences(of: ",", with: ".")) ?? .nan
                     errors = metadata.validate().errors
                     if type.isEmpty { errors["type"] = "Выберите тип данных" }
-                    if errors.isEmpty { onSave(type, metadata); dismiss() }
-                } }
+                    if errors.isEmpty {
+                        let candidate = metadata; let selectedType = type
+                        Task { if await saveState.save(language: .russian, operation: { try await onSave(selectedType, candidate) }) { dismiss() } }
+                    }
+                }.disabled(saveState.isSaving) }
             }
+            .disabled(saveState.isSaving)
+            .interactiveDismissDisabled(saveState.isSaving)
         }
     }
 }
