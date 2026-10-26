@@ -220,7 +220,11 @@ final class AppViewModel: ObservableObject {
     private var hasPreparedActiveCapture = false
     @Published private var syncingRecordingIDs = Set<UUID>()
 
-    init(store: WoonaStore? = try? WoonaStore(), uiTesting: Bool = false) {
+    private let questionnaireClientFactory: ((String?) throws -> WoonaServerClient)?
+
+    init(store: WoonaStore? = try? WoonaStore(), uiTesting: Bool = false,
+         questionnaireClientFactory: ((String?) throws -> WoonaServerClient)? = nil) {
+        self.questionnaireClientFactory = questionnaireClientFactory
         self.store = store
         let defaults = UserDefaults.standard
         selectedThemeMode = defaults.string(forKey: "themeMode").flatMap(AppThemeMode.init(rawValue:)) ?? .system
@@ -530,26 +534,23 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func connect(to device: BleDevice, questionnaire: SessionQuestionnaire) {
-        guard !isAccountOperationRunning else { return }
-        guard activeRecording == nil, !captureStopInProgress else { return }
+    func connect(to device: BleDevice, questionnaire: SessionQuestionnaire) throws {
+        guard !isAccountOperationRunning else { throw WoonaStoreError.invalidData("Дождитесь завершения операции аккаунта / Wait for the account operation") }
+        guard activeRecording == nil, !captureStopInProgress else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
         guard let profile = selectedDogProfile, let store else {
-            showError("Select or create a dog profile first", error: nil)
-            return
+            throw WoonaStoreError.invalidData("Выберите или создайте карточку животного / Select or create an animal profile")
         }
-        do {
-            activeRecording = try store.createRecording(profile: profile, source: "live", questionnaire: questionnaire)
-            isCaptureReady = false
-            isRecording = false
-            isCameraDegraded = false
-            cameraCaptureInfo = nil
-            captureErrorCode = nil
-            captureErrorMessage = nil
-            captureStopInProgress = false
-            hasPreparedActiveCapture = false
-            resetCaptureClockAnchor()
-            connect(to: device)
-        } catch { showError("Failed to create recording", error: error) }
+        activeRecording = try store.createRecording(profile: profile, source: "live", questionnaire: questionnaire)
+        isCaptureReady = false
+        isRecording = false
+        isCameraDegraded = false
+        cameraCaptureInfo = nil
+        captureErrorCode = nil
+        captureErrorMessage = nil
+        captureStopInProgress = false
+        hasPreparedActiveCapture = false
+        resetCaptureClockAnchor()
+        connect(to: device)
     }
 
     func disconnect() {
@@ -584,23 +585,20 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func startReplay(from fileURL: URL, questionnaire: SessionQuestionnaire) {
-        guard !isAccountOperationRunning else { return }
-        guard activeRecording == nil, !captureStopInProgress else { return }
+    func startReplay(from fileURL: URL, questionnaire: SessionQuestionnaire) throws {
+        guard !isAccountOperationRunning else { throw WoonaStoreError.invalidData("Дождитесь завершения операции аккаунта / Wait for the account operation") }
+        guard activeRecording == nil, !captureStopInProgress else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
         guard let profile = selectedDogProfile, let store else {
-            showError("Select or create a dog profile first", error: nil)
-            return
+            throw WoonaStoreError.invalidData("Выберите или создайте карточку животного / Select or create an animal profile")
         }
-        do {
-            activeRecording = try store.createRecording(profile: profile, source: "replay", questionnaire: questionnaire)
-            cameraCaptureInfo = nil
-            captureErrorCode = nil
-            captureErrorMessage = nil
-            captureStopInProgress = false
-            hasPreparedActiveCapture = false
-            resetCaptureClockAnchor()
-            startReplay(from: fileURL)
-        } catch { showError("Failed to create replay recording", error: error) }
+        activeRecording = try store.createRecording(profile: profile, source: "replay", questionnaire: questionnaire)
+        cameraCaptureInfo = nil
+        captureErrorCode = nil
+        captureErrorMessage = nil
+        captureStopInProgress = false
+        hasPreparedActiveCapture = false
+        resetCaptureClockAnchor()
+        startReplay(from: fileURL)
     }
 
     func startActiveCapture() {
@@ -1032,31 +1030,39 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func saveSessionQuestionnaire(_ questionnaire: SessionQuestionnaire, displayedRecording: WoonaRecording) {
-        guard canEditQuestionnaire(displayedRecording), let store, let profile = try? store.profile(dogID: displayedRecording.dogID, versionID: displayedRecording.profileVersionID),
-              profile.accountID == selectedAccountID else { return }
+    func saveSessionQuestionnaire(_ questionnaire: SessionQuestionnaire, displayedRecording: WoonaRecording, expectedRevision: Int? = nil) async throws {
+        guard canEditQuestionnaire(displayedRecording), let store,
+              let profile = try store.profile(dogID: displayedRecording.dogID, versionID: displayedRecording.profileVersionID),
+              profile.accountID == selectedAccountID else {
+            throw WoonaStoreError.invalidData("Редактирование временно недоступно: проверьте аккаунт и дождитесь завершения записи/синхронизации / Editing is unavailable; check the account and wait for capture/synchronization")
+        }
         if ["synced", "remote"].contains(displayedRecording.serverSyncState) {
             isAccountOperationRunning = true
-            Task {
-                defer { isAccountOperationRunning = false; schedulePendingSync() }
-                do {
-                    let detail = try await serverClient(accountID: profile.accountID).updateQuestionnaire(
-                        recordingID: displayedRecording.id, questionnaire: questionnaire,
-                        expectedRevision: displayedRecording.questionnaireRevision)
-                    let canonical = try JSONDecoder().decode(SessionQuestionnaire.self, from: JSONEncoder().encode(detail.sessionQuestionnaire))
-                    try store.saveSessionQuestionnaire(recordingID: detail.id, questionnaire: canonical, revision: detail.questionnaireRevision ?? 1)
-                    reloadRecentRecordings()
-                } catch ServerSyncError.requestFailed(409, _) {
-                    showError("Questionnaire changed on the server. Use Restore questionnaire from server, then reopen the editor before saving", error: ServerSyncError.requestFailed(409, "Revision conflict"))
-                } catch { showError("Questionnaire save failed; reopen to retry", error: error) }
-            }
-        } else {
-            guard !syncingRecordingIDs.contains(displayedRecording.id) else { return }
+            defer { isAccountOperationRunning = false; schedulePendingSync() }
+            let client = try questionnaireClientFactory?(profile.accountID) ?? serverClient(accountID: profile.accountID)
+            let canonical: SessionQuestionnaire
+            let revision: Int
             do {
-                try store.saveSessionQuestionnaire(recordingID: displayedRecording.id, questionnaire: questionnaire)
-                reloadRecentRecordings()
-                if let updated = try store.recording(id: displayedRecording.id) { scheduleSync(updated) }
-            } catch { showError("Questionnaire save failed", error: error) }
+                let detail = try await client.updateQuestionnaire(recordingID: displayedRecording.id,
+                    questionnaire: questionnaire, expectedRevision: expectedRevision ?? displayedRecording.questionnaireRevision)
+                canonical = try JSONDecoder().decode(SessionQuestionnaire.self, from: JSONEncoder().encode(detail.sessionQuestionnaire))
+                revision = detail.questionnaireRevision ?? 1
+            } catch ServerSyncError.requestFailed(409, _) {
+                // The previous timed-out PUT may already have committed. Read only;
+                // a different answer set requires an explicit choice in the editor.
+                let latest = try await client.recordingDetail(displayedRecording.id)
+                let answers = try JSONDecoder().decode(SessionQuestionnaire.self, from: JSONEncoder().encode(latest.sessionQuestionnaire))
+                guard questionnaireAnswersMatch(questionnaire, answers) else {
+                    throw QuestionnaireRevisionConflict(questionnaire: answers, revision: latest.questionnaireRevision ?? 1)
+                }
+                canonical = answers; revision = latest.questionnaireRevision ?? 1
+            }
+            try store.saveSessionQuestionnaire(recordingID: displayedRecording.id, questionnaire: canonical, revision: revision)
+            reloadRecentRecordings()
+        } else {
+            try store.saveSessionQuestionnaire(recordingID: displayedRecording.id, questionnaire: questionnaire)
+            reloadRecentRecordings()
+            if let updated = try store.recording(id: displayedRecording.id) { scheduleSync(updated) }
         }
     }
 
@@ -1078,18 +1084,28 @@ final class AppViewModel: ObservableObject {
     }
 
     func canEditQuestionnaire(_ recording: WoonaRecording) -> Bool {
-        removingLocalRecordingID == nil && !isAccountOperationRunning && scheduledSyncCount == 0 && !syncingRecordingIDs.contains(recording.id) && recording.endedAtUTC != nil
+        removingLocalRecordingID == nil && !isAccountOperationRunning && scheduledSyncCount == 0 && !syncingRecordingIDs.contains(recording.id) && activeRecording == nil && !captureStopInProgress && ["completed", "failed", "interrupted"].contains(recording.status)
     }
 
-    func saveHeartQuestionnaire(_ heart: HeartQuestionnaire, recordingID: UUID) {
-        do {
-            guard let store, let recording = try store.recording(id: recordingID), var questionnaire = recording.questionnaire else { return }
-            questionnaire.heartQuestionnaire = heart.normalized()
-            saveSessionQuestionnaire(questionnaire, displayedRecording: recording)
-        } catch { showError("Не удалось сохранить анкету по сердцебиению", error: error) }
+    func saveHeartQuestionnaire(_ heart: HeartQuestionnaire, displayedRecording: WoonaRecording, expectedRevision: Int? = nil) async throws {
+        guard var questionnaire = displayedRecording.questionnaire else {
+            throw WoonaStoreError.invalidData("Исходная анкета сессии отсутствует / The original session questionnaire is missing")
+        }
+        if let expectedRevision {
+            guard let store, let profile = try store.profile(dogID: displayedRecording.dogID, versionID: displayedRecording.profileVersionID),
+                  profile.accountID == selectedAccountID else { throw WoonaStoreError.invalidData("Аккаунт записи изменился / Recording account changed") }
+            let client = try questionnaireClientFactory?(profile.accountID) ?? serverClient(accountID: profile.accountID)
+            let latest = try await client.recordingDetail(displayedRecording.id)
+            let answers = try JSONDecoder().decode(SessionQuestionnaire.self, from: JSONEncoder().encode(latest.sessionQuestionnaire))
+            guard latest.questionnaireRevision == expectedRevision else { throw QuestionnaireRevisionConflict(questionnaire: answers, revision: latest.questionnaireRevision ?? 1) }
+            questionnaire = answers
+        }
+        questionnaire.heartQuestionnaire = heart.normalized()
+        try await saveSessionQuestionnaire(questionnaire, displayedRecording: displayedRecording, expectedRevision: expectedRevision)
     }
 
     func heartQuestionnaireDraft(recordingID: UUID) -> HeartQuestionnaire {
+        if let saved = try? store?.recording(id: recordingID)?.questionnaire?.heartQuestionnaire { return saved }
         let artifacts = (try? store?.artifacts(recordingID: recordingID)) ?? []
         let artifact = artifacts.first { $0.type == "ecg" }
             ?? artifacts.first { $0.type == "rr" && $0.referenceMetadata?.source.localizedCaseInsensitiveContains("polar") == true }
@@ -1102,20 +1118,21 @@ final class AppViewModel: ObservableObject {
         return draft
     }
 
-    func attachReference(recordingID: UUID, type: String, url: URL, metadata: ReferenceMetadata) {
-        guard removingLocalRecordingID == nil, let root = store?.rootDirectory,
-              let recording = try? store?.recording(id: recordingID),
-              let profile = try? store?.profile(dogID: recording.dogID, versionID: recording.profileVersionID),
-              profile.accountID == selectedAccountID else { return }
-        Task {
-            do {
-                try await Task.detached(priority: .userInitiated) {
-                    try WoonaStore(rootDirectory: root).attachReference(recordingID: recordingID, type: type, sourceURL: url, metadata: metadata)
-                }.value
-                reloadRecentRecordings()
-                if let recording = try store?.recording(id: recordingID), recording.questionnaire?.readyForSync != false { await sync(recording: recording) }
-            } catch { showError("Не удалось добавить контрольную запись", error: error) }
+    func attachReference(recordingID: UUID, type: String, url: URL, metadata: ReferenceMetadata) async throws {
+        guard let store, let recording = try store.recording(id: recordingID), canEditQuestionnaire(recording),
+              let profile = try store.profile(dogID: recording.dogID, versionID: recording.profileVersionID),
+              profile.accountID == selectedAccountID else {
+            throw WoonaStoreError.invalidData("Контрольный файл пока нельзя добавить: проверьте аккаунт и завершите запись/синхронизацию / Cannot attach the reference yet; check account and finish capture/synchronization")
         }
+        isAccountOperationRunning = true
+        defer { isAccountOperationRunning = false; schedulePendingSync() }
+        let root = store.rootDirectory
+        try await Task.detached(priority: .userInitiated) {
+            try WoonaStore(rootDirectory: root).attachReference(recordingID: recordingID, type: type, sourceURL: url, metadata: metadata)
+        }.value
+        // The local copy is durable. A later transport failure belongs to the upload
+        // queue and must not make the operator attach the same file a second time.
+        reloadRecentRecordings()
     }
 
     func showAllRecordings() {

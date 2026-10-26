@@ -114,6 +114,52 @@ final class AppShellTests: XCTestCase {
         }
     }
 
+    func testAsyncFormSaveStatePropagatesFailureAndOnlyReportsSuccessAfterCompletion() async {
+        let state = QuestionnaireSaveState()
+        var draft = SessionQuestionnaire(); draft.sessionLabel = "Retained session draft"
+        let failed = await state.save(language: .english) {
+            XCTAssertTrue(state.isSaving)
+            throw WoonaStoreError.invalidData("database unavailable")
+        }
+        XCTAssertFalse(failed); XCTAssertFalse(state.isSaving)
+        XCTAssertTrue(state.error?.contains("database unavailable") == true)
+        XCTAssertTrue(state.error?.contains("Your draft remains open") == true)
+        XCTAssertEqual(draft.sessionLabel, "Retained session draft")
+        let succeeded = await state.save(language: .english) { XCTAssertTrue(state.isSaving) }
+        XCTAssertTrue(succeeded); XCTAssertNil(state.error)
+        let conflicted = await state.save(language: .english) { throw QuestionnaireRevisionConflict(questionnaire: draft, revision: 3) }
+        XCTAssertFalse(conflicted); XCTAssertEqual(state.conflict?.revision, 3)
+        XCTAssertNil(state.expectedRevision, "A conflict must never silently rebase the draft")
+    }
+
+    func testSessionDatabaseFailureRetainsDraftAndTerminalUnknownEndIsSavable() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try WoonaStore(rootDirectory: directory)
+        var animal = DogQuestionnaire(); animal.schemaVersion = 2; animal.animalId = "fixture"; animal.numberOrName = "Synthetic animal"
+        let profile = try store.saveProfile(animal)
+        var original = SessionQuestionnaire(); original.schemaVersion = 2; original.sessionLabel = "Original"; original.plannedActivities = ["Покой"]
+        let created = try store.createRecording(profile: profile, source: "replay", questionnaire: original)
+        try store.markRecording(created.id, status: "completed")
+        let recording = try XCTUnwrap(store.recording(id: created.id))
+        XCTAssertNil(recording.endedAtUTC)
+        let model = AppViewModel(store: store, uiTesting: true)
+        XCTAssertTrue(model.canEditQuestionnaire(recording))
+        var draft = try XCTUnwrap(recording.questionnaire); draft.sessionLabel = "Unsaved session draft"
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        XCTAssertEqual(sqlite3_exec(database, "CREATE TRIGGER fail_session_save BEFORE UPDATE OF questionnaire_json ON recordings BEGIN SELECT RAISE(ABORT, 'Injected session save failure'); END", nil, nil, nil), SQLITE_OK)
+        do { try await model.saveSessionQuestionnaire(draft, displayedRecording: recording); XCTFail("Database failure must reach the form") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Injected session save failure")) }
+        XCTAssertEqual(try store.recording(id: recording.id)?.questionnaire?.sessionLabel, "Original")
+        XCTAssertEqual(draft.sessionLabel, "Unsaved session draft")
+        XCTAssertEqual(sqlite3_exec(database, "DROP TRIGGER fail_session_save", nil, nil, nil), SQLITE_OK)
+        try await model.saveSessionQuestionnaire(draft, displayedRecording: recording)
+        XCTAssertEqual(try store.recording(id: recording.id)?.questionnaire?.sessionLabel, draft.sessionLabel)
+        XCTAssertNil(try store.recording(id: recording.id)?.endedAtUTC, "Editing must not invent a capture end time")
+    }
+
     func testApplyingAccountWithoutServerFiltersLocalDogs() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

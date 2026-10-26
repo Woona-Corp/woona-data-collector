@@ -67,6 +67,12 @@ class RecordingHistoryActionsTest {
         compose.onNodeWithText("Удалить с устройства").performScrollTo().assertIsNotEnabled()
     }
 
+    @Test fun importedTerminalRecordingWithUnknownEndStillShowsQuestionnaireAndReferenceActions() {
+        show("synced", unknownEnd = true)
+        compose.onNodeWithText("Изменить анкету").performScrollTo().assertIsEnabled()
+        compose.onNodeWithText("Добавить ЭКГ / ЧСС / интервалы").performScrollTo().assertIsEnabled()
+    }
+
     @Test fun pendingUploadsCannotBeRemoved() {
         show("pending")
         compose.onNodeWithText("Удалить с устройства").performScrollTo().assertIsNotEnabled()

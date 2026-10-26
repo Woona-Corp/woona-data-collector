@@ -128,6 +128,7 @@ class MainActivity : ComponentActivity() {
     private val referencePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri -> referenceUri = uri }
     private var pendingLiveAddress: String? = null
     private var pendingReplayQuestionnaire: SessionQuestionnaire? = null
+    private var sessionPreparationError by mutableStateOf<String?>(null)
     private var isChartFullscreenActive = false
     private var isStopSessionInProgress = false
     private var isCameraPermissionRequestInProgress = false
@@ -173,9 +174,15 @@ class MainActivity : ComponentActivity() {
     private val replayFilePickerLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri ->
-        if (uri == null) return@registerForActivityResult
-        if (accountBusy) { toast("Дождитесь применения аккаунта"); return@registerForActivityResult }
-        val profileId = selectedProfileId ?: return@registerForActivityResult
+        if (uri == null) {
+            sessionPreparationError = if (selectedLanguage == AppLanguage.RUSSIAN) "Файл не выбран. Черновик сохранён в этом окне; повторите выбор или отмените." else "No file was selected. Your draft remains in this window; select a file again or cancel."
+            return@registerForActivityResult
+        }
+        if (accountBusy || selectedProfileId == null) {
+            sessionPreparationError = if (selectedLanguage == AppLanguage.RUSSIAN) "Не удалось начать воспроизведение: дождитесь операции аккаунта и выберите животное. Черновик остаётся открытым." else "Cannot start replay: wait for the account operation and select an animal. Your draft remains open."
+            return@registerForActivityResult
+        }
+        val profileId = requireNotNull(selectedProfileId)
         val questionnaire = pendingReplayQuestionnaire ?: return@registerForActivityResult
         val recording = runCatching {
             woonaDatabase.beginRecording(
@@ -185,7 +192,8 @@ class MainActivity : ComponentActivity() {
             )
         }.getOrElse {
             Log.e(TAG, "Failed to prepare replay recording", it)
-            deviceFeatureController.showErrorOnMainThread(if (selectedLanguage == AppLanguage.RUSSIAN) "Не удалось создать replay" else "Failed to create replay", it)
+            sessionPreparationError = (if (selectedLanguage == AppLanguage.RUSSIAN) "Не удалось сохранить анкету и создать воспроизведение. Черновик остаётся открытым; повторите выбор файла." else "Failed to save the questionnaire and create replay. Your draft remains open; select the file again.") + "\n" + it.toString()
+            isSessionQuestionnaireVisible = true
             return@registerForActivityResult
         }
         deviceFeatureController.beginRecordingSession(recording)
@@ -202,6 +210,8 @@ class MainActivity : ComponentActivity() {
             }
         }
         pendingReplayQuestionnaire = null
+        sessionPreparationError = null
+        isSessionQuestionnaireVisible = false
     }
 
     private val deviceFeatureController: DeviceFeatureController by lazy {
@@ -489,19 +499,22 @@ class MainActivity : ComponentActivity() {
                     if (isSessionQuestionnaireVisible) {
                         SessionQuestionnaireDialog(
                             language = selectedLanguage,
+                            externalError = sessionPreparationError,
                             onDismiss = {
                                 pendingLiveAddress = null
+                                pendingReplayQuestionnaire = null; sessionPreparationError = null
                                 isSessionQuestionnaireVisible = false
                             },
                             onSave = { questionnaire ->
-                                isSessionQuestionnaireVisible = false
+                                sessionPreparationError = null
                                 val address = pendingLiveAddress
-                                pendingLiveAddress = null
                                 if (address == null) {
                                     pendingReplayQuestionnaire = questionnaire
                                     replayFilePickerLauncher.launch("*/*")
                                 } else {
                                     startLiveRecording(address, questionnaire)
+                                    pendingLiveAddress = null
+                                    isSessionQuestionnaireVisible = false
                                 }
                             },
                         )
@@ -511,16 +524,18 @@ class MainActivity : ComponentActivity() {
                             language = selectedLanguage,
                             initial = editingRecording?.questionnaire?.heartQuestionnaire ?: woonaDatabase.heartQuestionnaireDraft(id),
                             onDismiss = { heartQuestionnaireRecordingId = null; editingRecording = null },
-                            onSave = {
-                                val displayed = editingRecording ?: woonaDatabase.recording(id)
-                                displayed?.questionnaire?.let { q -> saveEditedQuestionnaire(displayed, q.copy(heartQuestionnaire = it)) }
+                            onSave = {},
+                            onSaveAtRevision = { heart, revision ->
+                                val displayed = requireNotNull(editingRecording ?: woonaDatabase.recording(id)) { "Исходная запись больше недоступна / Original recording is unavailable" }
+                                val original = requireNotNull(displayed.questionnaire) { "Исходная анкета отсутствует / Original questionnaire is missing" }
+                                saveEditedQuestionnaire(displayed, original.copy(heartQuestionnaire = heart), revision, heartOnly = true)
                             },
                         )
                     }
                     editingRecording?.takeIf { it.questionnaire?.sessionKind != "heart" }?.let { recording ->
                         SessionQuestionnaireDialog(language = selectedLanguage, initial = recording.questionnaire,
                             onDismiss = { editingRecording = null },
-                            onSave = { saveEditedQuestionnaire(recording, it) })
+                            onSave = {}, onSaveAtRevision = { answers, revision -> saveEditedQuestionnaire(recording, answers, revision) })
                     }
                     referenceUri?.let { uri ->
                         val name = contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
@@ -530,14 +545,18 @@ class MainActivity : ComponentActivity() {
                             onDismiss = { referenceUri = null; referenceRecordingId = null },
                             onSave = { type, metadata ->
                                 val id = requireNotNull(referenceRecordingId)
-                                referenceUri = null
-                                referenceRecordingId = null
-                                backgroundExecutor.execute {
-                                    try {
+                                check(!accountBusy && !deviceFeatureController.isCaptureActive()) { "Дождитесь завершения записи/операции аккаунта / Wait for capture/account operation" }
+                                accountBusy = true
+                                try {
+                                    withContext(Dispatchers.IO) { serverOperationLock.withLock {
+                                        val recording = requireNotNull(woonaDatabase.recording(id))
+                                        check(recording.serverSyncState != "uploading") { "Дождитесь завершения выгрузки / Wait for upload completion" }
+                                        check(woonaDatabase.profile(recording.profileId)?.accountId == serverSettingsStore.get().accountId) { "Аккаунт записи изменился / The recording account changed" }
                                         woonaDatabase.attachReference(id, type, name, requireNotNull(contentResolver.openInputStream(uri)), metadata)
-                                        handleRecordingChanged()
-                                    } catch (error: Exception) { runOnUiThread { Toast.makeText(this, error.message, Toast.LENGTH_LONG).show() } }
-                                }
+                                    } }
+                                    referenceUri = null; referenceRecordingId = null
+                                    handleRecordingChanged()
+                                } finally { accountBusy = false; refreshServerState() }
                             },
                         )
                     }
@@ -664,29 +683,24 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startLiveRecording(address: String, questionnaire: SessionQuestionnaire) {
-        if (accountBusy) { toast("Дождитесь применения аккаунта"); return }
-        val profileId = selectedProfileId ?: return
-        runCatching {
-            val recording = woonaDatabase.beginRecording(
-                profileId = profileId,
-                source = RecordingSource.LIVE,
-                questionnaire = questionnaire,
-            )
-            deviceFeatureController.beginRecordingSession(recording)
-            deviceFeatureController.onConnectRequested(address)
-            if (
-                questionnaire.videoRequested &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-            ) {
-                isCameraPermissionRequestInProgress = true
-                requestCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-            }
-            refreshProfilesAndRecordings()
-        }.onFailure {
-            Log.e(TAG, "Failed to prepare live recording", it)
-            deviceFeatureController.showErrorOnMainThread(if (selectedLanguage == AppLanguage.RUSSIAN) "Не удалось создать запись" else "Failed to create recording", it)
+        check(!accountBusy) { "Дождитесь применения аккаунта / Wait for the account operation" }
+        val profileId = requireNotNull(selectedProfileId) { "Выберите карточку животного / Select an animal profile" }
+        val recording = woonaDatabase.beginRecording(
+            profileId = profileId,
+            source = RecordingSource.LIVE,
+            questionnaire = questionnaire,
+        )
+        deviceFeatureController.beginRecordingSession(recording)
+        deviceFeatureController.onConnectRequested(address)
+        if (
+            questionnaire.videoRequested &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            isCameraPermissionRequestInProgress = true
+            requestCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
+        refreshProfilesAndRecordings()
     }
 
     private fun selectProfile(profileId: String) {
@@ -727,7 +741,7 @@ class MainActivity : ComponentActivity() {
         runOnUiThread {
             refreshProfilesAndRecordings()
             recentRecordings.firstOrNull {
-                it.endedAtUtc != null && it.questionnaire?.sessionKind == "heart" && it.questionnaire.heartQuestionnaire == null
+                it.status.value in setOf("completed", "failed", "interrupted") && it.questionnaire?.sessionKind == "heart" && it.questionnaire.heartQuestionnaire == null
             }?.let { if (heartQuestionnaireRecordingId == null) { editingRecording = it; heartQuestionnaireRecordingId = it.id } }
             ServerSyncScheduler.enqueuePending(applicationContext)
             refreshServerState()
@@ -888,27 +902,41 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun saveEditedQuestionnaire(displayed: com.example.myapplication.data.Recording, questionnaire: SessionQuestionnaire) {
-        val settings = serverSettingsStore.get().copy(accountId = woonaDatabase.profile(displayed.profileId)?.accountId)
-        backgroundExecutor.execute {
-            val result = runCatching { serverOperationLock.withLock {
-                require(woonaDatabase.recording(displayed.id)?.serverSyncState != "uploading") { "Дождитесь завершения выгрузки" }
+    private suspend fun saveEditedQuestionnaire(displayed: Recording, questionnaire: SessionQuestionnaire, revision: Int? = null, heartOnly: Boolean = false) {
+        check(!accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive()) { "Дождитесь завершения записи/операции аккаунта / Wait for capture/account operation" }
+        val settings = serverSettingsStore.get()
+        check(woonaDatabase.profile(displayed.profileId)?.accountId == settings.accountId) { "Аккаунт записи изменился / The recording account changed" }
+        accountBusy = true
+        try {
+            withContext(Dispatchers.IO) { serverOperationLock.withLock {
+                val current = requireNotNull(woonaDatabase.recording(displayed.id))
+                check(current.status.value in setOf("completed", "failed", "interrupted")) { "Сначала завершите запись / Finish capture first" }
+                check(current.serverSyncState != "uploading") { "Дождитесь завершения выгрузки / Wait for upload completion" }
                 if (settings.isConfigured) {
+                    val client = ServerApiClient(settings)
                     try {
-                        woonaDatabase.acceptServerRecording(ServerApiClient(settings).editQuestionnaire(displayed.id, displayed.questionnaireRevision, questionnaire))
+                        val desired = if (heartOnly && revision != null) {
+                            val latest = client.fetchRecording(displayed.id)
+                            val answers = sessionQuestionnaireFromJson(latest.sessionQuestionnaireJson)
+                            if (latest.questionnaireRevision != revision) throw com.example.myapplication.sync.QuestionnaireRevisionConflict(answers, latest.questionnaireRevision)
+                            answers.copy(heartQuestionnaire = questionnaire.heartQuestionnaire)
+                        } else questionnaire
+                        com.example.myapplication.sync.saveQuestionnaireRevision(desired,
+                            update = { client.editQuestionnaire(displayed.id, revision ?: displayed.questionnaireRevision, desired) },
+                            read = { client.fetchRecording(displayed.id) },
+                            persist = { woonaDatabase.acceptServerRecording(it) })
                     } catch (error: com.example.myapplication.sync.ServerHttpException) {
-                        if (error.status != 404 || displayed.serverSyncState == "synced") throw error
+                        if (error.status != 404 || displayed.serverSyncState in setOf("synced", "remote")) throw error
                         woonaDatabase.saveSessionQuestionnaire(displayed.id, questionnaire)
                     }
-                } else woonaDatabase.saveSessionQuestionnaire(displayed.id, questionnaire)
-            }
-            }
-            runOnUiThread {
-                result.onSuccess { editingRecording = null; heartQuestionnaireRecordingId = null; handleRecordingChanged() }
-                    .onFailure { error -> deviceFeatureController.showErrorOnMainThread(if (error is com.example.myapplication.sync.ServerHttpException && error.status == 409)
-                        "Анкета изменена на сервере. Закройте редактор и восстановите данные, затем повторите изменения." else if (selectedLanguage == AppLanguage.RUSSIAN) "Анкета не сохранена. Черновик остается в редакторе; проверьте причину и повторите" else "Questionnaire was not saved. Its draft stays in the editor; review the cause and retry", error) }
-            }
-        }
+                } else {
+                    check(displayed.serverSyncState !in setOf("synced", "remote")) { "Для изменения серверной анкеты укажите адрес и токен / Configure server URL and token to edit the server questionnaire" }
+                    woonaDatabase.saveSessionQuestionnaire(displayed.id, questionnaire)
+                }
+            } }
+            editingRecording = null; heartQuestionnaireRecordingId = null
+            handleRecordingChanged()
+        } finally { accountBusy = false; refreshServerState() }
     }
 
     private fun restoreServerData() {
