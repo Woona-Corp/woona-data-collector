@@ -412,13 +412,12 @@ class MainActivity : ComponentActivity() {
                         },
                         overviewProfileContent = { section ->
                             if (section == com.example.myapplication.profile.ProfileScreenSection.ANIMALS) {
-                            androidx.compose.material3.Text(localHistorySummary)
                             AccountControls(
                                 accountId = serverSettingsStore.get().accountId,
                                 language = selectedLanguage,
                                 enabled = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && serverSyncState.uploading == 0,
                                 unassigned = woonaDatabase.profiles().filter { it.accountId == null },
-                                onApply = ::applyAccount, onLink = ::linkDogAccount,
+                                onApply = ::applyAccount, onLink = ::linkDogAccount, localHistorySummary = localHistorySummary,
                             )
                             }
                             ProfilesOverview(
@@ -746,9 +745,14 @@ class MainActivity : ComponentActivity() {
         val account = serverSettingsStore.get().accountId
         val profiles = allProfiles.filter { it.accountId == account }
         val recordingCount = woonaDatabase.readableDatabase.rawQuery("SELECT COUNT(*) FROM recordings", null).use { it.moveToFirst(); it.getInt(0) }
-        localHistorySummary = if (selectedLanguage == AppLanguage.RUSSIAN)
-            "Локальная история: ${allProfiles.size} животных, $recordingCount сессий. Аккаунт: ${account ?: "без аккаунта"}. Фильтр скрывает ${allProfiles.size - profiles.size} животных; смена аккаунта не удаляет данные."
-            else "Local history: ${allProfiles.size} animals, $recordingCount sessions. Account: ${account ?: "unassigned"}. The filter hides ${allProfiles.size - profiles.size} animals; changing accounts does not delete data."
+        val hiddenProfiles = allProfiles.size - profiles.size
+        localHistorySummary = if (selectedLanguage == AppLanguage.RUSSIAN) {
+            "Локальная история: ${allProfiles.size} животных, $recordingCount сессий. Активный аккаунт: ${account ?: "без аккаунта"}." +
+                if (hiddenProfiles > 0) "\nФильтр аккаунта скрывает $hiddenProfiles животных. Данные не удалены: примените прежний аккаунт или свяжите животное без аккаунта." else ""
+        } else {
+            "Local history: ${allProfiles.size} animals, $recordingCount sessions. Active account: ${account ?: "unassigned"}." +
+                if (hiddenProfiles > 0) "\nThe account filter hides $hiddenProfiles animals. Data is not deleted: apply the previous account or link an unassigned animal." else ""
+        }
         dogProfiles = profiles
         val storedId = profilePreferences.getString(LAST_PROFILE_ID_KEY, null)
         val selectedId = sequenceOf(preferredProfileId, selectedProfileId, storedId)

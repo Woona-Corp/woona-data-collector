@@ -477,7 +477,7 @@ private fun AppBottomNavigation(
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
-        tonalElevation = 6.dp,
+        tonalElevation = 0.dp,
         shadowElevation = 10.dp,
         modifier = Modifier
             .fillMaxWidth()
