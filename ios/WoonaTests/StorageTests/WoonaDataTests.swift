@@ -3,6 +3,47 @@ import SQLite3
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    func testServerBaseURLAllowsHttpsAndOnlyExactLocalHttpHosts() throws {
+        for input in ["https://example.test", "HTTPS://Example.test:8443/api/root", "https://[2001:db8::1]:8443/api%20root",
+                      "http://10.0.2.2:8080", "http://localhost:18088", "http://127.0.0.1:18088", "http://[::1]:18088"] {
+            let url = try ServerConfiguration.validatedBaseURL(" \(input)///\n")
+            XCTAssertEqual(url.absoluteString.lowercased(), input.lowercased())
+        }
+    }
+
+    @MainActor
+    func testServerBaseURLRejectsUnsafeConfigurationBeforeNetworking() {
+        for input in ["", "https://", "https:///v1", "https:example.test", "example.test", "ftp://example.test",
+                      "https://user:secret@example.test", "https://@example.test", "https://example.test?x=1", "https://example.test?",
+                      "https://example.test#fragment", "https://example.test#", "https://example.test:", "https://example.test:0",
+                      "https://example.test:65536", "https://example.test:abc", "https://bad host", "https://bad_host",
+                      "https://999.999.999.999", "https://[bad::g]", "https://example.test/has space", "https://example.test/\\escape",
+                      "http://example.test", "http://10.0.2.2.evil", "http://10.0.2.20", "http://127.0.0.2", "http://localhost.evil"] {
+            XCTAssertThrowsError(try WoonaServerClient(configuration: .init(baseURL: input, wifiOnly: false), token: "fixture"), input) { error in
+                guard case ServerSyncError.invalidURL = error else { return XCTFail("Expected local configuration error") }
+                XCTAssertTrue(error.localizedDescription.contains("HTTPS"))
+                XCTAssertFalse(error.localizedDescription.contains("secret"))
+            }
+        }
+    }
+
+    @MainActor
+    func testConfiguredServerBasePrefixIsUsedByActualConnectionRequests() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NetworkFaultProtocol.self]
+        var urls: [URL] = []
+        NetworkFaultProtocol.handler = { request in
+            urls.append(try XCTUnwrap(request.url))
+            return .init(body: Data("{}".utf8))
+        }
+        defer { NetworkFaultProtocol.handler = nil }
+        let client = try WoonaServerClient(configuration: .init(baseURL: "https://network.test/api/root///", wifiOnly: false),
+                                          token: "fixture", sessionConfiguration: configuration)
+        try await client.checkConnection()
+        XCTAssertEqual(urls.map(\.path), ["/api/root/health/ready", "/api/root/v1/dogs"])
+        XCTAssertEqual(urls.last?.query, "limit=1")
+    }
+
     @MainActor
     private func networkSource(_ test: (URL, URL) async throws -> Void) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

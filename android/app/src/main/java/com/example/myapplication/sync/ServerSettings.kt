@@ -79,10 +79,7 @@ class ServerSettingsStore(context: Context) {
     )
 
     fun save(baseUrl: String, token: String, wifiOnly: Boolean) {
-        val normalizedUrl = baseUrl.trim().trimEnd('/')
-        require(normalizedUrl.startsWith("https://") || normalizedUrl.startsWith("http://10.0.2.2")) {
-            "Use HTTPS, or http://10.0.2.2 for the local emulator"
-        }
+        val normalizedUrl = normalizedServerBaseUrl(baseUrl)
         require(token.isNotBlank()) { "Server token is required" }
         preferences.edit()
             .putString(KEY_BASE_URL, normalizedUrl)
