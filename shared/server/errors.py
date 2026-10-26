@@ -12,6 +12,7 @@ ERRORS = {
     'revision_conflict': ('The server has a newer profile revision. Restore it and review your edits before saving again.', 'restore_and_review_changes'),
     'questionnaire_revision_conflict': ('The server questionnaire changed after it was opened. Reload it and review your edits before saving again.', 'restore_and_review_changes'),
     'immutable_profile_conflict': ('A saved profile version cannot be overwritten with different content. Preserve local data and create a new reviewed version.', 'review_manifest_conflict'),
+    'profile_content_already_exists': ('This animal already has a saved profile version with these answers. Preserve your draft and reuse the existing version after reviewing it.', 'reuse_existing_profile_version'),
     'immutable_recording_conflict': ('This recording ID already exists with different capture metadata. Preserve both sources and contact support.', 'contact_support_preserve_local_data'),
     'immutable_artifact_conflict': ('This file ID already exists with different size or checksum. Preserve the original file and contact support.', 'contact_support_preserve_local_data'),
     'immutable_capture_field': ('Completed capture metadata cannot be changed through the questionnaire editor. Edit questionnaire answers only.', 'review_questionnaire_changes'),

@@ -296,6 +296,30 @@ def fuzz(client, fixture):
     case('timezone_missing', 'PUT', path, naive, expected=(422,))
     surrogate = copy.deepcopy(fixture['manifest']);surrogate['dogProfileVersion']['questionnaire']['numberOrName'] = '\ud800'
     case('invalid_unicode_scalar', 'PUT', path, surrogate, expected=(422,))
+    for name, value in [('nan', float('nan')), ('infinity', float('inf')), ('exponent_overflow', float('inf'))]:
+        manifest = copy.deepcopy(fixture['manifest']);manifest['sync']['estimatedDriftPpm'] = value
+        body = json.dumps(manifest).encode()
+        if name == 'exponent_overflow':
+            body = body.replace(b'Infinity', b'1e999')
+        case('nonfinite_' + name, 'PUT', path, body, expected=(400,422))
+    for name, field, value in [('monotonic_overflow', 'sessionZeroMonotonicNs', 2**63),
+                              ('calibration_underflow', 'calibrationOffsetNs', -(2**63)-1)]:
+        manifest = copy.deepcopy(fixture['manifest']);manifest['sync'][field] = value
+        case(name, 'PUT', path, manifest, expected=(422,))
+    schema = copy.deepcopy(fixture['manifest']);schema['schemaVersion'] = 2**31
+    case('schema_integer_overflow', 'PUT', path, schema, expected=(422,))
+    revision = copy.deepcopy(fixture['profile']);revision['dog']['expectedRevision'] = 2**63
+    case('revision_integer_overflow', 'PUT', profile_path(fixture), revision, expected=(422,))
+    for value in ['0001-01-01T00:00:00+14:00', '9999-12-31T23:59:59-14:00', '2026-13-01T12:00:00Z', '2026-10-26']:
+        manifest = copy.deepcopy(fixture['manifest']);manifest['sync']['sessionZeroAtUtc'] = value
+        case('timestamp_boundary', 'PUT', path, manifest, expected=(422,))
+    for key, value in [('numberOrName', '\x00'), ('\ud800', 'invalid-key')]:
+        manifest = copy.deepcopy(fixture['manifest']);manifest['dogProfileVersion']['questionnaire'][key] = value
+        case('invalid_database_text', 'PUT', path, manifest, expected=(422,))
+    nested = copy.deepcopy(fixture['manifest']);value = 0
+    for _ in range(100):value = {'nested':value}
+    nested['dogProfileVersion']['questionnaire']['notes'] = value
+    case('deep_metadata', 'PUT', path, nested, expected=(400,422))
     duplicate_content = copy.deepcopy(fixture['profile']);duplicate_content['profileVersion']['id'] = str(uuid.uuid4());duplicate_content['dog']['expectedRevision'] = 1
     route = '/v1/dogs/' + duplicate_content['dog']['id'] + '/profile-versions/' + duplicate_content['profileVersion']['id']
     case('new_profile_uuid_same_content', 'PUT', route, duplicate_content, expected=(409,))
