@@ -47,6 +47,15 @@ class ServerTransferRobustnessTest {
         val failure = assertThrows(ServerTransferException::class.java, action)
         assertEquals(code, failure.code)
     }
+    @Test fun transferFailureDescriptionsDistinguishServerRepairRetryAndPreservedLocalConflict() {
+        val ru = com.example.myapplication.localization.AppLanguage.RUSSIAN
+        val describe = { code: String -> com.example.myapplication.localization.recordingUploadErrorText("$code: fixture details", ru) }
+        assertTrue(describe("upload_offset_invalid").contains("Проверьте сервер"))
+        assertTrue(describe("upload_conflict_stalled").contains("повтор продолжит"))
+        assertTrue(describe("local_artifact_conflict").contains("не перезаписан"))
+        assertTrue(describe("orphaned_upload_recovered").contains("Очередь восстановлена"))
+    }
+
     @Test fun repeatedOrMalformedRestoreCursorsCannotLoopForeverOrInjectQueryParameters() {
         val guard = TransferCursorGuard()
         val cursor = "00000000-0000-0000-0000-000000000001"

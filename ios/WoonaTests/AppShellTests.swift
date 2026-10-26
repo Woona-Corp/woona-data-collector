@@ -42,6 +42,13 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(error.localizedDescription.contains("Changed on server"))
     }
 
+    func testTransferFailureDescriptionsDistinguishServerRepairRetryAndPreservedLocalConflict() {
+        XCTAssertTrue(recordingUploadErrorText("upload_offset_invalid: details", language: .russian).contains("Проверьте сервер"))
+        XCTAssertTrue(recordingUploadErrorText("upload_conflict_stalled: details", language: .russian).contains("повтор продолжит"))
+        XCTAssertTrue(recordingUploadErrorText("local_artifact_conflict: details", language: .russian).contains("не перезаписан"))
+        XCTAssertTrue(recordingUploadErrorText("orphaned_upload_recovered: details", language: .russian).contains("Очередь восстановлена"))
+    }
+
     func testTransferPolicyWaitsForFirstRealPathAndWifiPermissionWithoutInventingConnectivity() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
