@@ -80,6 +80,27 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(model.backgroundSyncExplanation.contains("execution is not yet confirmed"))
     }
 
+    func testFirstBackgroundPathWaitIsBoundedCancellableAndNeverInventsConnectivity() async {
+        let model = AppViewModel(store: nil, uiTesting: true)
+        let timedOut = await model.awaitFirstTransferNetwork(timeout: 0.01)
+        XCTAssertFalse(timedOut)
+        XCTAssertNil(model.networkAvailable)
+        let cancelled = Task { await model.awaitFirstTransferNetwork(timeout: 24) }
+        await Task.yield()
+        cancelled.cancel()
+        let cancelledResult = await cancelled.value
+        XCTAssertFalse(cancelledResult)
+        let waiting = Task { await model.awaitFirstTransferNetwork(timeout: 1) }
+        await Task.yield()
+        model.updateTransferNetworkPath(available: true, unmetered: true)
+        let allowed = await waiting.value
+        XCTAssertTrue(allowed)
+        model.serverWifiOnly = true
+        model.updateTransferNetworkPath(available: true, unmetered: false)
+        let restricted = await model.awaitFirstTransferNetwork(timeout: 1)
+        XCTAssertFalse(restricted)
+    }
+
     func testCaptureCauseIsIndependentOfSuccessfulUpload() {
         XCTAssertEqual(recordingCaptureText(status: "failed", code: "gatt_error", message: "Ошибка GATT-подключения: 8", language: .russian),
                        "Запись: прервана — сбой связи с ошейником (GATT 8)")

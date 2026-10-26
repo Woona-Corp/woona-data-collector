@@ -307,32 +307,53 @@ final class WoonaServerClient {
     }
 
     func upload(profile: DogProfile, store: WoonaStore) async throws -> Int {
-        try store.applyServerDeletions(try await deletions(), accountID: accountID)
-        let questionnaire = try JSONSerialization.jsonObject(with: WoonaStore.dogQuestionnaireData(profile.questionnaire))
-        let payload: [String: Any] = [
-            "dog": [
-                "id": profile.id.uuidString,
-                "numberOrName": profile.numberOrName,
-                "expectedRevision": profile.revision,
-            ],
-            "profileVersion": [
-                "id": profile.profileVersionID.uuidString,
-                "schemaVersion": profile.questionnaire.schemaVersion,
-                "validationState": "complete",
-                "questionnaire": questionnaire,
-                "contentSha256": profile.contentSha256,
-                "clientCreatedAtUtc": profile.updatedAtUTC,
-            ],
-        ]
-        let body = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes])
-        let receipt: ServerProfileReceipt = try await json(
-            method: "PUT",
-            path: "/v1/dogs/\(profile.id.uuidString)/profile-versions/\(profile.profileVersionID.uuidString)",
-            body: body,
-            as: ServerProfileReceipt.self
-        )
-        if let accepted = receipt.profileVersion { try store.acceptServerProfile(dogID: profile.id, version: accepted) }
-        return receipt.dogRevision
+        do {
+            try store.applyServerDeletions(try await deletions(), accountID: accountID)
+            guard try store.profile(dogID: profile.id, versionID: profile.profileVersionID) != nil else {
+                throw ServerSyncError.transfer(code: "profile_removed_by_server", message: "The profile is no longer in the local store after server deletion reconciliation", retryable: false)
+            }
+            let questionnaire = try JSONSerialization.jsonObject(with: WoonaStore.dogQuestionnaireData(profile.questionnaire))
+            let payload: [String: Any] = [
+                "dog": [
+                    "id": profile.id.uuidString,
+                    "numberOrName": profile.numberOrName,
+                    "expectedRevision": profile.revision,
+                ],
+                "profileVersion": [
+                    "id": profile.profileVersionID.uuidString,
+                    "schemaVersion": profile.questionnaire.schemaVersion,
+                    "validationState": "complete",
+                    "questionnaire": questionnaire,
+                    "contentSha256": profile.contentSha256,
+                    "clientCreatedAtUtc": profile.updatedAtUTC,
+                ],
+            ]
+            let body = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes])
+            let receipt: ServerProfileReceipt = try await json(
+                method: "PUT",
+                path: "/v1/dogs/\(profile.id.uuidString)/profile-versions/\(profile.profileVersionID.uuidString)",
+                body: body,
+                as: ServerProfileReceipt.self
+            )
+            if let accepted = receipt.profileVersion {
+                guard accepted.id == profile.profileVersionID else {
+                    throw ServerSyncError.transfer(code: "profile_receipt_invalid", message: "The server acknowledged another profile UUID; local data is preserved", retryable: false)
+                }
+                try store.acceptServerProfile(dogID: profile.id, version: accepted)
+            }
+            try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
+            try store.setServerRevision(dogID: profile.id, revision: receipt.dogRevision)
+            return receipt.dogRevision
+        } catch {
+            let permanent: Bool
+            if case ServerSyncError.animalIDConflict = error { permanent = true }
+            else if case ServerSyncError.transfer(_, _, let retryable) = error { permanent = !retryable }
+            else if case ServerSyncError.requestFailed(let status, _) = error { permanent = (400..<500).contains(status) && ![408,429].contains(status) }
+            else if case WoonaStoreError.invalidData = error { permanent = true }
+            else { permanent = false }
+            try? store.updateProfileSync(versionID: profile.profileVersionID, state: permanent ? "permanent_error" : "retryable_error", error: error)
+            throw error
+        }
     }
 
     func deletions() async throws -> [ServerDeletion] {
@@ -545,6 +566,7 @@ final class WoonaServerClient {
                     as: ServerProfileReceipt.self
                 )
                 try store.setServerRevision(dogID: profile.id, revision: receipt.dogRevision)
+                try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
             } else {
                 for payload in artifactPayloads {
                     _ = try await rawRequest(method: "POST", path: "/v1/recordings/\(recording.id.uuidString)/references",

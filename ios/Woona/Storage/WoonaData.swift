@@ -599,6 +599,7 @@ final class WoonaStore {
                 [.text(versionID.uuidString), .text(dogID.uuidString), .integer(Int64(questionnaire.schemaVersion)), .text(json), .text(Self.sha256(questionnaireData)), .text(now)]
             )
             if profile == nil { try execute("UPDATE dogs SET account_id=? WHERE id=?", [accountID.map(SQLiteValue.text) ?? .null, .text(dogID.uuidString)]) }
+            try updateProfileSync(versionID: versionID, state: "pending")
         }
         return try profiles().first { $0.id == dogID }!
     }
@@ -608,6 +609,44 @@ final class WoonaStore {
             throw WoonaStoreError.invalidData("Dog already belongs to another account")
         }
         try execute("UPDATE dogs SET account_id=? WHERE id=?", [.text(accountID), .text(dogID.uuidString)])
+    }
+
+    // Acceptance belongs to a version UUID; a dog's revision cannot confirm a new version.
+    func pendingProfiles() throws -> [DogProfile] {
+        try profiles().filter { ["pending", "retryable_error"].contains(try profileSyncState(versionID: $0.profileVersionID)) }
+    }
+
+    func profileSyncState(versionID: UUID) throws -> String {
+        let statement = try prepare("SELECT state FROM profile_sync_state WHERE profile_version_id=?", [.text(versionID.uuidString)])
+        defer { sqlite3_finalize(statement) }
+        return sqlite3_step(statement) == SQLITE_ROW ? columnText(statement, 0) : "pending"
+    }
+
+    func profileSyncOverview() throws -> (pending: Int, failed: Int, lastError: String?) {
+        let statement = try prepare("""
+            SELECT SUM(CASE WHEN s.state IN ('pending','retryable_error') THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN s.state IN ('retryable_error','permanent_error') THEN 1 ELSE 0 END),
+                   (SELECT last_error FROM profile_sync_state e JOIN dogs ed ON ed.current_profile_version_id=e.profile_version_id
+                    WHERE e.last_error IS NOT NULL ORDER BY e.updated_at_utc DESC LIMIT 1)
+            FROM profile_sync_state s JOIN dogs d ON d.current_profile_version_id=s.profile_version_id
+            """)
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return (0, 0, nil) }
+        return (Int(sqlite3_column_int64(statement, 0)), Int(sqlite3_column_int64(statement, 1)), columnOptionalText(statement, 2))
+    }
+
+    func updateProfileSync(versionID: UUID, state: String, error: Error? = nil) throws {
+        guard ["pending", "retryable_error", "permanent_error", "synced"].contains(state) else { throw WoonaStoreError.invalidData("Invalid profile sync state") }
+        try execute("""
+            INSERT INTO profile_sync_state(profile_version_id,state,last_error,updated_at_utc) VALUES(?,?,?,?)
+            ON CONFLICT(profile_version_id) DO UPDATE SET state=excluded.state,last_error=excluded.last_error,updated_at_utc=excluded.updated_at_utc
+            """, [.text(versionID.uuidString), .text(state), error.map { .text($0.localizedDescription) } ?? .null, .text(Self.iso8601(Date()))])
+    }
+
+    func markProfileAccepted(dogID: UUID, versionID: UUID) throws {
+        guard let version = try existingProfileVersion(id: versionID) else { return }
+        guard version.dogID == dogID else { throw WoonaStoreError.invalidData("Acknowledged profile belongs to another dog") }
+        try updateProfileSync(versionID: versionID, state: "synced")
     }
 
     func setServerRevision(dogID: UUID, revision: Int) throws {
@@ -629,8 +668,9 @@ final class WoonaStore {
         guard existing?.accountID == nil || existing?.accountID == accountID else {
             throw WoonaStoreError.invalidData("Remote dog account conflicts with local ownership")
         }
-        let preserveLocal = existing.map {
-            $0.profileVersionID != profileVersionID && ($0.revision == 0 || $0.revision >= revision)
+        let preserveLocal = try existing.map {
+            let unacknowledged = try profileSyncState(versionID: $0.profileVersionID) != "synced"
+            return $0.profileVersionID != profileVersionID && (unacknowledged || $0.revision == 0 || $0.revision >= revision)
         } ?? false
         if let version = try existingProfileVersion(id: profileVersionID),
            version.dogID != dogID || version.sha256 != contentSha256 {
@@ -676,6 +716,7 @@ final class WoonaStore {
             )
             try execute("UPDATE dogs SET account_id=? WHERE id=?", [accountID.map(SQLiteValue.text) ?? .null, .text(dogID.uuidString)])
         }
+        try markProfileAccepted(dogID: dogID, versionID: profileVersionID)
         return try profiles().first { $0.id == dogID }!
     }
 
@@ -687,6 +728,7 @@ final class WoonaStore {
             guard existing.dogID == dogID, existing.sha256 == version.contentSha256 else {
                 throw WoonaStoreError.invalidData("Remote profile version conflicts with local metadata")
             }
+            try markProfileAccepted(dogID: dogID, versionID: version.id)
             return
         }
         let questionnaire = String(data: try Self.dogQuestionnaireData(version.questionnaire), encoding: .utf8)!
@@ -703,6 +745,7 @@ final class WoonaStore {
                 .text(version.clientCreatedAtUtc), version.supersededAtUtc.map(SQLiteValue.text) ?? .null,
             ]
         )
+        try markProfileAccepted(dogID: dogID, versionID: version.id)
     }
 
     @discardableResult
@@ -886,6 +929,7 @@ final class WoonaStore {
             )
             try execute("UPDATE recordings SET server_sync_state=? WHERE id=?", [.text(restoredSyncState), .text(remote.id.uuidString)])
         }
+        try markProfileAccepted(dogID: remote.dogId, versionID: remote.profileVersion.id)
         return !didExist
     }
 
@@ -974,6 +1018,7 @@ final class WoonaStore {
         let json = String(decoding: try Self.dogQuestionnaireData(version.questionnaire), as: UTF8.self)
         try execute("UPDATE dog_profile_versions SET questionnaire_json=?,content_sha256=? WHERE id=? AND dog_id=?",
                     [.text(json), .text(version.contentSha256), .text(version.id.uuidString), .text(dogID.uuidString)])
+        try markProfileAccepted(dogID: dogID, versionID: version.id)
     }
 
     func acceptServerSession(recordingID: UUID, questionnaire: JSONValue) throws {
@@ -1349,6 +1394,7 @@ final class WoonaStore {
     func resetFailedSync() throws {
         let now = Self.iso8601(Date())
         try transaction {
+            try execute("UPDATE profile_sync_state SET state='pending',last_error=NULL,updated_at_utc=? WHERE state IN ('retryable_error','permanent_error')", [.text(now)])
             try execute(
                 "UPDATE recordings SET server_sync_state='pending' WHERE server_sync_state IN ('retryable_error','permanent_error')"
             )
@@ -1471,6 +1517,16 @@ final class WoonaStore {
             )
             """
         )
+        try execute("""
+            CREATE TABLE IF NOT EXISTS profile_sync_state(
+              profile_version_id TEXT PRIMARY KEY REFERENCES dog_profile_versions(id) ON DELETE CASCADE,
+              state TEXT NOT NULL DEFAULT 'pending',last_error TEXT,updated_at_utc TEXT NOT NULL
+            )
+            """)
+        // Historical dog revisions contain no per-version acceptance proof. Reconcile
+        // current UUIDs idempotently with the server instead of guessing 'synced'.
+        try execute("INSERT OR IGNORE INTO profile_sync_state(profile_version_id,state,updated_at_utc) SELECT id,'pending',client_created_at_utc FROM dog_profile_versions")
+        try execute("PRAGMA user_version=7")
         try ensureReferenceColumn()
         let columns = try prepare("PRAGMA table_info(recordings)")
         defer { sqlite3_finalize(columns) }

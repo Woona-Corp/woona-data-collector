@@ -21,6 +21,158 @@ final class WoonaDataTests: XCTestCase {
                                      sessionConfiguration: configuration, downloadTransport: download)
     }
 
+    func testProfileVersionAcceptanceAndMigrationNeverInferAcknowledgmentFromDogRevision() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        var store: WoonaStore? = try WoonaStore(rootDirectory: root)
+        defer { store = nil; try? FileManager.default.removeItem(at: root) }
+        let first = try store!.saveProfile(completeDog(), accountID: "scope-a")
+        try store!.markProfileAccepted(dogID: first.id, versionID: first.profileVersionID)
+        try store!.setServerRevision(dogID: first.id, revision: 7)
+        let recording = try store!.createRecording(profile: first, source: "live", questionnaire: completeSession())
+        var changed = first.questionnaire; changed.numberOrName = "Revised name"
+        let second = try store!.saveProfile(changed, replacing: first)
+        XCTAssertEqual(second.revision, 7)
+        XCTAssertNotEqual(second.profileVersionID, first.profileVersionID)
+        XCTAssertEqual(try store!.pendingProfiles().map(\.profileVersionID), [second.profileVersionID])
+        XCTAssertEqual(try store!.profileSyncState(versionID: first.profileVersionID), "synced")
+        XCTAssertEqual(try store!.recording(id: recording.id)?.profileVersionID, first.profileVersionID)
+        // A receipt for the frozen old version cannot confirm the new current UUID.
+        try store!.markProfileAccepted(dogID: first.id, versionID: first.profileVersionID)
+        XCTAssertEqual(try store!.profileSyncState(versionID: second.profileVersionID), "pending")
+        _ = try store!.upsertRemoteProfile(dogID: first.id, profileVersionID: first.profileVersionID,
+            revision: 8, questionnaire: first.questionnaire, contentSha256: first.contentSha256,
+            updatedAtUTC: first.updatedAtUTC, accountID: "scope-a")
+        XCTAssertEqual(try store!.profiles().first?.profileVersionID, second.profileVersionID)
+        XCTAssertEqual(try store!.profileSyncState(versionID: second.profileVersionID), "pending")
+        store = nil
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(database, "DROP TABLE profile_sync_state; PRAGMA user_version=6", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(database)
+        store = try WoonaStore(rootDirectory: root)
+        let migrated = try XCTUnwrap(store!.profiles().first)
+        XCTAssertEqual(migrated.profileVersionID, second.profileVersionID)
+        XCTAssertEqual(migrated.revision, 8)
+        XCTAssertEqual(migrated.contentSha256, second.contentSha256)
+        XCTAssertEqual(try store!.pendingProfiles().map(\.profileVersionID), [second.profileVersionID])
+        XCTAssertEqual(try store!.recording(id: recording.id)?.profileVersionID, first.profileVersionID)
+    }
+
+    @MainActor
+    func testProfileOnlyQueueIsAwaitedScopedAndStopsAutomaticIdentityConflictRetry() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(completeDog(), accountID: "scope-a")
+            var puts = 0
+            var reject = true
+            NetworkFaultProtocol.handler = { request in
+                XCTAssertEqual(request.value(forHTTPHeaderField: "X-Woona-Account"), "scope-a")
+                if request.url!.path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                if request.httpMethod == "PUT" {
+                    puts += 1
+                    XCTAssertTrue(request.url!.path.hasSuffix(profile.profileVersionID.uuidString))
+                    if reject { return .init(status: 409, body: Data(#"{"detail":{"code":"animal_id_already_exists","message":"Synthetic identity conflict"}}"#.utf8)) }
+                    return .init(body: Data(#"{"dogRevision":8}"#.utf8))
+                }
+                throw URLError(.badServerResponse)
+            }
+            let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { account in
+                XCTAssertEqual(account, "scope-a")
+                let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [NetworkFaultProtocol.self]
+                return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
+            })
+            model.updateTransferNetworkPath(available: true, unmetered: true)
+            for _ in 0..<100 {
+                if model.canChangeAccount { break }
+                await Task.yield() // Flush startup path scheduling while token remains empty.
+            }
+            XCTAssertTrue(model.canChangeAccount)
+            model.serverToken = "fixture"
+            let rejected = await model.resumePendingSync()
+            XCTAssertFalse(rejected)
+            XCTAssertEqual(puts, 1)
+            XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "permanent_error")
+            XCTAssertEqual(model.profileUploadFailed, 1)
+            XCTAssertFalse(model.uploadQueueExplanation.contains("queue is empty"))
+            let automatic = await model.resumePendingSync()
+            XCTAssertTrue(automatic) // No eligible retry remains; this does not mark it uploaded.
+            XCTAssertEqual(puts, 1)
+            XCTAssertEqual(try store.profileSyncOverview().failed, 1)
+            try store.resetFailedSync() // Same persistent reset used by the explicit Retry button.
+            reject = false
+            let retried = await model.resumePendingSync()
+            XCTAssertTrue(retried)
+            XCTAssertEqual(puts, 2)
+            XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "synced")
+            XCTAssertEqual(try store.profiles().first?.revision, 8)
+            XCTAssertEqual(model.profileUploadPending, 0)
+            XCTAssertEqual(model.profileUploadFailed, 0)
+            XCTAssertEqual(try store.localInventory().recordings, 0)
+        }
+    }
+
+    @MainActor
+    func testBackgroundFirstPathOwnsAndAwaitsAProfileOnlyQueueWithoutSpawningAutosync() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(completeDog())
+            var puts = 0
+            NetworkFaultProtocol.handler = { request in
+                if request.url!.path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                if request.httpMethod == "PUT" { puts += 1; return .init(body: Data(#"{"dogRevision":3}"#.utf8)) }
+                throw URLError(.badServerResponse)
+            }
+            let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { _ in try self.networkClient() })
+            model.serverToken = "fixture"
+            let operation = Task { await model.performBackgroundSync(networkTimeout: 1) }
+            for _ in 0..<100 {
+                if model.isBackgroundSyncRunning { break }
+                await Task.yield()
+            }
+            XCTAssertTrue(model.isBackgroundSyncRunning)
+            XCTAssertFalse(model.canChangeAccount)
+            XCTAssertEqual(puts, 0)
+            model.updateTransferNetworkPath(available: true, unmetered: true)
+            let completed = await operation.value
+            XCTAssertTrue(completed)
+            XCTAssertFalse(model.isBackgroundSyncRunning)
+            XCTAssertEqual(puts, 1)
+            XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "synced")
+            XCTAssertEqual(model.profileUploadPending, 0)
+            XCTAssertEqual(try store.localInventory().recordings, 0)
+        }
+    }
+
+    @MainActor
+    func testProfileAcknowledgmentCannotAcceptAnotherUUIDAndTransientFailurePersistsForRetry() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(completeDog())
+            var stage = 0
+            NetworkFaultProtocol.handler = { request in
+                if request.url!.path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                if stage == 0 { throw URLError(.timedOut) }
+                let questionnaire = try JSONSerialization.jsonObject(with: WoonaStore.dogQuestionnaireData(profile.questionnaire))
+                let receipt: [String: Any] = ["dogRevision": 9, "profileVersion": [
+                    "id": UUID().uuidString, "schemaVersion": profile.questionnaire.schemaVersion,
+                    "validationState": "complete", "questionnaire": questionnaire, "contentSha256": profile.contentSha256,
+                    "clientCreatedAtUtc": profile.updatedAtUTC, "supersededAtUtc": NSNull()]]
+                return .init(body: try JSONSerialization.data(withJSONObject: receipt))
+            }
+            do { _ = try await networkClient().upload(profile: profile, store: store); XCTFail("timeout must fail") }
+            catch { XCTAssertEqual((error as? URLError)?.code, .timedOut) }
+            XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "retryable_error")
+            XCTAssertEqual(try store.pendingProfiles().count, 1)
+            stage = 1
+            do { _ = try await networkClient().upload(profile: profile, store: store); XCTFail("wrong UUID must fail") }
+            catch ServerSyncError.transfer(let code, _, let retryable) { XCTAssertEqual(code, "profile_receipt_invalid"); XCTAssertFalse(retryable) }
+            XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "permanent_error")
+            XCTAssertEqual(try store.profiles().first?.revision, 0)
+            XCTAssertEqual(try store.profiles().first?.contentSha256, profile.contentSha256)
+            XCTAssertTrue(try store.pendingProfiles().isEmpty)
+        }
+    }
+
     @MainActor
     func testRepeatedRestoreCursorTerminatesWithoutLoopingOrDeletingLocalProfiles() async throws {
         try await networkSource { root, _ in
@@ -81,6 +233,7 @@ final class WoonaDataTests: XCTestCase {
             }
             do { try await networkClient().upload(recording: saved, profile: profile, store: store); XCTFail("Invalid server position must fail") }
             catch ServerSyncError.transfer(let code, _, _) { XCTAssertEqual(code, "upload_offset_invalid") }
+            XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "synced") // Manifest receipt confirmed this exact frozen UUID before artifact failure.
             XCTAssertEqual(try store.recording(id: record.id)?.serverSyncState, "permanent_error")
             XCTAssertTrue(try XCTUnwrap(store.recordingSyncError(recordingID: record.id)).contains("upload_offset_invalid"))
             XCTAssertFalse(try store.artifacts(recordingID: record.id).isEmpty)
