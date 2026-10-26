@@ -666,13 +666,11 @@ struct OverviewView: View {
             .navigationTitle(screenTitle)
             .navigationBarTitleDisplayMode(.inline)
             .onChange(of: appState.recentRecordings) { _, records in
-                if heartRecording == nil, !isSessionEditorPresented {
-                    heartRecording = records.first { ["completed", "failed", "interrupted"].contains($0.status) && $0.questionnaire?.sessionKind == "heart" && $0.questionnaire?.readyForSync == false }
-                }
+                presentIncompleteHeartQuestionnaire(records)
             }
             .alert(russian ? "Удалить файлы сессии с устройства?" : "Remove session files from this device?", isPresented: Binding(
                 get: { pendingLocalRemoval != nil }, set: { if !$0 { pendingLocalRemoval = nil } }
-            ), titleVisibility: .visible, presenting: pendingLocalRemoval) { recording in
+            ), presenting: pendingLocalRemoval) { recording in
                 Button(russian ? "Удалить с устройства" : "Remove from device", role: .destructive) {
                     appState.removeLocalRecordingFiles(recording.id)
                     pendingLocalRemoval = nil
@@ -825,6 +823,15 @@ struct OverviewView: View {
                         }
                     }
                 }
+    }
+
+    private func presentIncompleteHeartQuestionnaire(_ records: [WoonaRecording]) {
+        guard heartRecording == nil, !isSessionEditorPresented else { return }
+        heartRecording = records.first { recording in
+            guard ["completed", "failed", "interrupted"].contains(recording.status),
+                  let questionnaire = recording.questionnaire else { return false }
+            return questionnaire.sessionKind == "heart" && !questionnaire.readyForSync
+        }
     }
 
     private func preparePendingExport() {
