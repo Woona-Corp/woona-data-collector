@@ -49,6 +49,9 @@ struct AppRootView: View {
         }
         .tint(Color(red: 20.0 / 255, green: 107.0 / 255, blue: 116.0 / 255))
         .preferredColorScheme(preferredColorScheme)
+        .task(id: "\(appState.selectedTab)-\(appState.sessionExportAvailabilityRevision)") {
+            await appState.refreshExportAvailability()
+        }
         .sheet(item: Binding(
             get: { appState.preparedExport },
             set: { _ in appState.clearPreparedExport() }

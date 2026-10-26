@@ -220,4 +220,5 @@
     <string name="nav_records">Recordings</string>
     <string name="new_connection">New connection</string>
     <string name="server_sync_waiting">Waiting to upload</string>
+    <string name="export_finish_capture_first">Stop and finalize the recording before exporting its session ZIP. Individual file snapshots remain available.</string>
 </resources>

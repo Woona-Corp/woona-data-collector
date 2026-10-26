@@ -428,8 +428,13 @@ class DeviceFeatureController(
     }
 
     fun createSessionArchive(targetDirectory: File): File? {
+        if (!canCreateSessionArchiveNow()) {
+            showErrorOnMainThread(appTextResolver.getString(R.string.export_finish_capture_first))
+            return null
+        }
         return try {
-            stopVideo()
+            // Export never owns capture/video shutdown. Finalization must have
+            // completed before this point, including when invoked without UI.
             showExportPhaseOnMainThread(ExportPhase.PREPARING_SNAPSHOTS)
             val snapshot = ensureExportSnapshot() ?: return null
             val files = buildAvailableExportFiles(snapshot)
@@ -465,11 +470,14 @@ class DeviceFeatureController(
 
     fun canShareCsvFile(): Boolean = packetCaptureController.currentPacketFile()?.exists() == true
 
-    fun canShareAllFiles(): Boolean =
+    private fun canCreateSessionArchiveNow(): Boolean = !isCaptureActive() && videoRecorder?.isActive() != true &&
+        uiState.videoState !in setOf(VideoCaptureState.STARTING, VideoCaptureState.RECORDING, VideoCaptureState.STOPPING)
+
+    fun canShareAllFiles(): Boolean = canCreateSessionArchiveNow() && (
         canSharePacketFile() || canShareCsvFile() || canShareRawFile() || canShareLogFile() ||
             currentSessionFile("video.mp4")?.exists() == true ||
             currentSessionFile("sync.json")?.exists() == true ||
-            PolarCsvFileStore.FILE_NAMES.any { currentSessionFile(it)?.exists() == true }
+            PolarCsvFileStore.FILE_NAMES.any { currentSessionFile(it)?.exists() == true })
 
     fun clearExportProgress() {
         runOnUiThread {

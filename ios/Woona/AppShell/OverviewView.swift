@@ -657,7 +657,7 @@ struct OverviewView: View {
                         Button(appState.text(.export)) {
                             isExportOptionsPresented = true
                         }
-                        .disabled(appState.exportPhase != nil)
+                        .disabled(!appState.canOpenSessionExport)
                     }
                 }
             }
@@ -806,7 +806,7 @@ struct ExportOptionsSheet: View {
                             Text(appState.title(for: kind))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .disabled(appState.exportPhase != nil)
+                        .disabled(!appState.canExportSessionFile(kind))
                     }
                 }
             }

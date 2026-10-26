@@ -26,6 +26,55 @@ import java.util.zip.ZipFile
 @RunWith(AndroidJUnit4::class)
 class DeviceFeatureSmokeTest {
     @Test
+    fun sessionZipRefusesPreparingAndOngoingCaptureWithoutStoppingVideoOrChangingRecording() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(context.cacheDir, "export-guard-${UUID.randomUUID()}").apply { mkdirs() }
+        val database = com.example.myapplication.data.WoonaDatabase(context, root)
+        val packet = File(root, "sensor-source.bin").apply { writeBytes(validPacket()) }
+        val capture = FakePacketCaptureController(packet)
+        val state = DeviceUiStateHolder()
+        val listener = object : BleSessionListener {
+            override fun onDeviceFound(device: BleDevice) = Unit
+            override fun onPacketReceived(packetFragment: ByteArray) = Unit
+            override fun onDiagnosticMessage(message: String) = Unit
+            override fun onCaptureReady() = Unit
+            override fun onStateChanged(state: BleSessionState) = Unit
+            override fun onError(message: String, throwable: Throwable?) = Unit
+        }
+        val controller = com.example.myapplication.feature.device.DeviceFeatureController(
+            FakeBleSessionController(listener), capture, FakeFileShareIntentFactory(), uiStateHolder = state, woonaDatabase = database)
+        try {
+            val profile = database.saveProfile(com.example.myapplication.data.DogQuestionnaire(schemaVersion = 2, animalId = "export-guard", numberOrName = "Synthetic guard animal"))
+            val record = database.beginRecording(profile.id, com.example.myapplication.data.RecordingSource.LIVE,
+                com.example.myapplication.data.SessionQuestionnaire(schemaVersion = 2, sessionLabel = "Guard", plannedActivities = listOf("Покой"), videoRequested = true))
+            controller.beginRecordingSession(record)
+            assertTrue(controller.isCaptureActive())
+            val preparing = database.recording(record.id)
+            org.junit.Assert.assertNull(controller.createSessionArchive(File(root, "out")))
+            assertEquals(preparing, database.recording(record.id))
+            state.videoReady()
+            controller.startSynchronizedSession()
+            state.videoStarted(0.0) // Synthetic camera callback; no camera API is used.
+            capture.stopCaptureCalled = false
+            val video = File(database.recordingDirectory(record.relativeDirectory), "video.mp4").apply { writeText("ongoing synthetic video") }
+            val before = database.recording(record.id)
+            val sync = File(video.parentFile, "sync.json").readBytes()
+            val sourceBytes = packet.readBytes()
+            assertTrue(controller.isCaptureActive())
+            org.junit.Assert.assertFalse(controller.canShareAllFiles())
+            assertTrue(controller.canSharePacketFile())
+            org.junit.Assert.assertNull(controller.createSessionArchive(File(root, "out")))
+            assertEquals(com.example.myapplication.feature.device.VideoCaptureState.RECORDING, controller.uiState.videoState)
+            org.junit.Assert.assertFalse(capture.stopCaptureCalled)
+            assertEquals(before, database.recording(record.id))
+            assertArrayEquals(sync, File(video.parentFile, "sync.json").readBytes())
+            assertArrayEquals(sourceBytes, packet.readBytes())
+            assertEquals("ongoing synthetic video", video.readText())
+            org.junit.Assert.assertFalse(File(root, "out").exists())
+        } finally { controller.close(); database.close(); root.deleteRecursively() }
+    }
+
+    @Test
     fun initialTransportProfile_isRestoredIntoControllerAndBleSession() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         lateinit var bleSessionController: FakeBleSessionController
