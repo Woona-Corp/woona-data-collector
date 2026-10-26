@@ -25,20 +25,33 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                AppCard(title: appState.text(.appearance)) {
+                AppCard(title: appState.text(.theme)) {
+                    Text(russian ? "Выберите системную, светлую или тёмную тему приложения." : "Choose whether the app follows the system appearance or always uses a light or dark theme.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     Picker(appState.text(.theme), selection: $appState.selectedThemeMode) {
                         ForEach(AppThemeMode.allCases, id: \.self) { themeMode in
-                            Text(themeMode.rawValue).tag(themeMode)
+                            Text(themeTitle(themeMode)).tag(themeMode)
                         }
                     }
                     .pickerStyle(.segmented)
                 }
 
                 AppCard(title: appState.text(.language)) {
-                    Picker(appState.text(.language), selection: $appState.selectedLanguage) {
-                        ForEach(AppLanguage.allCases, id: \.self) { language in
-                            Text(language.rawValue).tag(language)
+                    Text(russian ? "Выберите язык для всей оболочки приложения и экрана устройства." : "Choose the app language for the entire shell and device flow.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    ForEach(AppLanguage.allCases, id: \.self) { language in
+                        Button { appState.selectedLanguage = language } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: appState.selectedLanguage == language ? "largecircle.fill.circle" : "circle")
+                                    .foregroundStyle(.tint)
+                                Text(language == .russian ? "Русский" : "English").foregroundStyle(.primary)
+                                Spacer()
+                            }
+                            .padding(.vertical, 8)
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier(language == .russian ? "language.ru" : "language.en")
+                        .accessibilityAddTraits(appState.selectedLanguage == language ? [.isSelected] : [])
                     }
                 }
 
@@ -79,6 +92,15 @@ struct SettingsView: View {
             }
         }
     }
+    private func themeTitle(_ mode: AppThemeMode) -> String {
+        guard russian else { return mode.rawValue }
+        switch mode {
+        case .system: return "Системная"
+        case .light: return "Светлая"
+        case .dark: return "Темная"
+        }
+    }
+
 }
 
 private struct ServerConnectionEditor: View {

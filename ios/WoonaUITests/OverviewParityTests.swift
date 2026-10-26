@@ -83,6 +83,19 @@ final class OverviewParityTests: XCTestCase {
         add(screenshot)
     }
 
+    func testLanguageChangeUpdatesNavigationAndThemeLabels() {
+        app.buttons["tab.settings"].tap()
+        let russian = app.buttons["language.ru"]
+        if !russian.isHittable { app.swipeUp() }
+        russian.tap()
+        XCTAssertEqual(app.buttons["tab.overview"].label, "Обзор")
+        XCTAssertEqual(app.buttons["tab.settings"].label, "Настройки")
+        if !app.segmentedControls.buttons["Светлая"].isHittable { app.swipeDown() }
+        XCTAssertTrue(app.segmentedControls.buttons["Светлая"].isSelected)
+        app.buttons["tab.overview"].tap()
+        XCTAssertEqual(app.buttons["account.apply"].label, "Применить аккаунт")
+    }
+
     func testServerConnectionRequiresTokenAndCancelDoesNotConfigure() {
         app.buttons["tab.settings"].tap()
         let configure = app.buttons["server.configure"]
