@@ -517,9 +517,9 @@ struct OverviewView: View {
                                     Button(appState.selectedLanguage == .russian ? "Изменить анкету" : "Edit questionnaire") { editingSession = recording }
                                         .disabled(!appState.canEditQuestionnaire(recording))
                                     if recording.questionnaire?.sessionKind == "heart", recording.questionnaire?.readyForSync == false {
-                                        Button("Заполнить анкету по сердцебиению") { heartRecording = recording }.disabled(!appState.canEditQuestionnaire(recording))
+                                        Button(appState.selectedLanguage == .russian ? "Заполнить анкету по сердцебиению" : "Complete heart questionnaire") { heartRecording = recording }.disabled(!appState.canEditQuestionnaire(recording))
                                     }
-                                    Button("Добавить ЭКГ / ЧСС / интервалы") {
+                                    Button(appState.selectedLanguage == .russian ? "Добавить ЭКГ / ЧСС / интервалы" : "Add ECG / heart rate / intervals") {
                                         referenceRecording = recording
                                         isReferenceImporterPresented = true
                                     }
@@ -893,7 +893,7 @@ struct ExportOptionsSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
+                    Button(appState.selectedLanguage == .russian ? "Готово" : "Done") {
                         isPresented = false
                     }
                 }

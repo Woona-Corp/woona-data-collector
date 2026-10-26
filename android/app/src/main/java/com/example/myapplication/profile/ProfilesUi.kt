@@ -253,9 +253,9 @@ fun ProfilesOverview(
                 if (recording.status.value in setOf("completed", "failed", "interrupted")) {
                     OutlinedButton(onClick = { onEditQuestionnaire(recording) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text(tr(language, "Edit questionnaire", "Изменить анкету")) }
                     if (recording.questionnaire?.sessionKind == "heart" && !recording.questionnaire.readyForSync()) {
-                        Button(onClick = { onHeartQuestionnaire(recording.id) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text("Заполнить анкету по сердцебиению") }
+                        Button(onClick = { onHeartQuestionnaire(recording.id) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text(tr(language, "Complete heart questionnaire", "Заполнить анкету по сердцебиению")) }
                     }
-                    OutlinedButton(onClick = { onAddReference(recording.id) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text("Добавить ЭКГ / ЧСС / интервалы") }
+                    OutlinedButton(onClick = { onAddReference(recording.id) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text(tr(language, "Add ECG / heart rate / intervals", "Добавить ЭКГ / ЧСС / интервалы")) }
                 }
                 Text(
                     "${recording.sessionLabel} · ${recordingDisplayTime(recording.startedAtUtc)}",
