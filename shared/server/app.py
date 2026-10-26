@@ -1700,7 +1700,8 @@ def get_recording_status(
                 """
                 SELECT id,ingest_status,server_verified_at,receipt_sha256,
                        capture_status,capture_error_code,capture_error_message,
-                       session_questionnaire,server_updated_at
+                       session_questionnaire,server_updated_at,
+                       (SELECT alignment FROM recording_sync WHERE recording_id=recordings.id) AS alignment
                 FROM recordings WHERE id=:id
                 """
             ),

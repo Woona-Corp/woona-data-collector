@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import errno
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -155,11 +157,27 @@ def inspect_archive(archive: Path, *, expected_sha256: str, recording_id: str, d
             artifacts.append({'id': str(uuid.uuid5(uuid.UUID(recording_id), 'archive-file:' + name)),
                 'type': kind, 'fileName': name, 'mimeType': mime, 'sizeBytes': count,
                 'sha256': digest.hexdigest(), 'stagedPath': str(target)})
+        diagnostics = next((item for item in artifacts if item['type'] == 'diagnostic'), None)
+        quality = {'status': 'not_audited'}
+        if diagnostics:
+            rejected, final_lost, max_lost = 0, None, 0
+            with Path(diagnostics['stagedPath']).open(encoding='utf-8', errors='replace') as log:
+                for line in log:
+                    rejected += '\tREJECTED\t' in line
+                    values = re.findall(r'\blost=(\d+)', line)
+                    if values:
+                        final_lost = int(values[-1])
+                        max_lost = max(max_lost, final_lost)
+            quality = {'status': 'warnings' if rejected or max_lost else 'diagnostics_checked',
+                'diagnostic_sha256': diagnostics['sha256'], 'rejected_log_events': rejected,
+                'reported_lost_final': final_lost, 'reported_lost_max': max_lost,
+                'counter_loss_is_verified': False,
+                'reason': 'Counters in diagnostic logs are observations, not proof of continuous valid sensor data'}
         return {'schemaVersion': 1, 'recordingId': recording_id, 'dogId': dog_id,
             'sourceId': source_id, 'archiveSha256': expected_sha256,
             'manifestSha256': hashlib.sha256(bundle.read('manifest.json')).hexdigest(),
             'manifest': manifest, 'sync': sync, 'startedAtUtc': start.isoformat(),
-            'anchorAtUtc': anchor.isoformat(), 'artifacts': artifacts,
+            'anchorAtUtc': anchor.isoformat(), 'artifacts': artifacts, 'captureQuality': quality,
             'unknowns': ['original_capture_device_not_exported', 'recording_end_timestamp_not_exported',
                          'hardware_calibration_not_measured']}
 
@@ -244,7 +262,8 @@ def apply_plan(engine, storage_root: Path, plan):
                 'source_recording_id': record['id'], 'source_manifest': plan['manifest'],
                 'imported_at_utc': created.isoformat(), 'unknowns': plan['unknowns'],
                 'calibration': {'measured': False, 'offset_ns': None, 'reason': 'not_measured_in_source'},
-                'questionnaire_snapshot_created_by_importer': True}}
+                'questionnaire_snapshot_created_by_importer': True,
+                'capture_quality': plan.get('captureQuality', {'status': 'not_audited'})}}
         values = {'recording_id': recording_id, 'schema_version': 2, 'monotonic_clock': sensor['monotonicClock'],
             'session_zero_at_utc': timestamp(plan['anchorAtUtc']), 'session_zero_wall_clock_ms': sensor['wallClockEpochMillis'],
             'session_zero_monotonic_ns': sensor['monotonicTimeNs'], 'session_zero_uncertainty_ns': sensor['samplingUncertaintyNs'],
@@ -275,7 +294,20 @@ def apply_plan(engine, storage_root: Path, plan):
                     raise ValueError('Canonical destination already exists with different bytes')
             else:
                 # A hardlink keeps verified bytes and originals intact without a second GB copy.
-                os.link(artifact['stagedPath'], destination)
+                try:
+                    os.link(artifact['stagedPath'], destination)
+                except OSError as error:
+                    if error.errno != errno.EXDEV:
+                        raise
+                    partial = destination.with_suffix(destination.suffix + '.import-part')
+                    with Path(artifact['stagedPath']).open('rb') as source, partial.open('wb') as output:
+                        shutil.copyfileobj(source, output, 4 * 1024 * 1024)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    if partial.stat().st_size != artifact['sizeBytes'] or file_hash(partial) != artifact['sha256']:
+                        raise ValueError('Canonical copy failed integrity verification; sources preserved')
+                    # Do not replace an externally-created immutable target.
+                    os.link(partial, destination)
             directory_fd = os.open(destination.parent, os.O_RDONLY)
             try:os.fsync(directory_fd)
             finally:os.close(directory_fd)
