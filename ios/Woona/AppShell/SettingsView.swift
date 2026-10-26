@@ -5,31 +5,14 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
                 if let error = appState.errorMessage {
-                    Section(appState.selectedLanguage == .russian ? "Ошибка" : "Error") {
+                    AppCard(title: appState.selectedLanguage == .russian ? "Ошибка" : "Error") {
                         Text(error).foregroundStyle(.red).textSelection(.enabled)
                     }
                 }
-                Section(appState.selectedLanguage == .russian ? "Аккаунт" : "Account") {
-                    TextField(appState.selectedLanguage == .russian ? "Уникальный идентификатор" : "Unique identifier", text: $appState.accountInput)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .disabled(!appState.canChangeAccount)
-                    LabeledContent(appState.selectedLanguage == .russian ? "Выбран" : "Selected", value: appState.selectedAccountID ?? (appState.selectedLanguage == .russian ? "Без аккаунта" : "Unassigned"))
-                    Button(appState.selectedLanguage == .russian ? "Применить и загрузить анкеты" : "Apply and load questionnaires") { appState.applyAccount() }
-                        .disabled(!appState.canChangeAccount)
-                    if appState.isAccountOperationRunning { ProgressView() }
-                    Text(appState.selectedLanguage == .russian ? "Без пароля. Пустое поле открывает данные без аккаунта. Один идентификатор на всех ваших устройствах." : "No password. An empty identifier opens unassigned data. Use the same identifier on all your devices.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                    if appState.selectedAccountID != nil {
-                        ForEach(appState.unassignedDogProfiles) { dog in
-                            Button(appState.selectedLanguage == .russian ? "Привязать собаку и все сессии: \(dog.numberOrName)" : "Link dog and all sessions: \(dog.numberOrName)") { appState.linkUnassignedDog(dog) }
-                                .disabled(!appState.canChangeAccount)
-                        }
-                    }
-                }
-                Section(appState.text(.bleTransport)) {
+                AppCard(title: appState.text(.bleTransport)) {
                     LabeledContent(appState.text(.profile)) {
                         Text(appState.currentTransportProfileTitle)
                             .foregroundStyle(.secondary)
@@ -39,7 +22,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Section(appState.text(.appearance)) {
+                AppCard(title: appState.text(.appearance)) {
                     Picker(appState.text(.theme), selection: $appState.selectedThemeMode) {
                         ForEach(AppThemeMode.allCases, id: \.self) { themeMode in
                             Text(themeMode.rawValue).tag(themeMode)
@@ -48,7 +31,7 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                 }
 
-                Section(appState.text(.language)) {
+                AppCard(title: appState.text(.language)) {
                     Picker(appState.text(.language), selection: $appState.selectedLanguage) {
                         ForEach(AppLanguage.allCases, id: \.self) { language in
                             Text(language.rawValue).tag(language)
@@ -56,7 +39,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(appState.selectedLanguage == .russian ? "Общий сервер" : "Shared server") {
+                AppCard(title: appState.selectedLanguage == .russian ? "Серверное хранилище" : "Server storage") {
                     TextField("https://server.example", text: $appState.serverBaseURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -83,8 +66,11 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 .disabled(!appState.canChangeAccount)
+                }.padding(12)
             }
+            .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle(appState.text(.settings))
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 }

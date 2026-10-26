@@ -4,6 +4,7 @@ struct ChartsView: View {
     @EnvironmentObject private var appState: AppViewModel
     @State private var isExportOptionsPresented = false
     @State private var pendingExportKind: ExportKind?
+    @State private var isFullscreen = false
 
     var body: some View {
         NavigationStack {
@@ -19,7 +20,26 @@ struct ChartsView: View {
             }
             .padding()
             .navigationTitle(appState.text(.charts))
+            .navigationBarTitleDisplayMode(.inline)
+            .fullScreenCover(isPresented: $isFullscreen) {
+                VStack(spacing: 10) {
+                    HStack {
+                        Button(appState.selectedLanguage == .russian ? "Выйти из полного экрана" : "Exit fullscreen") { isFullscreen = false }
+                            .accessibilityIdentifier("chart.fullscreen.close")
+                        Spacer()
+                    }
+                    SensorSelector()
+                    ChartControls()
+                    DeviceChartView()
+                }
+                .padding(12)
+                .background(Color(uiColor: .systemBackground))
+            }
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(appState.selectedLanguage == .russian ? "Полный экран" : "Fullscreen") { isFullscreen = true }
+                        .accessibilityIdentifier("chart.fullscreen.open")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(appState.text(.export)) {
                         isExportOptionsPresented = true

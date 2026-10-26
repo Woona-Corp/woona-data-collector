@@ -28,7 +28,10 @@
   builds; update affected clients when a server change requires it.
 - Release Android and iOS independently using `android-v*` and `ios-v*` tags.
   Platform-specific fixes and marketing/build versions may ship separately.
-  Maintain functional parity and compatible shared contracts across both clients;
+  Maintain the same UI/UX and functionality across both clients: screen order,
+  labels, visible actions, selection, validation, loading/error states and navigation
+  must match. Android is the baseline for current alignment; consult
+  `shared/UI_UX_CONTRACT.md` before changing either client. Preserve compatible shared contracts;
   track any temporary feature gaps explicitly. Verify TestFlight upload and Apple
   processing before claiming tester availability.
 

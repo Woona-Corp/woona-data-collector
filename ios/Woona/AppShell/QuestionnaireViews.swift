@@ -367,7 +367,9 @@ struct DogQuestionnaireEditor: View {
                 Section("Идентификация") {
                     Text("ID и кличка обязательны. Неизвестные ответы оставьте пустыми.")
                     TextField("Номер/ID животного *", text: text(\.animalId))
+                        .accessibilityIdentifier("dog.editor.animalID")
                     TextField("Кличка *", text: $draft.numberOrName)
+                        .accessibilityIdentifier("dog.editor.name")
                     TextField("Вид", text: text(\.species))
                     TextField("Приют/лагерь/место сбора", text: $draft.shelterOrPlace)
                     TextField("Порода", text: text(\.breedName))
@@ -415,7 +417,7 @@ struct DogQuestionnaireEditor: View {
             }
             .navigationTitle("Анкета собаки")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.accessibilityIdentifier("dog.editor.cancel") }
                 ToolbarItem(placement: .confirmationAction) { Button("Сохранить") {
                     errors = draft.validate().errors
                     guard errors.isEmpty else { return }

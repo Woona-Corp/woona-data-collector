@@ -6,6 +6,71 @@ struct DogProfileEditorPresentation: Identifiable {
     let profile: DogProfile?
 }
 
+struct AppCard<Content: View>: View {
+    let title: String
+    let content: Content
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.system(size: 16, weight: .semibold))
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct AccountControls: View {
+    @EnvironmentObject private var appState: AppViewModel
+    private var russian: Bool { appState.selectedLanguage == .russian }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(russian ? "Аккаунт" : "Account").font(.caption).foregroundStyle(.secondary)
+            TextField(russian ? "Аккаунт" : "Account", text: $appState.accountInput)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .accessibilityIdentifier("account.input")
+                .disabled(!appState.canChangeAccount)
+            Text(russian ? "Уникальный идентификатор без пароля. Пустое поле — данные без аккаунта." : "Unique identifier without a password. Leave empty to show unassigned data.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Button(russian ? "Применить аккаунт" : "Apply account") { appState.applyAccount() }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("account.apply")
+                .disabled(!appState.canChangeAccount)
+            if appState.isAccountOperationRunning { ProgressView() }
+            if appState.selectedAccountID != nil && !appState.unassignedDogProfiles.isEmpty {
+                Text(russian ? "Собаки без аккаунта. Связывание перенесёт все сессии собаки в этот аккаунт." : "Unassigned dogs. Linking moves all this dog’s sessions into this account.")
+                    .font(.footnote)
+                ForEach(appState.unassignedDogProfiles) { dog in
+                    Button(russian ? "Связать \(dog.numberOrName)" : "Link \(dog.numberOrName)") { appState.linkUnassignedDog(dog) }
+                        .buttonStyle(.bordered)
+                        .disabled(!appState.canChangeAccount)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("overview.account")
+    }
+}
+
+func recordingDisplayTime(_ value: String, timeZone: TimeZone = .current) -> String {
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    var date = iso.date(from: value)
+    if date == nil { iso.formatOptions = [.withInternetDateTime]; date = iso.date(from: value) }
+    guard let date else { return value }
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = timeZone
+    formatter.dateFormat = "dd.MM.yyyy HH:mm"
+    return formatter.string(from: date)
+}
+
 struct OverviewView: View {
     @EnvironmentObject private var appState: AppViewModel
     @State private var isReplayImporterPresented = false
@@ -24,33 +89,131 @@ struct OverviewView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section(appState.selectedLanguage == .russian ? "Собака" : "Dog profile") {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                AccountControls()
+                if appState.errorMessage != nil {
+                    AppCard(title: appState.selectedLanguage == .russian ? "Ошибка" : "Error") {
+                    if let errorMessage = appState.errorMessage {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                        if appState.hasDogIdentityConflict {
+                            Button(appState.selectedLanguage == .russian ? "Проверить и восстановить анкеты" : "Check and restore profiles") { appState.refreshFromServer() }
+                                .disabled(!appState.canChangeAccount)
+                            Button(appState.selectedLanguage == .russian ? "Проверить аккаунт" : "Check account") { appState.selectedTab = .overview }
+                        }
+                    }
+                    }
+                }
+                AppCard(title: appState.selectedLanguage == .russian ? "Активная собака" : "Active dog") {
                     if appState.dogProfiles.isEmpty {
                         Text(appState.selectedLanguage == .russian ? "Создайте обязательную анкету перед записью" : "Create the required questionnaire before recording")
                             .foregroundStyle(.secondary)
                     } else {
-                        Picker(appState.selectedLanguage == .russian ? "Выбрана" : "Selected", selection: selectedProfileID) {
-                            ForEach(appState.dogProfiles) { profile in
-                                Text(profile.numberOrName).tag(Optional(profile.id))
+                        ForEach(appState.dogProfiles) { profile in
+                            Button { appState.selectDogProfile(profile) } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: appState.selectedDogProfile?.id == profile.id ? "largecircle.fill.circle" : "circle")
+                                        .foregroundStyle(.tint)
+                                    Text(profile.numberOrName).foregroundStyle(.primary)
+                                    Spacer()
+                                }
+                                .padding(.vertical, 8)
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(profile.numberOrName)
+                            .accessibilityIdentifier("dog.select." + profile.id.uuidString)
+                            .accessibilityAddTraits(appState.selectedDogProfile?.id == profile.id ? [.isSelected] : [])
                         }
                     }
+
                     HStack(spacing: 16) {
-                        Button(appState.selectedLanguage == .russian ? "Новая" : "New") {
+                        Button(appState.selectedLanguage == .russian ? "Новая собака" : "New dog") {
                             dogEditorPresentation = DogProfileEditorPresentation(profile: nil)
                         }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("dog.new")
                         Button(appState.selectedLanguage == .russian ? "Изменить" : "Edit") {
                             guard let profile = appState.selectedDogProfile else { return }
                             dogEditorPresentation = DogProfileEditorPresentation(profile: profile)
                         }
+                        .accessibilityIdentifier("dog.edit")
                         .disabled(appState.selectedDogProfile == nil)
                     }
-                    // Explicit styling keeps List from treating both actions as a row tap.
+                    // Keep New and Edit as separate visible actions on both platforms.
                     .buttonStyle(.bordered)
                 }
 
-                Section(appState.text(.session)) {
+                if let profile = appState.selectedDogProfile {
+                    AppCard(title: appState.selectedLanguage == .russian
+                            ? (appState.showingAllRecordings ? "Все записи" : "Последние 10 записей")
+                            : (appState.showingAllRecordings ? "All recordings" : "Last 10 recordings")) {
+                        if appState.recentRecordings.isEmpty && appState.serverRecordings.isEmpty {
+                            Text(appState.selectedLanguage == .russian ? "У этой собаки пока нет записей" : "No recordings for this dog")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(appState.recentRecordings) { recording in
+                            VStack(alignment: .leading, spacing: 8) {
+                                if recording.endedAtUTC != nil {
+                                    Button(appState.selectedLanguage == .russian ? "Изменить анкету" : "Edit questionnaire") { editingSession = recording }
+                                        .disabled(!appState.canEditQuestionnaire(recording))
+                                    if recording.questionnaire?.sessionKind == "heart", recording.questionnaire?.readyForSync == false {
+                                        Button("Заполнить анкету по сердцебиению") { heartRecording = recording }
+                                    }
+                                    Button("Добавить ЭКГ / ЧСС / интервалы") {
+                                        referenceRecording = recording
+                                        isReferenceImporterPresented = true
+                                    }
+                                    .disabled(recording.serverSyncState == "remote")
+                                }
+                                VStack(alignment: .leading) {
+                                    Text(recording.sessionLabel)
+                                    Text(recordingDisplayTime(recording.startedAtUTC)).font(.caption)
+                                    Text("\(recording.source) · \(recording.status) · \(recording.serverSyncState)")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                if let error = appState.recordingSyncErrors[recording.id] {
+                                    Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                                }
+                                if let count = appState.recordingFileCounts[recording.id] {
+                                    Text(appState.selectedLanguage == .russian ? "На устройстве: \(count.local) из \(count.total) файлов" : "On device: \(count.local) of \(count.total) files")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                HStack {
+                                    Button(appState.selectedLanguage == .russian ? "Поделиться ZIP сессии" : "Share session ZIP") {
+                                        appState.shareRecording(recording.id)
+                                    }
+                                    .disabled(appState.exportPhase != nil || !appState.exportableRecordingIDs.contains(recording.id))
+                                    if appState.downloadableRecordingIDs.contains(recording.id) {
+                                        Button(appState.selectedLanguage == .russian ? "Скачать" : "Download") {
+                                            appState.downloadRecording(recording.id)
+                                        }
+                                        .disabled(appState.downloadingRecordingID != nil)
+                                    }
+                                }
+
+                            }
+                        }
+                        if !appState.showingAllRecordings && appState.recentRecordings.count == 10 {
+                            Button(appState.selectedLanguage == .russian ? "Показать все записи" : "Show all recordings") {
+                                appState.showAllRecordings()
+                            }
+                        }
+                        ForEach(appState.serverRecordings.filter { remote in !appState.recentRecordings.contains(where: { $0.id == remote.id }) }) { recording in
+                            VStack(alignment: .leading) {
+                                Text(recording.sessionLabel)
+                                Text("server · \(recording.source) · \(recording.ingestStatus)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .id(profile.id)
+                }
+
+                if appState.isConnectionActive || appState.activeRecording != nil || appState.packetsReceived > 0 {
+                AppCard(title: appState.text(.session)) {
                     LabeledContent(appState.text(.status), value: appState.statusText)
                     if appState.isReplayRunning {
                         Text(appState.text(.replay))
@@ -65,19 +228,12 @@ struct OverviewView: View {
                         packetsRejected: appState.packetsRejected
                     )
                     CompactSessionDetails()
-                    if let errorMessage = appState.errorMessage {
-                        Text(errorMessage)
-                            .foregroundStyle(.red)
-                            .textSelection(.enabled)
-                        if appState.hasDogIdentityConflict {
-                            Button(appState.selectedLanguage == .russian ? "Проверить и восстановить анкеты" : "Check and restore profiles") { appState.refreshFromServer() }
-                                .disabled(!appState.canChangeAccount)
-                            Button(appState.selectedLanguage == .russian ? "Проверить аккаунт" : "Check account") { appState.selectedTab = .settings }
-                        }
-                    }
+
                 }
 
-                Section(appState.text(.captureControls)) {
+                }
+
+                AppCard(title: appState.text(.captureControls)) {
                     if appState.isCaptureReady, appState.activeRecording?.videoRequested == true, !appState.isCameraDegraded {
                         CameraPreview(recorder: appState.cameraRecorder)
                             .aspectRatio(16.0 / 9.0, contentMode: .fit)
@@ -121,7 +277,7 @@ struct OverviewView: View {
                     }
                 }
 
-                Section(appState.text(.devices)) {
+                AppCard(title: appState.text(.devices)) {
                     if appState.foundDevices.isEmpty {
                         Text(appState.text(.noDevices))
                             .foregroundStyle(.secondary)
@@ -144,76 +300,8 @@ struct OverviewView: View {
                     }
                 }
 
-                if let profile = appState.selectedDogProfile {
-                    Section(appState.selectedLanguage == .russian
-                            ? (appState.showingAllRecordings ? "Все записи" : "Последние записи")
-                            : (appState.showingAllRecordings ? "All recordings" : "Recent recordings")) {
-                        if appState.recentRecordings.isEmpty && appState.serverRecordings.isEmpty {
-                            Text(appState.selectedLanguage == .russian ? "Записей пока нет" : "No recordings yet")
-                                .foregroundStyle(.secondary)
-                        }
-                        ForEach(appState.recentRecordings) { recording in
-                            VStack(alignment: .leading, spacing: 8) {
-                                VStack(alignment: .leading) {
-                                    Text(recording.sessionLabel)
-                                    if let date = ISO8601DateFormatter().date(from: recording.startedAtUTC) {
-                                        Text(date.formatted(date: .abbreviated, time: .shortened)).font(.caption)
-                                    }
-                                    Text("\(recording.source) · \(recording.status) · \(recording.serverSyncState)")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                                if let error = appState.recordingSyncErrors[recording.id] {
-                                    Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
-                                }
-                                if let count = appState.recordingFileCounts[recording.id] {
-                                    Text(appState.selectedLanguage == .russian ? "На устройстве: \(count.local) из \(count.total) файлов" : "On device: \(count.local) of \(count.total) files")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                                HStack {
-                                    Button(appState.selectedLanguage == .russian ? "Поделиться ZIP сессии" : "Share session ZIP") {
-                                        appState.shareRecording(recording.id)
-                                    }
-                                    .disabled(appState.exportPhase != nil || !appState.exportableRecordingIDs.contains(recording.id))
-                                    if appState.downloadableRecordingIDs.contains(recording.id) {
-                                        Button(appState.selectedLanguage == .russian ? "Скачать" : "Download") {
-                                            appState.downloadRecording(recording.id)
-                                        }
-                                        .disabled(appState.downloadingRecordingID != nil)
-                                    }
-                                }
-                                if recording.endedAtUTC != nil {
-                                    Button(appState.selectedLanguage == .russian ? "Редактировать анкету сессии" : "Edit session questionnaire") { editingSession = recording }
-                                        .disabled(!appState.canEditQuestionnaire(recording))
-                                    Button(appState.selectedLanguage == .russian ? "Заменить анкету данными сервера" : "Restore questionnaire from server") { appState.restoreSessionQuestionnaire(recording) }
-                                        .disabled(!appState.canEditQuestionnaire(recording))
-                                    if recording.questionnaire?.sessionKind == "heart", recording.questionnaire?.readyForSync == false {
-                                        Button("Заполнить анкету по сердцебиению") { heartRecording = recording }
-                                    }
-                                    Button("Добавить ЭКГ / ЧСС / интервалы") {
-                                        referenceRecording = recording
-                                        isReferenceImporterPresented = true
-                                    }
-                                    .disabled(recording.serverSyncState == "remote")
-                                }
-                            }
-                        }
-                        if !appState.showingAllRecordings && appState.recentRecordings.count == 10 {
-                            Button(appState.selectedLanguage == .russian ? "Показать все записи" : "Show all recordings") {
-                                appState.showAllRecordings()
-                            }
-                        }
-                        ForEach(appState.serverRecordings.filter { remote in !appState.recentRecordings.contains(where: { $0.id == remote.id }) }) { recording in
-                            VStack(alignment: .leading) {
-                                Text(recording.sessionLabel)
-                                Text("server · \(recording.source) · \(recording.ingestStatus)")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .id(profile.id)
-                }
 
-                Section(appState.text(.diagnostics)) {
+                AppCard(title: appState.text(.diagnostics)) {
                     if appState.diagnosticMessages.isEmpty {
                         Text(appState.text(.noDiagnosticEvents))
                             .foregroundStyle(.secondary)
@@ -224,8 +312,12 @@ struct OverviewView: View {
                         }
                     }
                 }
+                }
+                .padding(12)
             }
+            .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle(appState.text(.overview))
+            .navigationBarTitleDisplayMode(.inline)
             .onChange(of: appState.recentRecordings) { _, records in
                 if heartRecording == nil, !isSessionEditorPresented {
                     heartRecording = records.first { $0.endedAtUTC != nil && $0.questionnaire?.sessionKind == "heart" && $0.questionnaire?.readyForSync == false }
@@ -314,17 +406,6 @@ struct OverviewView: View {
                 }
             }
         }
-    }
-
-    private var selectedProfileID: Binding<UUID?> {
-        Binding(
-            get: { appState.selectedDogProfile?.id },
-            set: { id in
-                if let id, let profile = appState.dogProfiles.first(where: { $0.id == id }) {
-                    appState.selectDogProfile(profile)
-                }
-            }
-        )
     }
 
     private func preparePendingExport() {

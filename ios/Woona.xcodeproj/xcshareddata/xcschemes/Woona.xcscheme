@@ -41,6 +41,9 @@
                ReferencedContainer = "container:Woona.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference skipped="NO" parallelizable="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="8A1B000A2B00000100000001" BuildableName="WoonaUITests.xctest" BlueprintName="WoonaUITests" ReferencedContainer="container:Woona.xcodeproj" />
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

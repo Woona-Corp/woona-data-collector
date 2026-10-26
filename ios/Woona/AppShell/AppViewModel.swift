@@ -98,7 +98,7 @@ final class AppViewModel: ObservableObject {
     private var hasPreparedActiveCapture = false
     @Published private var syncingRecordingIDs = Set<UUID>()
 
-    init(store: WoonaStore? = try? WoonaStore()) {
+    init(store: WoonaStore? = try? WoonaStore(), uiTesting: Bool = false) {
         self.store = store
         let defaults = UserDefaults.standard
         selectedThemeMode = defaults.string(forKey: "themeMode").flatMap(AppThemeMode.init(rawValue:)) ?? .system
@@ -108,13 +108,24 @@ final class AppViewModel: ObservableObject {
         serverToken = keychainTokenStore.load()
         selectedAccountID = defaults.string(forKey: "selectedAccountID")
         accountInput = selectedAccountID ?? ""
+        if uiTesting {
+            selectedLanguage = .english
+            selectedThemeMode = .light
+            selectedAccountID = nil
+            accountInput = ""
+            serverToken = ""
+            serverBaseURL = ""
+        }
         cameraRecorder.onRecordingFailure = { [weak self] message in
             Task { @MainActor in self?.handleCameraFailure(message) }
         }
         reloadProfiles(selecting: defaults.string(forKey: "selectedDogID").flatMap(UUID.init(uuidString:)))
+        if uiTesting, let profile = dogProfiles.first(where: { $0.numberOrName == "UI Dog 1" }) { selectDogProfile(profile) }
         if store == nil { errorMessage = "Unable to open local Woona database" }
-        registerBackgroundSync()
-        schedulePendingSync()
+        if !uiTesting {
+            registerBackgroundSync()
+            schedulePendingSync()
+        }
     }
 
     enum AppTab: Hashable {
@@ -145,6 +156,7 @@ final class AppViewModel: ObservableObject {
         guard profile.accountID == selectedAccountID else { return }
         serverRecordings = []
         selectedDogProfile = profile
+        showingAllRecordings = false
         UserDefaults.standard.set(profile.id.uuidString, forKey: "selectedDogID")
         reloadRecentRecordings()
         Task { await reloadServerRecordings() }
@@ -164,6 +176,15 @@ final class AppViewModel: ObservableObject {
         guard canChangeAccount, let store else { return }
         do {
             let account = try WoonaServerClient.normalizedAccount(accountInput)
+            if serverToken.isEmpty || serverBaseURL.isEmpty {
+                selectedAccountID = account
+                accountInput = account ?? ""
+                UserDefaults.standard.set(account, forKey: "selectedAccountID")
+                serverRecordings = []
+                showingAllRecordings = false
+                reloadProfiles()
+                return
+            }
             let client = try serverClient(accountID: account)
             isAccountOperationRunning = true
             Task {
