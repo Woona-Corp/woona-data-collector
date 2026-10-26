@@ -38,7 +38,7 @@ final class OverviewParityTests: XCTestCase {
         app.buttons["dog.new"].tap()
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         // Empty SwiftUI text fields expose their placeholder as their value.
-        XCTAssertNotEqual(name.value as? String, "UI Dog 1")
+        XCTAssertTrue(["", "Кличка *"].contains(name.value as? String ?? "unexpected"))
         XCTAssertNotEqual(app.textFields["dog.editor.animalID"].value as? String, "ui-dog-1")
         name.tap()
         name.typeText("New animal")
@@ -48,6 +48,39 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         XCTAssertEqual(name.value as? String, "UI Dog 2")
         XCTAssertEqual(app.textFields["dog.editor.animalID"].value as? String, "ui-dog-2")
+    }
+
+    func testNewSavesSeparateDogAndKeepsExistingProfile() {
+        app.buttons["dog.new"].tap()
+        let id = app.textFields["dog.editor.animalID"]
+        XCTAssertTrue(id.waitForExistence(timeout: 5))
+        id.tap()
+        id.typeText("ui-dog-3")
+        let name = app.textFields["dog.editor.name"]
+        name.tap()
+        name.typeText("UI Dog 3")
+        app.buttons["dog.editor.save"].tap()
+        XCTAssertTrue(app.buttons["dog.new"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label == %@", "UI Dog 3")).firstMatch.exists)
+        app.buttons.matching(NSPredicate(format: "label == %@", "UI Dog 1")).firstMatch.tap()
+        app.buttons["dog.edit"].tap()
+        XCTAssertTrue(id.waitForExistence(timeout: 5))
+        XCTAssertEqual(id.value as? String, "ui-dog-1")
+        XCTAssertEqual(name.value as? String, "UI Dog 1")
+    }
+
+    func testRussianDarkOverviewHasSameActions() {
+        app.terminate()
+        app.launchArguments += ["--ui-language=ru", "--ui-theme=dark"]
+        app.launch()
+        XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
+        XCTAssertEqual(app.buttons["account.apply"].label, "Применить аккаунт")
+        XCTAssertEqual(app.buttons["dog.new"].label, "Новая собака")
+        XCTAssertEqual(app.buttons["dog.edit"].label, "Изменить")
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Overview-Russian-dark"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 
     func testServerConnectionRequiresTokenAndCancelDoesNotConfigure() {
@@ -65,13 +98,13 @@ final class OverviewParityTests: XCTestCase {
 
     func testIdleDiscoveryActionsAppearTogether() {
         let scan = app.buttons["devices.scan"]
+        let replay = app.buttons["devices.replay"]
         for _ in 0..<4 {
-            if scan.isHittable { break }
+            if scan.isHittable && replay.isHittable { break }
             app.swipeUp()
         }
         XCTAssertTrue(scan.isHittable)
         XCTAssertEqual(scan.label, "START SCAN")
-        let replay = app.buttons["devices.replay"]
         XCTAssertTrue(replay.isHittable)
         XCTAssertLessThan(scan.frame.minY, replay.frame.minY)
         XCTAssertFalse(app.buttons["DISCONNECT"].exists)

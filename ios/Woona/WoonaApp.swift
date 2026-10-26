@@ -19,7 +19,10 @@ struct WoonaApp: App {
                 questionnaire.species = "собака"
                 _ = try? store?.saveProfile(questionnaire)
             }
-            _appState = StateObject(wrappedValue: AppViewModel(store: store, uiTesting: true))
+            let model = AppViewModel(store: store, uiTesting: true)
+            if ProcessInfo.processInfo.arguments.contains("--ui-language=ru") { model.selectedLanguage = .russian }
+            if ProcessInfo.processInfo.arguments.contains("--ui-theme=dark") { model.selectedThemeMode = .dark }
+            _appState = StateObject(wrappedValue: model)
             return
         }
         #endif

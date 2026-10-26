@@ -423,7 +423,7 @@ struct DogQuestionnaireEditor: View {
                     guard errors.isEmpty else { return }
                     draft.savedAtLocal = sheetSavedAt()
                     onSave(draft); dismiss()
-                } }
+                }.accessibilityIdentifier("dog.editor.save") }
             }
         }
     }
