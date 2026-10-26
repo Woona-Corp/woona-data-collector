@@ -39,6 +39,9 @@ import com.example.myapplication.data.sessionQuestionnaireFromJson
 import com.example.myapplication.data.validate
 import com.example.myapplication.R
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.util.concurrent.TimeUnit
 
 class ProfileSyncWorker(
@@ -61,7 +64,8 @@ class ProfileSyncWorker(
                 return Result.failure()
             }
             val profile = database.profileSyncRecord(profileVersionId) ?: return Result.success()
-            val client = ServerApiClient(settings.copy(accountId = database.profile(profile.dogId)?.accountId))
+            val transferContext = currentCoroutineContext()
+            val client = ServerApiClient(settings.copy(accountId = database.profile(profile.dogId)?.accountId), checkCancelled = { transferContext.ensureActive() })
             database.applyServerDeletions(client.fetchDeletions())
             database.markProfileUploading(profileVersionId)
             val receipt = client.uploadProfile(profile)
@@ -72,6 +76,9 @@ class ProfileSyncWorker(
                 receipt.dogRevision,
             )
             Result.success()
+        } catch (cancelled: CancellationException) {
+            database.markProfileSyncError(profileVersionId, true, "transfer_paused", "transfer_paused: Transfer paused; local data and confirmed progress are preserved for retry")
+            throw cancelled
         } catch (exception: Exception) {
             val retryable = exception.isRetryable()
             database.markProfileSyncError(
@@ -131,7 +138,8 @@ class RecordingSyncWorker(
                 return Result.failure()
             }
             var record = database.recordingSyncRecord(recordingId) ?: return Result.success()
-            val client = ServerApiClient(settings.copy(accountId = database.profile(record.dogId)?.accountId))
+            val transferContext = currentCoroutineContext()
+            val client = ServerApiClient(settings.copy(accountId = database.profile(record.dogId)?.accountId), checkCancelled = { transferContext.ensureActive() })
             database.applyServerDeletions(client.fetchDeletions())
             val accepted = try { client.fetchRecording(recordingId) }
                 catch (error: ServerHttpException) { if (error.status == 404) null else throw error }
@@ -177,6 +185,9 @@ class RecordingSyncWorker(
                 receipt.verifiedAtUtc,
             )
             if (database.recording(recordingId)?.serverSyncState == "pending") Result.retry() else Result.success()
+        } catch (cancelled: CancellationException) {
+            database.markRecordingSyncError(recordingId, true, "transfer_paused", "transfer_paused: Transfer paused; local data and confirmed progress are preserved for retry")
+            throw cancelled
         } catch (exception: Exception) {
             val retryable = exception.isRetryable()
             database.markRecordingSyncError(
@@ -296,12 +307,14 @@ object ServerSyncScheduler {
 
 private fun Exception.isRetryable(): Boolean = when (this) {
     is ServerHttpException -> status in setOf(408, 425, 429) || status >= 500
+    is ServerTransferException -> retryable
     is IOException -> true
     else -> false
 }
 
 private fun Exception.errorCode(): String = when (this) {
     is ServerHttpException -> "http_$status"
+    is ServerTransferException -> code
     is IOException -> "network_error"
     else -> "local_data_error"
 }

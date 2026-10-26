@@ -3,6 +3,275 @@ import SQLite3
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    @MainActor
+    private func networkSource(_ test: (URL, URL) async throws -> Void) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("source.bin")
+        try Data("abcdef".utf8).write(to: source)
+        defer { NetworkFaultProtocol.handler = nil; try? FileManager.default.removeItem(at: root) }
+        try await test(root, source)
+    }
+
+    @MainActor
+    private func networkClient(download: WoonaServerClient.DownloadTransport? = nil) throws -> WoonaServerClient {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NetworkFaultProtocol.self]
+        return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false), token: "fixture",
+                                     sessionConfiguration: configuration, downloadTransport: download)
+    }
+
+    @MainActor
+    func testRepeatedRestoreCursorTerminatesWithoutLoopingOrDeletingLocalProfiles() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            _ = try store.saveProfile(completeDog())
+            var calls = 0
+            let cursor = UUID().uuidString
+            NetworkFaultProtocol.handler = { _ in
+                calls += 1
+                return .init(body: try JSONSerialization.data(withJSONObject: ["items": [], "nextCursor": cursor]))
+            }
+            do { _ = try await networkClient().restoreProfiles(into: store); XCTFail("Restore cursor must advance") }
+            catch ServerSyncError.transfer(let code, _, _) { XCTAssertEqual(code, "pagination_stalled") }
+            XCTAssertEqual(calls, 2)
+            XCTAssertEqual(try store.profiles().count, 1)
+        }
+    }
+
+    @MainActor
+    func testProtocolFailureIsPersistedAsActionablePermanentErrorWithoutDeletingRecording() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(completeDog())
+            let record = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+            try store.finalize(recording: record, status: "completed", files: [], syncJSON: Data("{}".utf8))
+            let saved = try XCTUnwrap(store.recording(id: record.id))
+            NetworkFaultProtocol.handler = { request in
+                if request.url!.path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                if request.url!.path.hasSuffix("/sync-status") { return .init(status: 404) }
+                if request.url!.path == "/v1/me" { return .init(body: try JSONSerialization.data(withJSONObject: ["deviceId": UUID().uuidString])) }
+                if request.httpMethod == "PUT" { return .init(body: Data(#"{"dogRevision":1}"#.utf8)) }
+                if request.httpMethod == "HEAD" { return .init(headers: ["Upload-Offset": "-1"]) }
+                throw URLError(.badServerResponse)
+            }
+            do { try await networkClient().upload(recording: saved, profile: profile, store: store); XCTFail("Invalid server position must fail") }
+            catch ServerSyncError.transfer(let code, _, _) { XCTAssertEqual(code, "upload_offset_invalid") }
+            XCTAssertEqual(try store.recording(id: record.id)?.serverSyncState, "permanent_error")
+            XCTAssertTrue(try XCTUnwrap(store.recordingSyncError(recordingID: record.id)).contains("upload_offset_invalid"))
+            XCTAssertFalse(try store.artifacts(recordingID: record.id).isEmpty)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: store.directory(for: record).appendingPathComponent("sync.json").path))
+        }
+    }
+
+    @MainActor
+    func testInvalidHeadOffsetsFailBeforeSeekOrPatch() async throws {
+        try await networkSource { _, source in
+            let values: [String?] = ["-1", "7", nil, "999999999999999999999999999999"]
+            for value in values {
+                var calls = 0
+                NetworkFaultProtocol.handler = { request in
+                    calls += 1
+                    XCTAssertEqual(request.httpMethod, "HEAD")
+                    return .init(headers: value.map { ["Upload-Offset": $0] } ?? [:])
+                }
+                do {
+                    try await networkClient().uploadArtifactBytes(UUID(), file: source, size: 6)
+                    XCTFail("Invalid HEAD must fail before converting an offset to UInt64")
+                } catch ServerSyncError.transfer(let code, _, _) {
+                    XCTAssertTrue(["upload_offset_invalid", "upload_offset_missing"].contains(code))
+                }
+                XCTAssertEqual(calls, 1)
+            }
+        }
+    }
+
+    @MainActor
+    func testPatchCannotGuessMissingOffsetOrAcceptNonadvancingAcknowledgment() async throws {
+        try await networkSource { _, source in
+            let values: [String?] = ["-1", "0", "2", "7", nil, "overflow"]
+            for value in values {
+                var progress: [Int64] = []
+                var calls = 0
+                NetworkFaultProtocol.handler = { request in
+                    calls += 1
+                    return .init(headers: request.httpMethod == "HEAD" ? ["Upload-Offset": "0"] : value.map { ["Upload-Offset": $0] } ?? [:])
+                }
+                do {
+                    try await networkClient().uploadArtifactBytes(UUID(), file: source, size: 6) { progress.append($0) }
+                    XCTFail("Invalid PATCH acknowledgment must not report completion")
+                } catch ServerSyncError.transfer(let code, _, _) {
+                    XCTAssertTrue(["upload_offset_invalid", "upload_offset_missing"].contains(code))
+                }
+                XCTAssertEqual(progress, [0])
+                XCTAssertEqual(calls, 2)
+            }
+        }
+    }
+
+    @MainActor
+    func testConflictRetriesAreBoundedAndRewindsReseekTheFile() async throws {
+        try await networkSource { _, source in
+            var patches = 0
+            NetworkFaultProtocol.handler = { request in
+                if request.httpMethod == "HEAD" { return .init(headers: ["Upload-Offset": "0"]) }
+                patches += 1
+                return .init(status: 409)
+            }
+            do {
+                try await networkClient().uploadArtifactBytes(UUID(), file: source, size: 6)
+                XCTFail("A stalled conflict must terminate")
+            } catch ServerSyncError.transfer(let code, _, let retryable) {
+                XCTAssertEqual(code, "upload_conflict_stalled")
+                XCTAssertTrue(retryable)
+            }
+            XCTAssertEqual(patches, 4)
+            var heads = 0
+            patches = 0
+            NetworkFaultProtocol.handler = { request in
+                if request.httpMethod == "HEAD" {
+                    heads += 1
+                    return .init(headers: ["Upload-Offset": heads == 1 ? "4" : "1"])
+                }
+                patches += 1
+                if patches == 1 {
+                    XCTAssertEqual(request.value(forHTTPHeaderField: "Upload-Offset"), "4")
+                    return .init(status: 409)
+                }
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Upload-Offset"), "1")
+                XCTAssertEqual(NetworkFaultProtocol.body(request), Data("bcdef".utf8))
+                return .init(status: 204, headers: ["Upload-Offset": "6"])
+            }
+            try await networkClient().uploadArtifactBytes(UUID(), file: source, size: 6)
+            XCTAssertEqual(patches, 2)
+            XCTAssertEqual(try Data(contentsOf: source), Data("abcdef".utf8))
+        }
+    }
+
+    @MainActor
+    func testUploadTimeoutAndEarlyLocalEofPreserveTheSourceAndFailExplicitly() async throws {
+        try await networkSource { _, source in
+            NetworkFaultProtocol.handler = { _ in throw URLError(.timedOut) }
+            do { try await networkClient().uploadArtifactBytes(UUID(), file: source, size: 6); XCTFail("Timeout must fail") }
+            catch let error as URLError { XCTAssertEqual(error.code, .timedOut) }
+            XCTAssertEqual(try Data(contentsOf: source), Data("abcdef".utf8))
+            NetworkFaultProtocol.handler = { _ in
+                try Data("ab".utf8).write(to: source)
+                return .init(headers: ["Upload-Offset": "0"])
+            }
+            do { try await networkClient().uploadArtifactBytes(UUID(), file: source, size: 6); XCTFail("Truncated source must fail") }
+            catch ServerSyncError.transfer(let code, _, let retryable) { XCTAssertEqual(code, "local_artifact_truncated"); XCTAssertFalse(retryable) }
+            XCTAssertEqual(try Data(contentsOf: source), Data("ab".utf8))
+        }
+    }
+
+    @MainActor
+    func testDownloadPreservesExistingTargetsAndFinalizesValidFullPartialWithoutNetwork() async throws {
+        try await networkSource { root, source in
+            let hash = WoonaStore.sha256(Data("abcdef".utf8))
+            let client = try networkClient(download: { _ in XCTFail("Existing complete files must not contact network"); throw URLError(.badServerResponse) })
+            try await client.download(artifactID: UUID(), to: source, expectedSize: 6, sha256: hash)
+            do { try await client.download(artifactID: UUID(), to: source, expectedSize: 6, sha256: String(repeating: "0", count: 64)); XCTFail("Conflicting target must be preserved") }
+            catch ServerSyncError.transfer(let code, _, _) { XCTAssertEqual(code, "local_artifact_conflict") }
+            XCTAssertEqual(try Data(contentsOf: source), Data("abcdef".utf8))
+            let target = root.appendingPathComponent("target.bin")
+            try Data("abcdef".utf8).write(to: target.appendingPathExtension("part"))
+            try await client.download(artifactID: UUID(), to: target, expectedSize: 6, sha256: hash)
+            XCTAssertEqual(try Data(contentsOf: target), Data("abcdef".utf8))
+        }
+    }
+
+    @MainActor
+    func testDownloadRangeValidationAndIgnoredRangeNeverCorruptTheExistingPrefix() async throws {
+        try await networkSource { root, _ in
+            let hash = WoonaStore.sha256(Data("abcdef".utf8))
+            let target = root.appendingPathComponent("target.bin")
+            let part = target.appendingPathExtension("part")
+            let invalid: [[String: String]] = [[:], ["Content-Range": "bytes 1-4/6"], ["Content-Range": "bytes 2-5/7"],
+                ["Content-Range": "bytes 2-5/6", "ETag": "different"], ["Content-Range": "bytes 2-5/6", "Content-Length": "5"],
+                ["Content-Range": "bytes 2-5/6", "Content-Encoding": "gzip"]]
+            for headers in invalid {
+                try Data("ab".utf8).write(to: part)
+                let client = try networkClient(download: { request in
+                    XCTAssertEqual(request.value(forHTTPHeaderField: "Accept-Encoding"), "identity")
+                    XCTAssertEqual(request.value(forHTTPHeaderField: "Range"), "bytes=2-5")
+                    let temporary = root.appendingPathComponent(UUID().uuidString)
+                    try Data("cdef".utf8).write(to: temporary)
+                    return (temporary, HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: nil, headerFields: headers)!)
+                })
+                do { try await client.download(artifactID: UUID(), to: target, expectedSize: 6, sha256: hash); XCTFail("Malformed download must fail before touching the prefix") }
+                catch ServerSyncError.transfer {}
+                XCTAssertEqual(try Data(contentsOf: part), Data("ab".utf8))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+            }
+            let ignoredRange = try networkClient(download: { request in
+                let temporary = root.appendingPathComponent(UUID().uuidString)
+                try Data("abcdef".utf8).write(to: temporary)
+                return (temporary, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Length": "6"])!)
+            })
+            try await ignoredRange.download(artifactID: UUID(), to: target, expectedSize: 6, sha256: hash)
+            XCTAssertEqual(try Data(contentsOf: target), Data("abcdef".utf8))
+        }
+    }
+
+    @MainActor
+    func testDownloadChunkResumptionRetainsConfirmedPrefixAcrossTimeout() async throws {
+        try await networkSource { root, _ in
+            let block = Data(repeating: 42, count: 8 * 1_024 * 1_024)
+            let full = block + Data("end".utf8)
+            let target = root.appendingPathComponent("large.bin")
+            let part = target.appendingPathExtension("part")
+            var calls = 0
+            let client = try networkClient(download: { request in
+                calls += 1
+                if calls == 2 { throw URLError(.timedOut) }
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Range"), "bytes=0-8388607")
+                let temporary = root.appendingPathComponent(UUID().uuidString)
+                try block.write(to: temporary)
+                return (temporary, HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: nil, headerFields: ["Content-Range": "bytes 0-8388607/8388611"])!)
+            })
+            do { try await client.download(artifactID: UUID(), to: target, expectedSize: Int64(full.count), sha256: WoonaStore.sha256(full)); XCTFail("Timeout must not publish a partial target") }
+            catch let error as URLError { XCTAssertEqual(error.code, .timedOut) }
+            XCTAssertEqual(try Data(contentsOf: part), block)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+            let resume = try networkClient(download: { request in
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Range"), "bytes=8388608-8388610")
+                let temporary = root.appendingPathComponent(UUID().uuidString)
+                try Data("end".utf8).write(to: temporary)
+                return (temporary, HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: nil, headerFields: ["Content-Range": "bytes 8388608-8388610/8388611"])!)
+            })
+            try await resume.download(artifactID: UUID(), to: target, expectedSize: Int64(full.count), sha256: WoonaStore.sha256(full))
+            XCTAssertEqual(try Data(contentsOf: target), full)
+        }
+    }
+
+    @MainActor
+    func testDownloadEarlyEofAndHashMismatchDoNotPublishBadFiles() async throws {
+        try await networkSource { root, _ in
+            let target = root.appendingPathComponent("target.bin")
+            let part = target.appendingPathExtension("part")
+            try Data("ab".utf8).write(to: part)
+            let hash = WoonaStore.sha256(Data("abcdef".utf8))
+            let early = try networkClient(download: { request in
+                let temporary = root.appendingPathComponent(UUID().uuidString)
+                try Data("c".utf8).write(to: temporary)
+                return (temporary, HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: nil, headerFields: ["Content-Range": "bytes 2-5/6"])!)
+            })
+            do { try await early.download(artifactID: UUID(), to: target, expectedSize: 6, sha256: hash); XCTFail("EOF must fail") }
+            catch ServerSyncError.transfer(let code, _, let retryable) { XCTAssertEqual(code, "download_incomplete"); XCTAssertTrue(retryable) }
+            XCTAssertEqual(try Data(contentsOf: part), Data("ab".utf8))
+            let badHash = try networkClient(download: { request in
+                let temporary = root.appendingPathComponent(UUID().uuidString)
+                try Data("cdeg".utf8).write(to: temporary)
+                return (temporary, HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: nil, headerFields: ["Content-Range": "bytes 2-5/6"])!)
+            })
+            do { try await badHash.download(artifactID: UUID(), to: target, expectedSize: 6, sha256: hash); XCTFail("Wrong SHA must fail") }
+            catch ServerSyncError.transfer(let code, _, _) { XCTAssertEqual(code, "download_hash_mismatch") }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: part.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+        }
+    }
+
     func testCaptureReasonPersistsInHistoryAndSurvivesRestart() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -899,4 +1168,41 @@ private final class RecordingSyncProtocol: URLProtocol, @unchecked Sendable {
         } catch { client?.urlProtocol(self, didFailWithError: error) }
     }
     override func stopLoading() {}
+}
+
+private final class NetworkFaultProtocol: URLProtocol, @unchecked Sendable {
+    struct Reply {
+        var status = 200
+        var headers: [String: String] = [:]
+        var body = Data()
+    }
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> Reply)?
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "network.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        do {
+            guard let handler = Self.handler else { throw URLError(.badServerResponse) }
+            let reply = try handler(request)
+            let response = HTTPURLResponse(url: request.url!, statusCode: reply.status, httpVersion: nil, headerFields: reply.headers)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !reply.body.isEmpty { client?.urlProtocol(self, didLoad: reply.body) }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+    override func stopLoading() {}
+    static func body(_ request: URLRequest) -> Data {
+        if let data = request.httpBody { return data }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var result = Data()
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 65_536)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let count = stream.read(buffer, maxLength: 65_536)
+            if count <= 0 { break }
+            result.append(buffer, count: count)
+        }
+        return result
+    }
 }

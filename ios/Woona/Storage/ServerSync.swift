@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Security
 
 struct ServerConfiguration: Equatable {
@@ -154,6 +155,7 @@ enum ServerSyncError: LocalizedError {
     case invalidURL
     case tokenMissing
     case responseInvalid
+    case transfer(code: String, message: String, retryable: Bool)
     case requestFailed(Int, String)
     case animalIDConflict
 
@@ -171,6 +173,7 @@ enum ServerSyncError: LocalizedError {
         case .invalidURL: "Server URL is invalid"
         case .tokenMissing: "Server token is missing"
         case .responseInvalid: "Server response is invalid"
+        case .transfer(let code, let message, _): "\(code): \(message)"
         case .animalIDConflict: "This animal ID already belongs to another profile. Check the account, restore profiles and select the existing dog. Local recordings are preserved; changing the name does not release the ID."
         case .requestFailed(let status, let message): "Server returned \(status): \(message)"
         }
@@ -230,8 +233,10 @@ final class WoonaServerClient {
     private let token: String
     private let accountID: String?
     private let session: URLSession
+    typealias DownloadTransport = @MainActor (URLRequest) async throws -> (URL, URLResponse)
+    private let downloadTransport: DownloadTransport?
 
-    init(configuration: ServerConfiguration, token: String, sessionConfiguration: URLSessionConfiguration = .default) throws {
+    init(configuration: ServerConfiguration, token: String, sessionConfiguration: URLSessionConfiguration = .default, downloadTransport: DownloadTransport? = nil) throws {
         guard let url = URL(string: configuration.baseURL), url.host != nil,
               ["http", "https"].contains(url.scheme?.lowercased()) else {
             throw ServerSyncError.invalidURL
@@ -240,11 +245,14 @@ final class WoonaServerClient {
         self.baseURL = url
         self.token = token
         self.accountID = configuration.accountID
+        self.downloadTransport = downloadTransport
         sessionConfiguration.allowsCellularAccess = !configuration.wifiOnly
         sessionConfiguration.allowsExpensiveNetworkAccess = !configuration.wifiOnly
         sessionConfiguration.waitsForConnectivity = true
-        self.session = URLSession(configuration: sessionConfiguration)
+        self.session = URLSession(configuration: sessionConfiguration, delegate: NoTransferRedirects(), delegateQueue: nil)
     }
+
+    deinit { session.invalidateAndCancel() }
 
     static func normalizedAccount(_ input: String) throws -> String? {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -338,6 +346,7 @@ final class WoonaServerClient {
         struct Summary: Decodable { let id: UUID }
         struct Page: Decodable { let items: [Summary]; let nextCursor: UUID? }
         var cursor: UUID?
+        var seenCursors = Set<UUID>()
         repeat {
             let suffix = cursor.map { "?limit=200&cursor=\($0.uuidString)" } ?? "?limit=200"
             let page: Page = try await json(method: "GET", path: "/v1/dogs\(suffix)", body: Optional<Data>.none, as: Page.self)
@@ -362,6 +371,9 @@ final class WoonaServerClient {
                 }
             }
             cursor = page.nextCursor
+            if let cursor, !seenCursors.insert(cursor).inserted {
+                throw ServerSyncError.transfer(code: "pagination_stalled", message: "Server repeated a restore cursor. Previously restored local data is preserved.", retryable: false)
+            }
         } while cursor != nil
         try store.applyServerDeletions(try await deletions(), accountID: accountID)
         return try store.profiles().filter { $0.accountID == accountID }
@@ -384,6 +396,7 @@ final class WoonaServerClient {
         var restored = 0
         for dogID in dogIDs {
             var cursor: UUID?
+            var seenCursors = Set<UUID>()
             repeat {
                 let suffix = cursor.map { "?limit=200&cursor=\($0.uuidString)" } ?? "?limit=200"
                 let page: Page = try await json(
@@ -402,6 +415,9 @@ final class WoonaServerClient {
                     if try store.restoreRemoteRecording(detail) { restored += 1 }
                 }
                 cursor = page.nextCursor
+                if let cursor, !seenCursors.insert(cursor).inserted {
+                    throw ServerSyncError.transfer(code: "pagination_stalled", message: "Server repeated a restore cursor. Previously restored local data is preserved.", retryable: false)
+                }
             } while cursor != nil
         }
         return restored
@@ -515,29 +531,12 @@ final class WoonaServerClient {
             }
             for artifact in artifacts {
                 let file = store.rootDirectory.appendingPathComponent(artifact.relativePath)
-                let offset = try await uploadOffset(artifact.id)
-                guard offset <= artifact.sizeBytes else { throw ServerSyncError.responseInvalid }
-                try store.updateArtifactProgress(artifact.id, uploadedBytes: offset, state: "uploading")
-                onProgress?()
-                let handle = try FileHandle(forReadingFrom: file)
-                defer { try? handle.close() }
-                try handle.seek(toOffset: UInt64(offset))
-                var current = offset
-                while current < artifact.sizeBytes {
-                    let count = Int(min(8 * 1_024 * 1_024, artifact.sizeBytes - current))
-                    guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else {
-                        throw ServerSyncError.responseInvalid
-                    }
-                    let response = try await rawRequest(
-                        method: "PATCH",
-                        path: "/v1/artifacts/\(artifact.id.uuidString)/content",
-                        body: chunk,
-                        contentType: "application/offset+octet-stream",
-                        headers: ["Upload-Offset": String(current)]
-                    )
-                    current = Int64(response.value(forHTTPHeaderField: "Upload-Offset") ?? "")
-                        ?? current + Int64(chunk.count)
-                    try store.updateArtifactProgress(artifact.id, uploadedBytes: current, state: "uploading")
+                let root = store.rootDirectory.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+                guard file.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(root) else {
+                    throw ServerSyncError.transfer(code: "local_artifact_path_invalid", message: "The local artifact path escapes its data directory; original files are preserved", retryable: false)
+                }
+                try await uploadArtifactBytes(artifact.id, file: file, size: artifact.sizeBytes) { offset in
+                    try store.updateArtifactProgress(artifact.id, uploadedBytes: offset, state: "uploading")
                     onProgress?()
                 }
                 _ = try await rawRequest(
@@ -564,7 +563,9 @@ final class WoonaServerClient {
             try store.updateRecordingSync(recording.id, state: "synced")
         } catch {
             let state: String
-            if case ServerSyncError.animalIDConflict = error {
+            if case ServerSyncError.transfer(_, _, let retryable) = error {
+                state = retryable ? "retryable_error" : "permanent_error"
+            } else if case ServerSyncError.animalIDConflict = error {
                 state = "permanent_error"
             } else if case ServerSyncError.requestFailed(let status, _) = error,
                [400, 401, 403, 404, 409, 410, 413, 422].contains(status) {
@@ -574,50 +575,183 @@ final class WoonaServerClient {
             } else {
                 state = "retryable_error"
             }
-            try? store.updateRecordingSync(recording.id, state: state, error: error)
+            let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
+            let savedError: Error = cancelled
+                ? ServerSyncError.transfer(code: "transfer_paused", message: "Transfer paused; local data and confirmed progress are preserved for retry", retryable: true)
+                : error
+            try? store.updateRecordingSync(recording.id, state: state, error: savedError)
             throw error
         }
     }
 
+    func uploadArtifactBytes(_ artifactID: UUID, file: URL, size: Int64, onProgress: (Int64) throws -> Void = { _ in }) async throws {
+        try Task.checkCancellation()
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard size >= 0, attributes[.type] as? FileAttributeType == .typeRegular,
+              (attributes[.size] as? NSNumber)?.int64Value == size else {
+            throw ServerSyncError.transfer(code: "local_artifact_changed", message: "The source file is missing or its size changed. Original data is preserved.", retryable: false)
+        }
+        var current = try await uploadOffset(artifactID, size: size)
+        var resynchronizations = 0
+        try onProgress(current)
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        while current < size {
+            try Task.checkCancellation()
+            try handle.seek(toOffset: UInt64(current)) // HEAD validation guarantees nonnegative bounds.
+            let count = Int(min(8 * 1_024 * 1_024, size - current))
+            guard let chunk = try handle.read(upToCount: count), chunk.count == count else {
+                throw ServerSyncError.transfer(code: "local_artifact_truncated", message: "The source file ended before its saved size; original files are preserved", retryable: false)
+            }
+            let response: HTTPURLResponse
+            do {
+                response = try await rawRequest(method: "PATCH", path: "/v1/artifacts/\(artifactID.uuidString)/content",
+                    body: chunk, contentType: "application/offset+octet-stream", headers: ["Upload-Offset": String(current)])
+            } catch ServerSyncError.requestFailed(409, _) {
+                resynchronizations += 1
+                guard resynchronizations <= 3 else {
+                    throw ServerSyncError.transfer(code: "upload_conflict_stalled", message: "Server repeatedly rejected the upload offset. Retry will resume from its confirmed position.", retryable: true)
+                }
+                current = try await uploadOffset(artifactID, size: size)
+                try onProgress(current)
+                continue
+            }
+            let acknowledged = try requiredOffset(response)
+            guard acknowledged == current + Int64(chunk.count) else {
+                throw ServerSyncError.transfer(code: "upload_offset_invalid", message: "PATCH acknowledged \(acknowledged) bytes; expected \(current + Int64(chunk.count)). Upload completion is not confirmed.", retryable: false)
+            }
+            current = acknowledged
+            try onProgress(current)
+        }
+    }
+
     func download(artifactID: UUID, to target: URL, expectedSize: Int64, sha256: String) async throws {
+        try Task.checkCancellation()
+        guard expectedSize >= 0 else { throw ServerSyncError.transfer(code: "download_size_invalid", message: "Artifact size cannot be negative", retryable: false) }
+        let manager = FileManager.default
+        if manager.fileExists(atPath: target.path) {
+            let size = (try manager.attributesOfItem(atPath: target.path)[.size] as? NSNumber)?.int64Value
+            guard size == expectedSize, try await fileHash(target) == sha256 else {
+                throw ServerSyncError.transfer(code: "local_artifact_conflict", message: "A different local file exists. It was preserved; choose another destination.", retryable: false)
+            }
+            return
+        }
+        try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
         let part = target.appendingPathExtension("part")
-        let attributes = try? FileManager.default.attributesOfItem(atPath: part.path)
-        var offset = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
-        if attributes != nil, offset == expectedSize {
-            if try WoonaStore.sha256File(part) == sha256 {
-                try? FileManager.default.removeItem(at: target)
-                try FileManager.default.moveItem(at: part, to: target)
+        var offset = ((try? manager.attributesOfItem(atPath: part.path)[.size]) as? NSNumber)?.int64Value ?? 0
+        if manager.fileExists(atPath: part.path), offset == expectedSize {
+            if try await fileHash(part) == sha256 {
+                try Task.checkCancellation()
+                try manager.moveItem(at: part, to: target)
                 return
             }
-        }
-        if offset >= expectedSize {
-            try? FileManager.default.removeItem(at: part)
+            try manager.removeItem(at: part)
             offset = 0
         }
-        var request = try makeRequest(method: "GET", path: "/v1/artifacts/\(artifactID.uuidString)/content")
-        if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
-        let (temporary, response) = try await session.download(for: request)
-        try validate(response: response, data: Data())
-        let didResume = offset > 0 && (response as? HTTPURLResponse)?.statusCode == 206
-        if !didResume {
-            try? FileManager.default.removeItem(at: part)
-            try FileManager.default.moveItem(at: temporary, to: part)
-        } else {
-            let input = try FileHandle(forReadingFrom: temporary)
-            defer { try? input.close() }
-            let output = try FileHandle(forWritingTo: part)
-            defer { try? output.close() }
-            try output.seekToEnd()
-            while let chunk = try input.read(upToCount: 65_536), !chunk.isEmpty {
-                try output.write(contentsOf: chunk)
+        if offset > expectedSize { try manager.removeItem(at: part); offset = 0 }
+        var requestedEmptyFile = false
+        while offset < expectedSize || (expectedSize == 0 && !requestedEmptyFile) {
+            try Task.checkCancellation()
+            let requestedBytes = min(8 * 1_024 * 1_024, expectedSize - offset)
+            let requestedEnd = requestedBytes == 0 ? 0 : offset + requestedBytes - 1
+            var request = try makeRequest(method: "GET", path: "/v1/artifacts/\(artifactID.uuidString)/content")
+            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            if expectedSize > 0 { request.setValue("bytes=\(offset)-\(requestedEnd)", forHTTPHeaderField: "Range") }
+            if offset > 0 { request.setValue("\"\(sha256)\"", forHTTPHeaderField: "If-Range") }
+            let download: (URL, URLResponse)
+            if let downloadTransport { download = try await downloadTransport(request) }
+            else { download = try await session.download(for: request) }
+            let (temporary, response) = download
+            defer { try? manager.removeItem(at: temporary) }
+            try Task.checkCancellation()
+            guard let http = response as? HTTPURLResponse else { throw ServerSyncError.responseInvalid }
+            if ![200, 206].contains(http.statusCode) {
+                let handle = try FileHandle(forReadingFrom: temporary)
+                defer { try? handle.close() }
+                try validate(response: response, data: try handle.read(upToCount: 16_384) ?? Data())
+                throw ServerSyncError.transfer(code: "download_status_invalid", message: "The server did not return a file representation", retryable: false)
             }
+            let resumed = http.statusCode == 206
+            try validateDownloadHeaders(http, offset: offset, end: requestedEnd, size: expectedSize, sha256: sha256)
+            let chunkSize = (try manager.attributesOfItem(atPath: temporary.path)[.size] as? NSNumber)?.int64Value ?? -1
+            let expectedChunkSize = resumed ? requestedBytes : expectedSize
+            guard chunkSize == expectedChunkSize else {
+                throw ServerSyncError.transfer(code: "download_incomplete", message: "Response contains \(chunkSize) of \(expectedChunkSize) bytes. The existing downloaded prefix is preserved for retry.", retryable: true)
+            }
+            if !resumed {
+                // A Range-ignoring server returned a complete file on disk. Verify before
+                // replacing the partial prefix, preserving both memory bounds and data safety.
+                guard try await fileHash(temporary) == sha256 else {
+                    throw ServerSyncError.transfer(code: "download_hash_mismatch", message: "Downloaded file failed SHA-256 verification; original data is preserved", retryable: true)
+                }
+                if manager.fileExists(atPath: part.path) { try manager.removeItem(at: part) }
+                try manager.moveItem(at: temporary, to: part)
+                offset = expectedSize
+            } else {
+                if !manager.fileExists(atPath: part.path) {
+                    guard manager.createFile(atPath: part.path, contents: nil) else { throw WoonaStoreError.invalidData("Cannot create incomplete download") }
+                }
+                let input = try FileHandle(forReadingFrom: temporary)
+                let output = try FileHandle(forWritingTo: part)
+                defer { try? input.close(); try? output.close() }
+                let currentSize = try output.seekToEnd()
+                guard currentSize == UInt64(offset) else { throw ServerSyncError.transfer(code: "local_download_changed", message: "The incomplete local file changed during download; original data is preserved", retryable: false) }
+                while let chunk = try input.read(upToCount: 65_536), !chunk.isEmpty {
+                    try Task.checkCancellation()
+                    try output.write(contentsOf: chunk)
+                }
+                try output.synchronize()
+                offset += chunkSize
+            }
+            requestedEmptyFile = true
         }
-        let size = (try FileManager.default.attributesOfItem(atPath: part.path)[.size] as? NSNumber)?.int64Value
-        guard size == expectedSize, try WoonaStore.sha256File(part) == sha256 else {
-            throw ServerSyncError.responseInvalid
+        try Task.checkCancellation()
+        guard try await fileHash(part) == sha256 else {
+            try manager.removeItem(at: part)
+            throw ServerSyncError.transfer(code: "download_hash_mismatch", message: "Downloaded file failed SHA-256 verification; the incomplete copy was discarded and original data is preserved", retryable: true)
         }
-        try? FileManager.default.removeItem(at: target)
-        try FileManager.default.moveItem(at: part, to: target)
+        // moveItem fails if another file appeared at the destination; never remove that file.
+        try manager.moveItem(at: part, to: target)
+    }
+
+    private func fileHash(_ url: URL) async throws -> String {
+        let worker = Task.detached(priority: .utility) {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            var digest = SHA256()
+            while true {
+                try Task.checkCancellation()
+                let chunk = try handle.read(upToCount: 65_536) ?? Data()
+                if chunk.isEmpty { break }
+                digest.update(data: chunk)
+            }
+            return digest.finalize().map { String(format: "%02x", $0) }.joined()
+        }
+        return try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+    }
+
+    private func validateDownloadHeaders(_ response: HTTPURLResponse, offset: Int64, end: Int64, size: Int64, sha256: String) throws {
+        if let encoding = response.value(forHTTPHeaderField: "Content-Encoding"), encoding.lowercased() != "identity" {
+            throw ServerSyncError.transfer(code: "download_encoding_invalid", message: "The server ignored identity encoding; byte ranges cannot be trusted", retryable: false)
+        }
+        if let etag = response.value(forHTTPHeaderField: "ETag")?.trimmingCharacters(in: .whitespacesAndNewlines), etag != sha256 && etag != "\"\(sha256)\"" {
+            throw ServerSyncError.transfer(code: "download_etag_mismatch", message: "Server artifact ETag differs from its saved SHA-256. Existing local data is preserved.", retryable: false)
+        }
+        var responseBytes = size
+        if response.statusCode == 206 {
+            let value = response.value(forHTTPHeaderField: "Content-Range") ?? ""
+            let components = value.split(separator: " ", omittingEmptySubsequences: false)
+            let range = components.count == 2 ? components[1].split(separator: "/", omittingEmptySubsequences: false) : []
+            let bounds = range.count == 2 ? range[0].split(separator: "-", omittingEmptySubsequences: false) : []
+            guard components.first == "bytes", range.count == 2, bounds.count == 2, size > 0,
+                  Int64(bounds[0]) == offset, Int64(bounds[1]) == end, Int64(range[1]) == size else {
+                throw ServerSyncError.transfer(code: "download_range_invalid", message: "Server returned a different or malformed byte range. The existing partial copy is preserved.", retryable: false)
+            }
+            responseBytes = end - offset + 1
+        }
+        if let length = response.value(forHTTPHeaderField: "Content-Length"), Int64(length) != responseBytes {
+            throw ServerSyncError.transfer(code: "download_length_invalid", message: "Server response length differs from its byte range and saved artifact size", retryable: false)
+        }
     }
 
     private func json<T: Decodable>(method: String, path: String, body: Data?, as type: T.Type) async throws -> T {
@@ -629,10 +763,18 @@ final class WoonaServerClient {
         return try JSONDecoder().decode(type, from: data)
     }
 
-    private func uploadOffset(_ artifactID: UUID) async throws -> Int64 {
+    private func uploadOffset(_ artifactID: UUID, size: Int64) async throws -> Int64 {
         let response = try await rawRequest(method: "HEAD", path: "/v1/artifacts/\(artifactID.uuidString)/content")
+        let offset = try requiredOffset(response)
+        guard offset >= 0, offset <= size else {
+            throw ServerSyncError.transfer(code: "upload_offset_invalid", message: "HEAD returned \(offset) bytes for a \(size)-byte artifact", retryable: false)
+        }
+        return offset
+    }
+
+    private func requiredOffset(_ response: HTTPURLResponse) throws -> Int64 {
         guard let value = response.value(forHTTPHeaderField: "Upload-Offset"), let offset = Int64(value) else {
-            throw ServerSyncError.responseInvalid
+            throw ServerSyncError.transfer(code: "upload_offset_missing", message: "Server omitted a valid Upload-Offset. Its accepted position must be checked before continuing.", retryable: false)
         }
         return offset
     }
@@ -675,4 +817,13 @@ final class WoonaServerClient {
 
 private struct RecordingUploadStatus: Decodable {
     let ingestStatus: String
+}
+
+/// The configured API is the transfer destination. A redirect must be corrected in
+/// settings; never follow it while carrying a device bearer token or upload body.
+private final class NoTransferRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
 }
