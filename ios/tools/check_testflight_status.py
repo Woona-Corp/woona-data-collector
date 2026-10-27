@@ -1,7 +1,9 @@
 """Read App Store Connect build processing and tester-group status. Never writes to Apple."""
 import base64
+import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -47,9 +49,37 @@ def token(key_path, key_id, issuer, now=None):
     return signing.decode() + '.' + b64(jose_signature(signed))
 
 
+def target_group_match(testers, target_hash):
+    """Compare only in memory; never return tester names, addresses or objects."""
+    if not re.fullmatch(r'[0-9a-f]{64}', target_hash):
+        raise ValueError('An explicit SHA-256 target is required')
+    items = testers.get('data', [])
+    total = testers.get('meta', {}).get('paging', {}).get('total', len(items))
+    if testers.get('links', {}).get('next') or total > len(items):
+        raise RuntimeError('Tester listing incomplete; identity cannot be verified')
+    matches = []
+    for item in items:
+        email = item.get('attributes', {}).get('email')
+        if not isinstance(email, str) or not email.strip():
+            raise RuntimeError('Tester email is unavailable; identity cannot be verified')
+        matches.append(hashlib.sha256(email.strip().casefold().encode()).hexdigest() == target_hash)
+    return any(matches)
+
+
+def target_access(groups, assigned_group_ids):
+    matched = [group for group in groups if group.get('target_match')]
+    return {'matched': bool(matched),
+            'internal': any(group['is_internal'] for group in matched),
+            'external': any(not group['is_internal'] for group in matched),
+            'assignedBuild': any(group['id'] in assigned_group_ids for group in matched)}
+
+
 def main():
     version = os.environ['CHECK_VERSION']
     build_number = os.environ['CHECK_BUILD'].strip()
+    target_hash = os.environ['TARGET_EMAIL_SHA256'].strip()
+    if not re.fullmatch(r'[0-9a-f]{64}', target_hash):
+        raise ValueError('An explicit SHA-256 target is required')
     if not build_number.isdecimal():
         raise ValueError('An explicit numeric build number is required')
     with tempfile.TemporaryDirectory() as directory:
@@ -72,7 +102,8 @@ def main():
             testers = get('/v1/betaGroups/' + group['id'] + '/betaTesters', {'limit': 200})
             available_groups.append({'id': group['id'], 'name': attributes.get('name'),
                 'is_internal': attributes.get('isInternalGroup'),
-                'tester_count': testers.get('meta', {}).get('paging', {}).get('total', len(testers['data']))})
+                'tester_count': testers.get('meta', {}).get('paging', {}).get('total', len(testers['data'])),
+                'target_match': target_group_match(testers, target_hash)})
         for attempt in range(45):
             result = get('/v1/builds', {'filter[app]': apps[0]['id'], 'filter[version]': build_number,
                 'filter[preReleaseVersion.version]': version, 'include': 'buildBetaDetail,betaGroups,preReleaseVersion'})
@@ -94,7 +125,9 @@ def main():
                     'internal_build_state': detail.get('internalBuildState'),
                     'external_build_state': detail.get('externalBuildState'),
                     'auto_notify_enabled': detail.get('autoNotifyEnabled'), 'groups': groups,
-                    'available_groups': available_groups, 'physical_installation_verified': False}
+                    'available_groups': [{k: v for k, v in group.items() if k != 'target_match'} for group in available_groups],
+                    'target_tester_access': target_access(available_groups, {ref['id'] for ref in group_refs}),
+                    'physical_installation_verified': False}
                 print(json.dumps(report), flush=True)
                 if attrs.get('processingState') == 'VALID':
                     Path('testflight-status.json').write_text(json.dumps(report, indent=2) + '\n')
