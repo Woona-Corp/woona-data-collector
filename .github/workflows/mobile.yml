@@ -141,7 +141,7 @@ jobs:
       WOONA_STORAGE_ROOT_HOST: ../test-run/ci-storage
     steps:
       - uses: actions/checkout@v7
-      - name: Validate Compose and backup
+      - name: Validate Compose and disabled backup policy
         run: |
           docker compose config -q
           bash server/tests/test_backup.sh
