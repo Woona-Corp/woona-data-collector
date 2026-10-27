@@ -953,22 +953,47 @@ class WoonaDatabaseTest {
         val video=File(database.recordingDirectory(session.relativeDirectory),"video.mp4")
         java.io.RandomAccessFile(video,"rw").use {it.setLength(256L*1024*1024)}
         database.close()
+        val instrumentation=androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        val resumed=java.util.concurrent.CountDownLatch(1)
+        val activityRef=java.util.concurrent.atomic.AtomicReference<com.example.myapplication.MainActivity>()
+        val lifecycle=androidx.test.runner.lifecycle.ActivityLifecycleCallback { activity,stage ->
+            if(activity is com.example.myapplication.MainActivity && stage==androidx.test.runner.lifecycle.Stage.RESUMED) {
+                activityRef.set(activity);resumed.countDown()
+            }
+        }
+        instrumentation.runOnMainSync {androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance().addLifecycleCallback(lifecycle)}
+        val launcher=java.util.concurrent.Executors.newSingleThreadExecutor()
         val lock=com.example.myapplication.sync.serverOperationLock
         lock.lock()
+        // ActivityScenario.launch/onActivity wait for UI idle. Recovery deliberately keeps
+        // its progress animation active while this test holds the IO lock, so inspect the
+        // resumed Activity through the Main looper and release the lock before awaiting idle.
+        val launched=launcher.submit<androidx.test.core.app.ActivityScenario<com.example.myapplication.MainActivity>> {
+            androidx.test.core.app.ActivityScenario.launch(com.example.myapplication.MainActivity::class.java)
+        }
         var scenario:androidx.test.core.app.ActivityScenario<com.example.myapplication.MainActivity>?=null
         try {
-            scenario=androidx.test.core.app.ActivityScenario.launch(com.example.myapplication.MainActivity::class.java)
-            val responsive=java.util.concurrent.CountDownLatch(1)
-            android.os.Handler(android.os.Looper.getMainLooper()).post {responsive.countDown()}
-            assertTrue("Main thread stays responsive while recovery waits",responsive.await(2,java.util.concurrent.TimeUnit.SECONDS))
-            scenario.onActivity {activity ->
-                assertTrue(activity.javaClass.getDeclaredField("startupReady\$delegate").apply {isAccessible=true}.let {(it.get(activity) as androidx.compose.runtime.State<*>).value}==false)
-                val toggle=activity.javaClass.getDeclaredMethod("toggleCapture").apply {isAccessible=true}
-                assertTrue(runCatching {toggle.invoke(activity)}.exceptionOrNull()?.cause is IllegalStateException)
+            try {
+                assertTrue("Activity resumes while recovery waits",resumed.await(10,java.util.concurrent.TimeUnit.SECONDS))
+                val responsive=java.util.concurrent.CountDownLatch(1)
+                val checkFailure=java.util.concurrent.atomic.AtomicReference<Throwable>()
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    try {
+                        val activity=requireNotNull(activityRef.get())
+                        assertTrue("Recovery must still block capture",activity.javaClass.getDeclaredField("startupReady\$delegate").apply {isAccessible=true}.let {(it.get(activity) as androidx.compose.runtime.State<*>).value}==false)
+                        val toggle=activity.javaClass.getDeclaredMethod("toggleCapture").apply {isAccessible=true}
+                        assertTrue("Capture is rejected before recovery completes",runCatching {toggle.invoke(activity)}.exceptionOrNull()?.cause is IllegalStateException)
+                    } catch(error:Throwable) {checkFailure.set(error)}
+                    finally {responsive.countDown()}
+                }
+                assertTrue("Main thread stays responsive while recovery waits",responsive.await(2,java.util.concurrent.TimeUnit.SECONDS))
+                checkFailure.get()?.let {throw it}
+            } finally {
+                lock.unlock()
+                instrumentation.runOnMainSync {androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance().removeLifecycleCallback(lifecycle)}
             }
-        } finally { lock.unlock() }
-        requireNotNull(scenario).use {
-            awaitStartupReady(it)
+            scenario=launched.get(30,java.util.concurrent.TimeUnit.SECONDS)
+            awaitStartupReady(scenario)
             database=WoonaDatabase(context,root)
             val recovered=requireNotNull(database.recording(session.id))
             assertEquals(RecordingStatus.INTERRUPTED,recovered.status)
@@ -977,6 +1002,9 @@ class WoonaDatabaseTest {
             assertEquals(256L*1024*1024,recovered.artifacts.single().sizeBytes)
             assertEquals(sha256(video),recovered.artifacts.single().sha256)
             assertEquals(completeSessionQuestionnaire().toJson(),requireNotNull(recovered.questionnaire).toJson())
+        } finally {
+            (scenario?:runCatching {launched.get(30,java.util.concurrent.TimeUnit.SECONDS)}.getOrNull())?.close()
+            launcher.shutdownNow()
         }
     }
 
