@@ -64,6 +64,56 @@ final class WoonaDataTests: XCTestCase {
                                      sessionConfiguration: configuration, downloadTransport: download)
     }
 
+    @MainActor
+    func testStaleRetirementResultCannotDeleteLocalFilesAndDisconnectedClientsCannotSendAgain() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(completeDog())
+            let local = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+            try store.finalize(recording: local, status: "completed", files: [], syncJSON: Data("{}".utf8))
+            let marker: [String: Any] = ["kind": "recording", "id_sha256": WoonaStore.sha256(Data(local.id.uuidString.lowercased().utf8))]
+            var requests = 0
+            NetworkFaultProtocol.handler = { _ in
+                requests += 1
+                return .init(body: try JSONSerialization.data(withJSONObject: ["entities": [marker]]))
+            }
+            let oldClient = try networkClient()
+            do { _ = try await oldClient.reconcileDeletions(into: store, acceptResult: { false }); XCTFail("Stale settings must not apply retirement") }
+            catch is CancellationError {}
+            XCTAssertNotNil(try store.recording(id: local.id))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: store.directory(for: local).path))
+            XCTAssertEqual(try store.retirementCleanupStatus().pendingCount, 0)
+            XCTAssertEqual(requests, 1)
+            WoonaServerClient.cancelAllTransfers()
+            do { try await oldClient.checkConnection(); XCTFail("Disconnected clients cannot retain usable credentials") }
+            catch is CancellationError {}
+            XCTAssertEqual(requests, 1)
+            let freshClient = try networkClient()
+            try await freshClient.checkConnection()
+            XCTAssertEqual(requests, 3, "A newly connected client can check both readiness and access")
+        }
+    }
+
+    @MainActor
+    func testRetirementCheckTimeoutCancelsTheHangingRequestWithoutDeletingLocalData() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            _ = try store.saveProfile(completeDog())
+            HangingRetirementProtocol.reset()
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [HangingRetirementProtocol.self]
+            let client = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test", wifiOnly: false), token: "fixture", sessionConfiguration: configuration)
+            do { _ = try await client.reconcileDeletions(into: store, timeout: 0.02); XCTFail("A hanging maintenance request must be bounded") }
+            catch let error as URLError { XCTAssertEqual(error.code, .timedOut) }
+            let deadline = Date().addingTimeInterval(5)
+            while HangingRetirementProtocol.stoppedCount == 0, Date() < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
+            XCTAssertEqual(HangingRetirementProtocol.stoppedCount, 1)
+            XCTAssertEqual(try store.profiles().count, 1)
+            XCTAssertEqual(try store.retirementCleanupStatus().pendingCount, 0)
+            XCTAssertEqual(try store.retirementCleanupStatus().deferredCount, 0)
+        }
+    }
+
     func testProfileVersionAcceptanceAndMigrationNeverInferAcknowledgmentFromDogRevision() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         var store: WoonaStore? = try WoonaStore(rootDirectory: root)
@@ -949,6 +999,157 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertEqual(try store.applyServerDeletions([deletion]),0)
     }
 
+    func testRetirementSQLiteFailurePreservesEveryOriginalFileAndRollsBackOutbox() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            let store = try WoonaStore(rootDirectory: root)
+            let profile = try store.saveProfile(completeDog())
+            let record = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+            let source = root.appendingPathComponent("original.bin")
+            try Data("only saved capture".utf8).write(to: source)
+            try store.finalize(recording: record, status: "completed", files: [("packet", source, "packets.bin", "application/octet-stream")], syncJSON: Data("{}".utf8))
+            let before = try store.artifacts(recordingID: record.id)
+            var database: OpaquePointer?
+            XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+            defer { sqlite3_close(database) }
+            XCTAssertEqual(sqlite3_exec(database, "CREATE TRIGGER refuse_retirement BEFORE DELETE ON recordings BEGIN SELECT RAISE(ABORT, 'Synthetic retirement DB failure'); END", nil, nil, nil), SQLITE_OK)
+            let deletion = ServerDeletion(kind: "recording", id_sha256: WoonaStore.sha256(Data(record.id.uuidString.lowercased().utf8)))
+            XCTAssertThrowsError(try store.applyServerDeletions([deletion]))
+            XCTAssertNotNil(try store.recording(id: record.id))
+            XCTAssertEqual(try store.retirementCleanupStatus().pendingCount, 0)
+            for artifact in before { XCTAssertEqual(try WoonaStore.sha256File(root.appendingPathComponent(artifact.relativePath)), artifact.sha256) }
+        }
+    }
+
+    func testCommittedRetirementRetriesFilesystemFailureAfterRestartWithoutResurrectingMetadata() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            let store = try WoonaStore(rootDirectory: root)
+            let profile = try store.saveProfile(completeDog(), accountID: "inactive-workspace")
+            let record = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+            let source = root.appendingPathComponent("original.bin")
+            try Data("retired source bytes".utf8).write(to: source)
+            try store.finalize(recording: record, status: "completed", files: [("packet", source, "packets.bin", "application/octet-stream")], syncJSON: Data("{}".utf8))
+            let active = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+            let deletion = ServerDeletion(kind: "dog", id_sha256: WoonaStore.sha256(Data(profile.id.uuidString.lowercased().utf8)))
+            XCTAssertEqual(try store.applyServerDeletions([deletion], accountID: "another-workspace", removeItem: { _ in
+                throw WoonaStoreError.invalidData("Synthetic file removal denied")
+            }), 1)
+            XCTAssertNil(try store.recording(id: record.id))
+            XCTAssertNotNil(try store.recording(id: active.id), "A live capture must first stop safely")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: store.directory(for: record).path))
+            let pending = try store.retirementCleanupStatus()
+            XCTAssertEqual(pending.pendingCount, 1)
+            XCTAssertTrue(pending.lastError?.contains("Synthetic file removal denied") == true)
+            let reopened = try WoonaStore(rootDirectory: root)
+            XCTAssertEqual(try reopened.drainLocalDeletionOutbox().pendingCount, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: store.directory(for: record).path))
+            XCTAssertNil(try reopened.recording(id: record.id))
+            XCTAssertEqual(try reopened.drainLocalDeletionOutbox().pendingCount, 0)
+        }
+    }
+
+    func testRetirementOutboxRejectsEscapingAndDatabasePathsAndHandlesAlreadyMissingFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            let store = try WoonaStore(rootDirectory: root)
+            var database: OpaquePointer?
+            XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+            defer { sqlite3_close(database) }
+            XCTAssertEqual(sqlite3_exec(database, "INSERT INTO local_deletion_outbox(id,relative_path,entry_kind,created_at_utc) VALUES('outside','../outside','file','2026-10-27'),('database','woona.sqlite','file','2026-10-27'),('missing','recordings/already-gone/file.bin','file','2026-10-27')", nil, nil, nil), SQLITE_OK)
+            let status = try store.drainLocalDeletionOutbox()
+            XCTAssertEqual(status.pendingCount, 2)
+            XCTAssertNotNil(status.lastError)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("woona.sqlite").path))
+            XCTAssertEqual(try store.profiles().count, 0)
+        }
+    }
+
+    func testColdStartCaptureRecoveryPreservesSourcesQuestionnaireAndUnknownEndWithoutGuessingWorkingFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            let store = try WoonaStore(rootDirectory: root)
+            let profile = try store.saveProfile(completeDog())
+            let original = completeSession()
+            let orphan = try store.createRecording(profile: profile, source: "live", questionnaire: original)
+            try store.markRecording(orphan.id, status: "recording")
+            let live = try store.createRecording(profile: profile, source: "live", questionnaire: original)
+            let video = store.directory(for: orphan).appendingPathComponent("video.mp4")
+            let source = Data("incomplete source video bytes".utf8)
+            try source.write(to: video)
+            let unassigned = root.appendingPathComponent("ble_dump_123456.bin")
+            try Data("unassigned working data".utf8).write(to: unassigned)
+            XCTAssertEqual(try store.recoverUnfinishedCaptures(excluding: [live.id]), 1)
+            let recovered = try XCTUnwrap(store.recording(id: orphan.id))
+            XCTAssertEqual(recovered.status, "interrupted")
+            XCTAssertNil(recovered.endedAtUTC)
+            XCTAssertEqual(recovered.questionnaire, original)
+            XCTAssertEqual(recovered.captureErrorCode, "process_interrupted")
+            XCTAssertEqual(recovered.serverSyncState, "permanent_error")
+            XCTAssertTrue(try store.captureRecoveryRequiresReview(orphan.id))
+            XCTAssertEqual(try Data(contentsOf: video), source)
+            XCTAssertEqual(try store.artifacts(recordingID: orphan.id).map(\.fileName), ["video.mp4"])
+            XCTAssertNil(try store.syncJSON(recordingID: orphan.id), "Unknown clock anchors must not become zero-valued sync")
+            XCTAssertEqual(try Data(contentsOf: unassigned), Data("unassigned working data".utf8))
+            XCTAssertEqual(try store.recording(id: live.id)?.status, "preparing")
+            try store.resetFailedSync()
+            XCTAssertEqual(try store.recording(id: orphan.id)?.serverSyncState, "permanent_error")
+            XCTAssertTrue(try store.pendingRecordings().isEmpty)
+            XCTAssertEqual(try store.recoverUnfinishedCaptures(excluding: [live.id]), 0)
+        }
+    }
+
+    func testReceivedRetirementWaitsForSafeStopAndCompletesOfflineWithoutAnotherServerResponse() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            let store = try WoonaStore(rootDirectory: root)
+            let profile = try store.saveProfile(completeDog(), accountID: "inactive")
+            let active = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+            let video = store.directory(for: active).appendingPathComponent("video.mp4")
+            try Data("live source".utf8).write(to: video)
+            let marker = ServerDeletion(kind: "recording", id_sha256: WoonaStore.sha256(Data(active.id.uuidString.lowercased().utf8)))
+            XCTAssertEqual(try store.applyServerDeletions([marker], accountID: "other"), 0)
+            XCTAssertEqual(try store.retirementCleanupStatus().deferredCount, 1)
+            XCTAssertNotNil(try store.recording(id: active.id))
+            XCTAssertEqual(try Data(contentsOf: video), Data("live source".utf8))
+            try store.markRecording(active.id, status: "interrupted")
+            XCTAssertEqual(try store.applyDeferredServerDeletions(), 1)
+            XCTAssertNil(try store.recording(id: active.id))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: video.path))
+            XCTAssertEqual(try store.retirementCleanupStatus().deferredCount, 0)
+        }
+    }
+
+    func testDeferredDogRetirementSurvivesRestartAndAppliesAfterInterruptedCaptureRecovery() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var dogID: UUID?, recordID: UUID?
+        do {
+            let store = try WoonaStore(rootDirectory: root)
+            let dog = try store.saveProfile(completeDog())
+            let record = try store.createRecording(profile: dog, source: "live", questionnaire: completeSession())
+            dogID = dog.id; recordID = record.id
+            try Data("unfinished source".utf8).write(to: store.directory(for: record).appendingPathComponent("packets.bin"))
+            let marker = ServerDeletion(kind: "dog", id_sha256: WoonaStore.sha256(Data(dog.id.uuidString.lowercased().utf8)))
+            XCTAssertEqual(try store.applyServerDeletions([marker]), 0)
+            XCTAssertEqual(try store.retirementCleanupStatus().deferredCount, 1)
+        }
+        do {
+            let reopened = try WoonaStore(rootDirectory: root)
+            XCTAssertEqual(try reopened.recoverUnfinishedCaptures(), 1)
+            XCTAssertEqual(try reopened.applyDeferredServerDeletions(), 1)
+            XCTAssertNil(try reopened.recording(id: XCTUnwrap(recordID)))
+            XCTAssertFalse(try reopened.profiles().contains { $0.id == dogID })
+            XCTAssertEqual(try reopened.retirementCleanupStatus().deferredCount, 0)
+            XCTAssertEqual(try reopened.retirementCleanupStatus().pendingCount, 0)
+        }
+    }
+
     func testHeartAnswersReferencesAndRestart() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1338,7 +1539,7 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertEqual(updated.accountID, "field")
         let unrelatedDeletion = ServerDeletion(kind: "dog", id_sha256: WoonaStore.sha256(Data(other.id.uuidString.lowercased().utf8)))
         XCTAssertEqual(try store.applyServerDeletions([unrelatedDeletion], accountID: "field"), 0)
-        XCTAssertNotNil(try store.profile(dogID: other.id, versionID: other.profileVersionID))
+        XCTAssertNil(try store.profile(dogID: other.id, versionID: other.profileVersionID), "Authoritative retirement applies to inactive accounts too")
     }
 
     func testRemoteExplicitDogLinkAdoptsUnassignedLocalDogWithoutRemovingSession() throws {
@@ -1771,6 +1972,17 @@ private final class LoopbackArtifactHTTPServer: @unchecked Sendable {
         connection.send(content: Data(prefix.utf8) + body, contentContext: .finalMessage, isComplete: true,
                         completion: .contentProcessed { error in if error != nil { connection.cancel() } })
     }
+}
+
+private final class HangingRetirementProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var stopped = 0
+    static func reset() { lock.lock(); stopped = 0; lock.unlock() }
+    static var stoppedCount: Int { lock.lock(); defer { lock.unlock() }; return stopped }
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "retirement.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {}
+    override func stopLoading() { Self.lock.lock(); Self.stopped += 1; Self.lock.unlock() }
 }
 
 private final class RecordingSyncProtocol: URLProtocol, @unchecked Sendable {

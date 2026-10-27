@@ -247,6 +247,7 @@ func recordingCaptureText(status: String, code: String?, message: String?, langu
     case "queue_overflow": reason = errorText(language, "переполнена очередь обработки данных датчика", "the sensor data processing queue overflowed")
     case "storage_error", "storage_failed": reason = errorText(language, "не удалось сохранить файлы записи", "recording files could not be saved")
     case "no_sensor_data": reason = errorText(language, "не получено ни одного корректного пакета датчика", "no valid sensor packets were received")
+    case "process_interrupted": reason = errorText(language, "предыдущий запуск приложения завершился до сохранения сессии; исходные файлы сохранены", "the previous app process ended before finalization; original files are preserved")
     case nil: reason = message?.isEmpty == false ? message : nil
     default: reason = [code, message].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
     }

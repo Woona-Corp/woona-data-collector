@@ -462,6 +462,41 @@ enum WoonaStoreError: LocalizedError {
     }
 }
 
+struct RetirementCleanupStatus: Equatable, Sendable {
+    var pendingCount: Int
+    var lastError: String?
+    var deferredCount: Int = 0
+}
+
+struct CaptureFinalizationResult: Sendable {
+    var retired: Bool
+    var cleanupError: String?
+}
+
+enum CaptureFinalizer {
+    @discardableResult
+    static func run(root: URL, recordingID: UUID, status: String,
+                    files: [(type: String, source: URL, name: String, mime: String)], syncJSON: Data,
+                    onWorkerStart: (@Sendable () -> Void)? = nil) async throws -> CaptureFinalizationResult {
+        try Task.checkCancellation()
+        let work = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            onWorkerStart?()
+            let store = try WoonaStore(rootDirectory: root)
+            guard let recording = try store.recording(id: recordingID) else {
+                throw WoonaStoreError.invalidData("Capture disappeared before local finalization")
+            }
+            try store.finalize(recording: recording, status: status, files: files, syncJSON: syncJSON)
+            var cleanupError: String?
+            do { _ = try store.applyDeferredServerDeletions() }
+            catch { cleanupError = error.localizedDescription }
+            do { return CaptureFinalizationResult(retired: try store.recording(id: recordingID) == nil, cleanupError: cleanupError) }
+            catch { return CaptureFinalizationResult(retired: false, cleanupError: error.localizedDescription) }
+        }
+        return try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
+    }
+}
+
 final class WoonaStore {
     private var database: OpaquePointer?
     let rootDirectory: URL
@@ -1027,45 +1062,46 @@ final class WoonaStore {
     }
 
     @discardableResult
-    func applyServerDeletions(_ entities: [ServerDeletion], accountID: String? = nil) throws -> Int {
-        let scopedDogIDs = Set(try profiles().filter { $0.accountID == accountID }.map { $0.id.uuidString })
+    // Server retirement is global and owner-authorized. accountID remains a
+    // compatibility argument; switching workspaces cannot resurrect retired UUIDs.
+    func applyServerDeletions(_ entities: [ServerDeletion], accountID _: String? = nil,
+                              removeItem: ((URL) throws -> Void)? = nil) throws -> Int {
+        let previouslyDeferred = try deferredServerDeletions()
+        let accepted = Set(entities + previouslyDeferred)
         func retired(_ kind: String, _ id: String) -> Bool {
             let hash = Self.sha256(Data(id.lowercased().utf8))
-            return entities.contains { $0.kind == kind && $0.id_sha256 == hash }
+            return accepted.contains(ServerDeletion(kind: kind, id_sha256: hash))
         }
         let statement = try prepare("SELECT id,dog_id,status,relative_directory FROM recordings")
         var ids: [String] = []
-        var paths: [URL] = []
+        var paths: [String] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            if !scopedDogIDs.contains(columnText(statement, 1)) || ["preparing", "recording"].contains(columnText(statement, 2)) { continue }
+            if ["preparing", "recording"].contains(columnText(statement, 2)) { continue }
             if retired("recording", columnText(statement, 0)) || retired("dog", columnText(statement, 1)) {
                 ids.append(columnText(statement, 0))
-                let path = rootDirectory.appendingPathComponent(columnText(statement, 3)).resolvingSymlinksInPath().standardizedFileURL
-                guard path.path.hasPrefix(rootDirectory.resolvingSymlinksInPath().standardizedFileURL.path + "/") else {
-                    sqlite3_finalize(statement)
-                    throw WoonaStoreError.invalidData("Invalid retired recording path")
-                }
-                paths.append(path)
+                let relative = columnText(statement, 3)
+                do { _ = try localDeletionURL(relative) }
+                catch { sqlite3_finalize(statement); throw error }
+                paths.append(relative)
             }
         }
         sqlite3_finalize(statement)
-        for path in paths where FileManager.default.fileExists(atPath: path.path) { try FileManager.default.removeItem(at: path) }
         try transaction {
+            for path in paths { try enqueueLocalDeletion(relativePath: path, kind: "directory") }
             for id in ids { try execute("DELETE FROM recordings WHERE id=?", [.text(id)]) }
             let artifacts = try prepare("SELECT a.id,a.relative_path,r.dog_id FROM artifacts a JOIN recordings r ON r.id=a.recording_id WHERE r.status NOT IN ('preparing','recording')")
-            var deletedArtifacts: [(String,URL)] = []
+            var deletedArtifacts: [(String,String)] = []
             while sqlite3_step(artifacts) == SQLITE_ROW {
-                if scopedDogIDs.contains(columnText(artifacts,2)) && retired("artifact",columnText(artifacts,0)) {
-                    let path=rootDirectory.appendingPathComponent(columnText(artifacts,1)).resolvingSymlinksInPath().standardizedFileURL
-                    guard path.path.hasPrefix(rootDirectory.resolvingSymlinksInPath().standardizedFileURL.path+"/") else {
-                        sqlite3_finalize(artifacts);throw WoonaStoreError.invalidData("Invalid retired artifact path")
-                    }
-                    deletedArtifacts.append((columnText(artifacts,0),path))
+                if retired("artifact",columnText(artifacts,0)) {
+                    let relative = columnText(artifacts,1)
+                    do { _ = try localDeletionURL(relative) }
+                    catch { sqlite3_finalize(artifacts); throw error }
+                    deletedArtifacts.append((columnText(artifacts,0),relative))
                 }
             }
             sqlite3_finalize(artifacts)
             for (id,path) in deletedArtifacts {
-                if FileManager.default.fileExists(atPath:path.path) { try FileManager.default.removeItem(at:path) }
+                try enqueueLocalDeletion(relativePath: path, kind: "file")
                 try execute("DELETE FROM artifacts WHERE id=?",[.text(id)])
             }
             let current = try prepare("SELECT current_profile_version_id FROM dogs")
@@ -1075,17 +1111,107 @@ final class WoonaStore {
             let versions = try prepare("SELECT id,dog_id FROM dog_profile_versions WHERE id NOT IN (SELECT dog_profile_version_id FROM recordings)")
             var deletedVersions: [String] = []
             while sqlite3_step(versions) == SQLITE_ROW {
-                if scopedDogIDs.contains(columnText(versions, 1)) && (retired("dog", columnText(versions, 1)) || (retired("profile",columnText(versions,0)) && !currentVersions.contains(columnText(versions,0)))) { deletedVersions.append(columnText(versions, 0)) }
+                if retired("dog", columnText(versions, 1)) || (retired("profile",columnText(versions,0)) && !currentVersions.contains(columnText(versions,0))) { deletedVersions.append(columnText(versions, 0)) }
             }
             sqlite3_finalize(versions)
             for id in deletedVersions { try execute("DELETE FROM dog_profile_versions WHERE id=?", [.text(id)]) }
             let dogs = try prepare("SELECT id FROM dogs WHERE id NOT IN (SELECT dog_id FROM recordings) AND id NOT IN (SELECT dog_id FROM dog_profile_versions)")
             var deletedDogs: [String] = []
-            while sqlite3_step(dogs) == SQLITE_ROW { if scopedDogIDs.contains(columnText(dogs, 0)) && retired("dog", columnText(dogs, 0)) { deletedDogs.append(columnText(dogs, 0)) } }
+            while sqlite3_step(dogs) == SQLITE_ROW { if retired("dog", columnText(dogs, 0)) { deletedDogs.append(columnText(dogs, 0)) } }
             sqlite3_finalize(dogs)
             for id in deletedDogs { try execute("DELETE FROM dogs WHERE id=?", [.text(id)]) }
+
+            // A received retirement survives process death and credential removal
+            // while a live capture, current profile or historical reference still
+            // prevents safe retirement. Retry it locally after stop/recovery.
+            var deferred = Set<ServerDeletion>()
+            for (kind, table) in [("dog", "dogs"), ("profile", "dog_profile_versions"), ("recording", "recordings"), ("artifact", "artifacts")] {
+                let rows = try prepare("SELECT id FROM \(table)")
+                while sqlite3_step(rows) == SQLITE_ROW {
+                    let digest = Self.sha256(Data(columnText(rows, 0).lowercased().utf8))
+                    let marker = ServerDeletion(kind: kind, id_sha256: digest)
+                    if accepted.contains(marker) { deferred.insert(marker) }
+                }
+                sqlite3_finalize(rows)
+            }
+            for marker in previouslyDeferred where !deferred.contains(marker) {
+                try execute("DELETE FROM deferred_retirements WHERE kind=? AND id_sha256=?", [.text(marker.kind), .text(marker.id_sha256)])
+            }
+            for marker in deferred {
+                try execute("INSERT OR IGNORE INTO deferred_retirements(kind,id_sha256,received_at_utc) VALUES(?,?,?)",
+                    [.text(marker.kind), .text(marker.id_sha256), .text(Self.iso8601(Date()))])
+            }
         }
+        // The durable intent and SQL retirement commit together. Filesystem work
+        // happens only afterwards; a failed SQLite transaction removes no bytes.
+        _ = try drainLocalDeletionOutbox(removeItem: removeItem)
         return ids.count
+    }
+
+    private func deferredServerDeletions() throws -> [ServerDeletion] {
+        let query = try prepare("SELECT kind,id_sha256 FROM deferred_retirements")
+        defer { sqlite3_finalize(query) }
+        var result: [ServerDeletion] = []
+        while sqlite3_step(query) == SQLITE_ROW { result.append(ServerDeletion(kind: columnText(query, 0), id_sha256: columnText(query, 1))) }
+        return result
+    }
+
+    @discardableResult
+    func applyDeferredServerDeletions() throws -> Int { try applyServerDeletions([]) }
+
+    private func localDeletionURL(_ relativePath: String) throws -> URL {
+        guard !relativePath.isEmpty, !relativePath.hasPrefix("/"),
+              relativePath.hasPrefix("recordings/"), !relativePath.split(separator: "/").contains("..") else {
+            throw WoonaStoreError.invalidData("Invalid retired local path")
+        }
+        let root = rootDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let path = rootDirectory.appendingPathComponent(relativePath).standardizedFileURL
+        guard path.resolvingSymlinksInPath().path.hasPrefix(root.path + "/") else {
+            throw WoonaStoreError.invalidData("Retired local path escapes the data directory")
+        }
+        return path
+    }
+
+    private func enqueueLocalDeletion(relativePath: String, kind: String) throws {
+        _ = try localDeletionURL(relativePath)
+        try execute("INSERT OR IGNORE INTO local_deletion_outbox(id,relative_path,entry_kind,created_at_utc) VALUES(?,?,?,?)",
+            [.text(UUID().uuidString), .text(relativePath), .text(kind), .text(Self.iso8601(Date()))])
+    }
+
+    func retirementCleanupStatus() throws -> RetirementCleanupStatus {
+        let count = try prepare("SELECT count(*) FROM local_deletion_outbox")
+        guard sqlite3_step(count) == SQLITE_ROW else { sqlite3_finalize(count); throw sqliteError() }
+        let pending = Int(sqlite3_column_int64(count, 0)); sqlite3_finalize(count)
+        let deferredQuery = try prepare("SELECT count(*) FROM deferred_retirements")
+        guard sqlite3_step(deferredQuery) == SQLITE_ROW else { sqlite3_finalize(deferredQuery); throw sqliteError() }
+        let deferred = Int(sqlite3_column_int64(deferredQuery, 0)); sqlite3_finalize(deferredQuery)
+        let error = try prepare("SELECT last_error FROM local_deletion_outbox WHERE last_error IS NOT NULL ORDER BY created_at_utc DESC LIMIT 1")
+        defer { sqlite3_finalize(error) }
+        let lastError = sqlite3_step(error) == SQLITE_ROW ? columnText(error, 0) : nil
+        return RetirementCleanupStatus(pendingCount: pending, lastError: lastError, deferredCount: deferred)
+    }
+
+    @discardableResult
+    func drainLocalDeletionOutbox(removeItem: ((URL) throws -> Void)? = nil) throws -> RetirementCleanupStatus {
+        let query = try prepare("SELECT id,relative_path FROM local_deletion_outbox ORDER BY created_at_utc,id")
+        var entries: [(String, String)] = []
+        while sqlite3_step(query) == SQLITE_ROW { entries.append((columnText(query, 0), columnText(query, 1))) }
+        sqlite3_finalize(query)
+        for (id, relativePath) in entries {
+            do {
+                let path = try localDeletionURL(relativePath)
+                if FileManager.default.fileExists(atPath: path.path) {
+                    if let removeItem { try removeItem(path) }
+                    else { try FileManager.default.removeItem(at: path) }
+                }
+                // Missing files also complete an interrupted prior deletion.
+                try execute("DELETE FROM local_deletion_outbox WHERE id=?", [.text(id)])
+            } catch {
+                try execute("UPDATE local_deletion_outbox SET last_error=? WHERE id=?",
+                    [.text(error.localizedDescription), .text(id)])
+            }
+        }
+        return try retirementCleanupStatus()
     }
 
     func recording(id: UUID) throws -> WoonaRecording? {
@@ -1134,13 +1260,18 @@ final class WoonaStore {
         finalFiles.append(("sync", syncTarget, "application/json"))
 
         let now = Self.iso8601(Date())
+        // Hash closed files outside the write transaction. A large video must
+        // not hold SQLite's writer lock while the main actor reads queue state.
+        let metadata = try finalFiles.map { item in
+            let (type, url, mime) = item
+            let relative = rootDirectory.standardizedFileURL.path == url.deletingLastPathComponent().standardizedFileURL.path
+                ? url.lastPathComponent : url.path.replacingOccurrences(of: rootDirectory.path + "/", with: "")
+            let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
+            return (type: type, url: url, mime: mime, relative: relative, size: size, hash: try Self.sha256File(url))
+        }
+        try Task.checkCancellation()
         try transaction {
-            for (type, url, mime) in finalFiles {
-                let relative = rootDirectory.standardizedFileURL.path == url.deletingLastPathComponent().standardizedFileURL.path
-                    ? url.lastPathComponent
-                    : url.path.replacingOccurrences(of: rootDirectory.path + "/", with: "")
-                let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
-                let hash = try Self.sha256File(url)
+            for item in metadata {
                 try execute(
                     """
                     INSERT INTO artifacts(
@@ -1152,9 +1283,9 @@ final class WoonaStore {
                       upload_state='pending',uploaded_bytes=0
                     """,
                     [
-                        .text(UUID().uuidString), .text(recording.id.uuidString), .text(type),
-                        .text(url.lastPathComponent), .text(relative), .text(mime),
-                        .integer(size), .text(hash), .text(now),
+                        .text(UUID().uuidString), .text(recording.id.uuidString), .text(item.type),
+                        .text(item.url.lastPathComponent), .text(item.relative), .text(item.mime),
+                        .integer(item.size), .text(item.hash), .text(now),
                     ]
                 )
             }
@@ -1329,7 +1460,8 @@ final class WoonaStore {
         var values: [WoonaRecording] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             let recording = try decodeRecording(statement)
-            if recording.questionnaire?.readyForSync != false { values.append(recording) }
+            let needsReview = try captureRecoveryRequiresReview(recording.id)
+            if recording.questionnaire?.readyForSync != false && !needsReview { values.append(recording) }
         }
         return values
     }
@@ -1391,15 +1523,88 @@ final class WoonaStore {
         return ids.count
     }
 
+    /// Recover only proven recording-directory files. Old timestamp-named
+    /// working dumps have no persisted recording UUID and must not be assigned
+    /// by guessed timestamps. They remain available in the complete export.
+    @discardableResult
+    func recoverUnfinishedCaptures(excluding activeRecordings: Set<UUID> = []) throws -> Int {
+        let query = try prepare("SELECT id FROM recordings WHERE status IN ('preparing','recording')")
+        var ids: [UUID] = []
+        while sqlite3_step(query) == SQLITE_ROW {
+            if let id = UUID(uuidString: columnText(query, 0)), !activeRecordings.contains(id) { ids.append(id) }
+        }
+        sqlite3_finalize(query)
+        let known: [(String, String, String)] = [
+            ("packets.bin", "packet", "application/octet-stream"),
+            ("packet_timeline.bin", "packet_timeline", "application/octet-stream"),
+            ("raw_fragments.binlog", "raw", "application/octet-stream"),
+            ("diagnostics.log", "diagnostic", "text/plain"), ("sync.json", "sync", "application/json"),
+            ("video.mp4", "video", "video/mp4"), ("channel.csv", "csv", "text/csv")]
+        var recovered = 0
+        for id in ids {
+            try Task.checkCancellation()
+            guard let recording = try recording(id: id) else { continue }
+            let directory = try localDeletionURL(recording.relativeDirectory)
+            let files = try known.compactMap { item -> (String, String, String, Int64, String)? in
+                let (name, type, _) = item
+                let url = directory.appendingPathComponent(name)
+                guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+                let relative = recording.relativeDirectory + "/" + name
+                _ = try localDeletionURL(relative)
+                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+                guard attributes[.type] as? FileAttributeType == .typeRegular,
+                      let size = (attributes[.size] as? NSNumber)?.int64Value else {
+                    throw WoonaStoreError.invalidData("Interrupted capture contains an unsafe source file: " + name)
+                }
+                return (relative, name, type, size, try Self.sha256File(url))
+            }
+            let now = Self.iso8601(Date())
+            let message = "capture_recovery_requires_review: The previous process ended before capture finalization. Existing source files and questionnaires are preserved. Capture end time and unassigned legacy working files are unknown; export all data for review. Automatic upload remains paused."
+            var changed = false
+            try transaction {
+                guard let latest = try self.recording(id: id), ["preparing", "recording"].contains(latest.status) else { return }
+                for (relative, name, type, size, hash) in files {
+                    let mime = known.first { $0.0 == name }!.2
+                    try execute("""
+                        INSERT OR IGNORE INTO artifacts(id,recording_id,type,file_name,relative_path,mime_type,size_bytes,sha256,upload_state,uploaded_bytes,created_at_utc)
+                        VALUES(?,?,?,?,?,?,?,?,'pending',0,?)
+                        """, [.text(UUID().uuidString), .text(id.uuidString), .text(type), .text(name), .text(relative), .text(mime), .integer(size), .text(hash), .text(now)])
+                }
+                // Preserve any existing sync artifact and anchors byte for byte.
+                let sync = directory.appendingPathComponent("sync.json")
+                if FileManager.default.fileExists(atPath: sync.path), let data = try? Data(contentsOf: sync),
+                   (try? JSONSerialization.jsonObject(with: data)) is [String: Any] {
+                    try execute("INSERT OR IGNORE INTO recording_sync(recording_id,sync_json,updated_at_utc) VALUES(?,?,?)",
+                        [.text(id.uuidString), .text(String(decoding: data, as: UTF8.self)), .text(now)])
+                }
+                try execute("UPDATE recordings SET status='interrupted',server_sync_state='permanent_error' WHERE id=?", [.text(id.uuidString)])
+                try execute("""
+                    INSERT INTO server_sync_state(recording_id,state,attempt_count,last_error_code,last_error_message,updated_at_utc)
+                    VALUES(?,'permanent_error',0,'capture_recovery_requires_review',?,?)
+                    ON CONFLICT(recording_id) DO UPDATE SET state='permanent_error',last_error_code='capture_recovery_requires_review',last_error_message=excluded.last_error_message,updated_at_utc=excluded.updated_at_utc
+                    """, [.text(id.uuidString), .text(message), .text(now)])
+                changed = true
+            }
+            if changed { recovered += 1 }
+        }
+        return recovered
+    }
+
+    func captureRecoveryRequiresReview(_ recordingID: UUID) throws -> Bool {
+        let query = try prepare("SELECT 1 FROM server_sync_state WHERE recording_id=? AND last_error_code='capture_recovery_requires_review'", [.text(recordingID.uuidString)])
+        defer { sqlite3_finalize(query) }
+        return sqlite3_step(query) == SQLITE_ROW
+    }
+
     func resetFailedSync() throws {
         let now = Self.iso8601(Date())
         try transaction {
             try execute("UPDATE profile_sync_state SET state='pending',last_error=NULL,updated_at_utc=? WHERE state IN ('retryable_error','permanent_error')", [.text(now)])
             try execute(
-                "UPDATE recordings SET server_sync_state='pending' WHERE server_sync_state IN ('retryable_error','permanent_error')"
+                "UPDATE recordings SET server_sync_state='pending' WHERE server_sync_state IN ('retryable_error','permanent_error') AND id NOT IN (SELECT recording_id FROM server_sync_state WHERE last_error_code='capture_recovery_requires_review')"
             )
             try execute(
-                "UPDATE server_sync_state SET state='pending',updated_at_utc=? WHERE state IN ('retryable_error','permanent_error')",
+                "UPDATE server_sync_state SET state='pending',updated_at_utc=? WHERE state IN ('retryable_error','permanent_error') AND COALESCE(last_error_code,'')!='capture_recovery_requires_review'",
                 [.text(now)]
             )
         }
@@ -1414,6 +1619,7 @@ final class WoonaStore {
         let sync = try syncJSON(recordingID: id).flatMap {
             (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
         }
+        let needsRecoveryReview = try captureRecoveryRequiresReview(id)
         return WoonaRecording(
             id: id,
             dogID: dogID,
@@ -1431,8 +1637,8 @@ final class WoonaStore {
             appVersion: columnOptionalText(statement, 13),
             questionnaireRevision: Int(sqlite3_column_int64(statement, 14)),
             questionnaireDirty: sqlite3_column_int(statement, 15) == 1,
-            captureErrorCode: sync?["captureErrorCode"] as? String,
-            captureErrorMessage: sync?["captureErrorMessage"] as? String
+            captureErrorCode: needsRecoveryReview ? "process_interrupted" : sync?["captureErrorCode"] as? String,
+            captureErrorMessage: needsRecoveryReview ? "Previous process ended before capture finalization. Source files are preserved; export all data for timing and source review." : sync?["captureErrorMessage"] as? String
         )
     }
 
@@ -1453,7 +1659,6 @@ final class WoonaStore {
     }
 
     private func migrate() throws {
-        try execute("PRAGMA user_version=6")
         try execute(
             """
             CREATE TABLE IF NOT EXISTS dogs(
@@ -1526,7 +1731,20 @@ final class WoonaStore {
         // Historical dog revisions contain no per-version acceptance proof. Reconcile
         // current UUIDs idempotently with the server instead of guessing 'synced'.
         try execute("INSERT OR IGNORE INTO profile_sync_state(profile_version_id,state,updated_at_utc) SELECT id,'pending',client_created_at_utc FROM dog_profile_versions")
-        try execute("PRAGMA user_version=7")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS local_deletion_outbox(
+              id TEXT PRIMARY KEY,relative_path TEXT NOT NULL,
+              entry_kind TEXT NOT NULL CHECK(entry_kind IN ('directory','file')),
+              created_at_utc TEXT NOT NULL,last_error TEXT,
+              UNIQUE(relative_path,entry_kind)
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS deferred_retirements(
+              kind TEXT NOT NULL,id_sha256 TEXT NOT NULL,received_at_utc TEXT NOT NULL,
+              PRIMARY KEY(kind,id_sha256)
+            )
+            """)
         try ensureReferenceColumn()
         let columns = try prepare("PRAGMA table_info(recordings)")
         defer { sqlite3_finalize(columns) }
@@ -1540,6 +1758,7 @@ final class WoonaStore {
             sqlite3_finalize(columns)
             if !found { try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)") }
         }
+        try execute("PRAGMA user_version=8")
     }
 
     private func ensureReferenceColumn() throws {
@@ -1635,7 +1854,10 @@ final class WoonaStore {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hash = SHA256()
-        while let data = try handle.read(upToCount: 65_536), !data.isEmpty { hash.update(data: data) }
+        while let data = try handle.read(upToCount: 65_536), !data.isEmpty {
+            try Task.checkCancellation()
+            hash.update(data: data)
+        }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

@@ -193,7 +193,7 @@ struct ServerProfileReceipt: Decodable {
     var profileVersion: ServerProfileVersion? = nil
 }
 
-struct ServerDeletion: Decodable {
+struct ServerDeletion: Decodable, Hashable, Sendable {
     let kind: String
     let id_sha256: String
 }
@@ -282,13 +282,14 @@ final class WoonaServerClient {
     private static let liveClients = NSHashTable<WoonaServerClient>.weakObjects()
 
     static func cancelAllTransfers() {
-        for client in liveClients.allObjects { client.session.invalidateAndCancel() }
+        for client in liveClients.allObjects { client.cancelled = true; client.session.invalidateAndCancel() }
     }
 
     private let baseURL: URL
     private let token: String
     private let accountID: String?
     private let session: URLSession
+    private var cancelled = false
     typealias DownloadTransport = @MainActor (URLRequest) async throws -> (URL, URLResponse)
     private let downloadTransport: DownloadTransport?
 
@@ -355,7 +356,7 @@ final class WoonaServerClient {
 
     func upload(profile: DogProfile, store: WoonaStore) async throws -> Int {
         do {
-            try store.applyServerDeletions(try await deletions(), accountID: accountID)
+            try await reconcileDeletions(into: store)
             guard try store.profile(dogID: profile.id, versionID: profile.profileVersionID) != nil else {
                 throw ServerSyncError.transfer(code: "profile_removed_by_server", message: "The profile is no longer in the local store after server deletion reconciliation", retryable: false)
             }
@@ -405,7 +406,32 @@ final class WoonaServerClient {
 
     func deletions() async throws -> [ServerDeletion] {
         struct Result: Decodable { let entities: [ServerDeletion] }
-        return try await json(method: "GET", path: "/v1/deletions", body: Optional<Data>.none, as: Result.self).entities
+        let result = try await json(method: "GET", path: "/v1/deletions", body: Optional<Data>.none, as: Result.self)
+        try ensureActive()
+        return result.entities
+    }
+
+    @discardableResult
+    func reconcileDeletions(into store: WoonaStore, timeout: TimeInterval = 20,
+                            acceptResult: () -> Bool = { true }) async throws -> Int {
+        let markers = try await withThrowingTaskGroup(of: [ServerDeletion].self) { group in
+            group.addTask { try await self.deletions() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(max(0.001, timeout) * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw ServerSyncError.responseInvalid }
+            return first
+        }
+        try ensureActive()
+        guard acceptResult() else { throw CancellationError() }
+        return try store.applyServerDeletions(markers, accountID: accountID)
+    }
+
+    private func ensureActive() throws {
+        try Task.checkCancellation()
+        if cancelled { throw CancellationError() }
     }
 
     // A stale list can race an operator retirement. Neither an arbitrary 404 nor
@@ -462,7 +488,7 @@ final class WoonaServerClient {
                 throw ServerSyncError.transfer(code: "pagination_stalled", message: "Server repeated a restore cursor. Previously restored local data is preserved.", retryable: false)
             }
         } while cursor != nil
-        try store.applyServerDeletions(try await deletions(), accountID: accountID)
+        try await reconcileDeletions(into: store)
         return try store.profiles().filter { $0.accountID == accountID }
     }
 
@@ -515,7 +541,7 @@ final class WoonaServerClient {
                 }
             } while cursor != nil
         }
-        try store.applyServerDeletions(try await deletions(), accountID: accountID)
+        try await reconcileDeletions(into: store)
         return restored
     }
 
@@ -536,8 +562,11 @@ final class WoonaServerClient {
             if Self.liveUploads[rootKey]?.isEmpty == true { Self.liveUploads[rootKey] = nil }
         }
         do {
-            try store.applyServerDeletions(try await deletions(), accountID: accountID)
+            try await reconcileDeletions(into: store)
             guard try store.recording(id: recording.id) != nil else { return }
+            guard !(try store.captureRecoveryRequiresReview(recording.id)) else {
+                throw WoonaStoreError.invalidData("capture_recovery_requires_review: Original capture files are preserved, but interrupted capture timing and source ownership need review. Export all data before attempting an import.")
+            }
             let existing: RecordingUploadStatus?
             do { existing = try await json(method: "GET", path: "/v1/recordings/\(recording.id.uuidString)/sync-status", body: nil, as: RecordingUploadStatus.self) }
             catch ServerSyncError.requestFailed(404, _) { existing = nil }
@@ -775,6 +804,7 @@ final class WoonaServerClient {
             else { download = try await session.download(for: request) }
             let (temporary, response) = download
             defer { try? manager.removeItem(at: temporary) }
+            try ensureActive()
             try Task.checkCancellation()
             guard let http = response as? HTTPURLResponse else { throw ServerSyncError.responseInvalid }
             if ![200, 206].contains(http.statusCode) {
@@ -871,6 +901,7 @@ final class WoonaServerClient {
         request.httpBody = body
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, response) = try await session.data(for: request)
+        try ensureActive()
         try validate(response: response, data: data)
         return try JSONDecoder().decode(type, from: data)
     }
@@ -904,12 +935,14 @@ final class WoonaServerClient {
         if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
         let (data, response) = try await session.data(for: request)
+        try ensureActive()
         try validate(response: response, data: data)
         guard let response = response as? HTTPURLResponse else { throw ServerSyncError.responseInvalid }
         return response
     }
 
     private func makeRequest(method: String, path: String) throws -> URLRequest {
+        try ensureActive()
         guard path.hasPrefix("/"), !path.hasPrefix("//"),
               let url = URL(string: baseURL.absoluteString + path) else { throw ServerSyncError.invalidURL }
         var request = URLRequest(url: url)
