@@ -187,6 +187,13 @@ final class AppShellTests: XCTestCase {
         let zone = TimeZone(secondsFromGMT: 3 * 3600)!
         XCTAssertEqual(recordingDisplayTime("2026-10-26T11:32:00Z", timeZone: zone), "26.10.2026 14:32")
         XCTAssertEqual(recordingDisplayTime("2026-10-26T11:32:00.123Z", timeZone: zone), "26.10.2026 14:32")
+        // PostgreSQL/FastAPI dates retain six fractional digits. Exercise Apple
+        // Foundation through the actual card formatter, including a UTC offset
+        // and a local-calendar date rollover rather than just parsing a Date.
+        XCTAssertEqual(recordingDisplayTime("2026-10-27T13:49:03.123456Z", timeZone: zone), "27.10.2026 16:49")
+        XCTAssertEqual(recordingDisplayTime("2026-10-27T16:49:03.123456+03:00", timeZone: zone), "27.10.2026 16:49")
+        XCTAssertEqual(recordingDisplayTime("2026-10-27T23:59:59.123456Z", timeZone: zone), "28.10.2026 02:59")
+        XCTAssertNotNil(ReferenceMetadata.date("2026-10-27T13:49:03.123456Z"))
         XCTAssertEqual(recordingDisplayTime("unknown", timeZone: zone), "unknown")
     }
 
