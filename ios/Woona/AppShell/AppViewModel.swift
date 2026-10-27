@@ -171,6 +171,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private var previewConnectIntent: UUID?
     @Published private(set) var isV2PreviewActive = false
     @Published var bleConnectionPurpose = BleConnectionPurpose.record
     let v2Preview = V2PreviewController()
@@ -727,8 +728,12 @@ final class AppViewModel: ObservableObject {
         isV2PreviewActive = true
         isCaptureReady = false
         v2Preview.prepare()
+        let intent = UUID(); previewConnectIntent = intent
+        let generation = v2Preview.generation
         Task {
+            guard isV2PreviewActive, previewConnectIntent == intent, v2Preview.generation == generation else { return }
             let accepted = await bleSessionManager.connect(to: device.id, purpose: .v2Preview)
+            guard isV2PreviewActive, previewConnectIntent == intent, v2Preview.generation == generation else { return }
             if !accepted { v2Preview.disconnected(reason: "V2 Bluetooth connection could not start. No session was created.") }
         }
     }
@@ -736,6 +741,7 @@ final class AppViewModel: ObservableObject {
     // Called only after the UI's explicit firmware/SD disconnect confirmation.
     func disconnectV2Preview() {
         guard isV2PreviewActive else { return }
+        previewConnectIntent = nil
         v2Preview.disconnected()
         isV2PreviewActive = false
         bleConnectionPurpose = .record

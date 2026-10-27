@@ -253,12 +253,18 @@ final class BleSessionManager {
     private func fail(_ message: String, error: Error? = nil) {
         pendingScanUseServiceFilter = nil
         if let activePeripheralIdentifier {
-            failureDisconnectIdentifiers.insert(activePeripheralIdentifier)
-            centralClient.disconnect(from: activePeripheralIdentifier)
             if purpose == .v2Preview {
-                disconnecting = true; previewReady = false
+                // HELLO may already have changed firmware mode while SD status
+                // remains unknown. An automatic cancel can stop an SD recording.
+                // Disable protocol I/O and keep the link until explicit consent.
+                previewReady = false
+                centralClient.cancelControlWrites(for: activePeripheralIdentifier)
                 notificationSink.deactivate(identifier: activePeripheralIdentifier)
-            } else { clearActivePeripheral(identifier: activePeripheralIdentifier) }
+            } else {
+                failureDisconnectIdentifiers.insert(activePeripheralIdentifier)
+                centralClient.disconnect(from: activePeripheralIdentifier)
+                clearActivePeripheral(identifier: activePeripheralIdentifier)
+            }
         }
         transition(.failure)
         onError(message, error)
