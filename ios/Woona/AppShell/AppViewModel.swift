@@ -60,6 +60,8 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var isLocalRecoveryRunning = false
     @Published private(set) var localRecoveryError: String?
     @Published private(set) var retirementCleanupStatus = RetirementCleanupStatus(pendingCount: 0, lastError: nil)
+    @Published private(set) var serverRestoreWarnings: [ServerRestoreWarning] = []
+    @Published private(set) var serverRestoreState = "not_started"
     @Published private(set) var retirementCheckState = "not_checked"
     @Published private(set) var retirementCheckError: String?
     @Published private(set) var retirementCheckedAt: String?
@@ -425,6 +427,7 @@ final class AppViewModel: ObservableObject {
         catch { showError("Failed to store server token", error: error); return false }
         UserDefaults.standard.set(serverBaseURL, forKey: "serverBaseURL")
         UserDefaults.standard.set(serverWifiOnly, forKey: "serverWifiOnly")
+        serverRestoreWarnings = []; serverRestoreState = "not_started"
         if networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting { schedulePendingSync() }
         return true
     }
@@ -448,6 +451,7 @@ final class AppViewModel: ObservableObject {
         WoonaServerClient.cancelAllTransfers()
         retirementCheckGeneration = nil
         retirementCheckState = "not_checked"; retirementCheckError = nil; retirementCheckedAt = nil
+        serverRestoreWarnings = []; serverRestoreState = "not_started"
         if backgroundSchedulingEnabled { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundSyncIdentifier) }
         connectionCheck = "not_checked"; connectionCheckedAt = nil; connectionCheckError = nil
         serverTransferStatuses = [:]; transferStatusErrors = [:]; transferCheckedAt = [:]
@@ -513,19 +517,30 @@ final class AppViewModel: ObservableObject {
 
     func refreshFromServer() {
         guard canChangeAccount, let store else { return }
-        saveServerSettings()
+        guard saveServerSettings() else { return }
         isAccountOperationRunning = true
+        serverRestoreWarnings = []; serverRestoreState = "running"
         Task {
             defer { isAccountOperationRunning = false; schedulePendingSync() }
+            var restoreClient: WoonaServerClient?
             do {
-                let client = try serverClient()
+                let client = try serverClient(); restoreClient = client
                 _ = try await client.deviceID()
                 let restored = try await client.restoreProfiles(into: store)
                 _ = try await client.restoreRecordings(dogIDs: restored.map(\.id), into: store)
                 reloadProfiles(selecting: selectedDogProfile?.id)
                 await reloadServerRecordings()
-                appendDiagnostic("Server restore completed")
-            } catch { showError("Server restore failed", error: error) }
+                serverRestoreWarnings = client.restoreWarnings
+                serverRestoreState = client.restoreWarnings.isEmpty ? "completed" : "partial"
+                appendDiagnostic(client.restoreWarnings.isEmpty ? "Server restore completed" : "Server restore completed partially; unconfirmed missing entities were skipped and local data preserved")
+            } catch {
+                serverRestoreWarnings = restoreClient?.restoreWarnings ?? []
+                serverRestoreState = "failed"
+                // Earlier successful items remain visible even if a later
+                // authorization or network failure aborts this restore.
+                reloadProfiles(selecting: selectedDogProfile?.id)
+                showError("Server restore failed", error: error)
+            }
         }
     }
 
