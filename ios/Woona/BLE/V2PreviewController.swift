@@ -272,6 +272,11 @@ final class V2PreviewWorker: @unchecked Sendable {
             snapshot.skippedUIBlocks += 1; pendingBreaks.insert(block.streamID); return
         }
         let seconds = Double(block.timestampUs - originUs) / 1_000_000
+        if let last = channels["\(block.streamID)-0"]?.points.last, seconds <= last.time {
+            // Keep protocol acceptance separate from chart continuity. Do not
+            // rewrite a backwards/overlapping source clock to fit the x-axis.
+            snapshot.skippedUIBlocks += 1; pendingBreaks.insert(block.streamID); return
+        }
         let bytes = [UInt8](block.samples)
         let breakBefore = pending.gap || pendingBreaks.remove(block.streamID) != nil
         for channel in 0..<descriptor.channels {
