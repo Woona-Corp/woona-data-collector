@@ -648,6 +648,10 @@ class MainActivity : ComponentActivity() {
                 restoreStartupUiState(startupSavedState)
                 startupSavedState = null
                 startupReady = true
+                if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+                    deviceFeatureController.onResume()
+                    ensureCaptureService()
+                }
                 refreshServerState()
                 observeServerWork()
                 ServerSyncScheduler.refreshPendingNetworkPolicy(applicationContext) { failure ->
