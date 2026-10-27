@@ -235,6 +235,67 @@ final class WoonaDataTests: XCTestCase {
     }
 
     @MainActor
+    func testRestoreContinuesPastConfirmedRetirementRaceAndKeepsOtherLocalData() async throws {
+        try await networkSource { root, source in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(completeDog())
+            let local = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+            try store.finalize(recording: local, status: "completed", files: [("packet", source, "packets.bin", "application/octet-stream")], syncJSON: Data("{}".utf8))
+            let before = try store.artifacts(recordingID: local.id)
+            let retiredID = UUID(), activeID = UUID()
+            let retiredHash = WoonaStore.sha256(Data(retiredID.uuidString.lowercased().utf8))
+            let version: [String: Any] = ["id": profile.profileVersionID.uuidString, "schemaVersion": 1,
+                "validationState": "complete", "questionnaire": try JSONSerialization.jsonObject(with: WoonaStore.dogQuestionnaireData(profile.questionnaire)),
+                "contentSha256": profile.contentSha256, "clientCreatedAtUtc": profile.updatedAtUTC]
+            func summary(_ id: UUID) -> [String: Any] {
+                ["id": id.uuidString, "source": "live", "captureStatus": "completed", "ingestStatus": "uploading",
+                 "startedAtUtc": "2026-10-27T13:49:03.123456Z", "sessionLabel": "Synthetic mixed restore", "videoRequested": false]
+            }
+            let detail = summary(activeID).merging(["dogId": profile.id.uuidString, "profileVersion": version,
+                "timezone": "UTC", "questionnaireSchemaVersion": 1, "questionnaireValidationState": "complete",
+                "sessionQuestionnaire": try JSONSerialization.jsonObject(with: WoonaStore.sessionQuestionnaireData(completeSession())),
+                "sync": [:], "artifacts": []]) { _, new in new }
+            NetworkFaultProtocol.handler = { request in
+                let path = request.url!.path
+                let value: [String: Any]
+                if path == "/v1/deletions" { value = ["entities": [["kind": "recording", "id_sha256": retiredHash]]] }
+                else if path.hasSuffix("/recordings") { value = ["items": [summary(retiredID), summary(activeID)]] }
+                else if path == "/v1/recordings/" + retiredID.uuidString { return .init(status: 410, body: Data(#"{"code":"entity_retired"}"#.utf8)) }
+                else if path == "/v1/recordings/" + activeID.uuidString { value = detail }
+                else { throw ServerSyncError.responseInvalid }
+                return .init(body: try JSONSerialization.data(withJSONObject: value))
+            }
+            let restored = try await networkClient().restoreRecordings(dogIDs: [profile.id], into: store)
+            XCTAssertEqual(restored, 1)
+            XCTAssertNotNil(try store.recording(id: activeID))
+            XCTAssertNil(try store.recording(id: retiredID))
+            XCTAssertEqual(try store.artifacts(recordingID: local.id).map(\.id), before.map(\.id))
+            for artifact in before { XCTAssertEqual(try WoonaStore.sha256File(store.rootDirectory.appendingPathComponent(artifact.relativePath)), artifact.sha256) }
+        }
+    }
+
+    @MainActor
+    func testRestoreDoesNotSuppressUnknownMissingAuthorizationOrServerFailures() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(completeDog()), missingID = UUID()
+            for status in [401, 403, 404, 410, 503] {
+                NetworkFaultProtocol.handler = { request in
+                    if request.url!.path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                    if request.url!.path.hasSuffix("/recordings") {
+                        let summary: [String: Any] = ["id": missingID.uuidString, "source": "live", "captureStatus": "completed", "ingestStatus": "uploading", "startedAtUtc": "2026-10-27T13:49:03Z", "sessionLabel": "Unknown missing", "videoRequested": false]
+                        return .init(body: try JSONSerialization.data(withJSONObject: ["items": [summary]]))
+                    }
+                    return .init(status: status, body: Data(#"{"code":"entity_retired"}"#.utf8))
+                }
+                do { _ = try await networkClient().restoreRecordings(dogIDs: [profile.id], into: store); XCTFail("Unconfirmed failure must remain visible: \(status)") }
+                catch ServerSyncError.requestFailed(let actual, _) { XCTAssertEqual(actual, status) }
+                XCTAssertNotNil(try store.profile(dogID: profile.id, versionID: profile.profileVersionID))
+            }
+        }
+    }
+
+    @MainActor
     func testRestartRecoversOrphanedUploadButPreservesActiveLeaseOffsetsAndFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

@@ -189,6 +189,43 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(recordingDisplayTime("unknown", timeZone: zone), "unknown")
     }
 
+    func testDisconnectRemovesOnlyCredentialsAndPreservesQueuedRecordingBytes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        var animal = DogQuestionnaire(); animal.schemaVersion = 2; animal.animalId = "disconnect-fixture"; animal.numberOrName = "Synthetic animal"
+        let profile = try store.saveProfile(animal)
+        var answers = SessionQuestionnaire(); answers.schemaVersion = 2; answers.sessionLabel = "Keep offline data"; answers.plannedActivities = ["Покой"]
+        let recording = try store.createRecording(profile: profile, source: "live", questionnaire: answers)
+        let original = root.appendingPathComponent("source.bin")
+        try Data("preserved capture bytes".utf8).write(to: original)
+        try store.finalize(recording: recording, status: "completed", files: [("packet", original, "packets.bin", "application/octet-stream")], syncJSON: Data("{}".utf8))
+        let before = try store.artifacts(recordingID: recording.id)
+        var written: [String] = []
+        let model = AppViewModel(store: store, uiTesting: true, serverTokenWriter: { written.append($0) })
+        model.serverBaseURL = "https://example.test"; model.serverToken = "synthetic-device-credential"
+        XCTAssertTrue(model.disconnectServer())
+        XCTAssertEqual(written, [""])
+        XCTAssertEqual(model.serverToken, "")
+        XCTAssertEqual(model.serverBaseURL, "https://example.test")
+        XCTAssertEqual(try store.recording(id: recording.id)?.serverSyncState, "pending")
+        XCTAssertEqual(try store.artifacts(recordingID: recording.id).map(\.sha256), before.map(\.sha256))
+        XCTAssertEqual(try store.artifacts(recordingID: recording.id).map(\.id), before.map(\.id))
+        for artifact in before {
+            XCTAssertEqual(try WoonaStore.sha256File(root.appendingPathComponent(artifact.relativePath)), artifact.sha256)
+        }
+    }
+
+    func testDisconnectDoesNotClearInMemoryCredentialWhenKeychainRemovalFails() {
+        let model = AppViewModel(store: nil, uiTesting: true, serverTokenWriter: { _ in
+            throw WoonaStoreError.invalidData("Synthetic keychain removal denied")
+        })
+        model.serverToken = "synthetic-device-credential"
+        XCTAssertFalse(model.disconnectServer())
+        XCTAssertEqual(model.serverToken, "synthetic-device-credential")
+        XCTAssertTrue(model.errorMessage?.contains("Synthetic keychain removal denied") == true)
+    }
+
     func testProfileDatabaseFailureIsThrownAndRetryKeepsOriginalDraft() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
