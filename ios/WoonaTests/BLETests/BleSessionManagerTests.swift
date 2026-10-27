@@ -341,6 +341,37 @@ final class BleSessionManagerTests: XCTestCase {
         XCTAssertEqual(harness.states.suffix(1), [.failed])
     }
 
+    func testLegacyDisconnectWaitsForTerminalCallbackBeforeSwitchingToV2() async {
+        let client = FakeBleCentralClient(); let harness = BleHarness(client: client); let identifier = UUID()
+        client.emitDiscoveredDevice(.init(id: identifier, name: "Protocol-switch fixture")); await Task.yield()
+        await harness.manager.connect(to: identifier)
+        harness.manager.disconnect()
+        XCTAssertNil(harness.manager.currentPeripheralIdentifier(), "Keep the existing Legacy active-ID API")
+        XCTAssertTrue(harness.manager.isAwaitingDisconnect())
+        let premature = await harness.manager.connect(to: identifier, purpose: .v2Preview)
+        XCTAssertFalse(premature); XCTAssertEqual(client.connectedIdentifiers, [identifier])
+        client.emitDisconnected(identifier); await Task.yield()
+        XCTAssertFalse(harness.manager.isAwaitingDisconnect())
+        let accepted = await harness.manager.connect(to: identifier, purpose: .v2Preview)
+        XCTAssertTrue(accepted); XCTAssertEqual(client.connectedIdentifiers, [identifier, identifier])
+    }
+
+    func testCancelledPreviewConnectIgnoresLateDiscoveryAndEndsWithoutFalseFailure() async {
+        let client = FakeBleCentralClient(); let harness = BleHarness(client: client); let identifier = UUID()
+        client.emitDiscoveredDevice(.init(id: identifier, name: "Cancelled V2 fixture")); await Task.yield()
+        await harness.manager.connect(to: identifier, purpose: .v2Preview)
+        harness.manager.disconnect()
+        client.emitConnected(identifier); await Task.yield()
+        client.emitServices(identifier, serviceUUIDs: [BleConstants.serviceUUID]); await Task.yield()
+        XCTAssertTrue(client.discoveredServices.isEmpty); XCTAssertTrue(client.discoveredCharacteristics.isEmpty)
+        client.emitFailedToConnect(identifier, error: NSError(domain: "Synthetic user cancellation", code: 1)); await Task.yield()
+        XCTAssertFalse(harness.manager.isAwaitingDisconnect()); XCTAssertNil(harness.manager.currentPeripheralIdentifier())
+        XCTAssertEqual(harness.manager.currentState(), .disconnected)
+        XCTAssertTrue(harness.errors.isEmpty); XCTAssertEqual(harness.previewReadyCount, 0)
+        let accepted = await harness.manager.connect(to: identifier, purpose: .v2Preview)
+        XCTAssertTrue(accepted)
+    }
+
     func testV2NotificationFailureKeepsThePhysicalLinkUntilExplicitDisconnect() async {
         let client = FakeBleCentralClient(); let harness = BleHarness(client: client); let identifier = UUID()
         client.emitDiscoveredDevice(.init(id: identifier, name: "V2 fixture")); await Task.yield()

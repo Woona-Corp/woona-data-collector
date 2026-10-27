@@ -634,6 +634,9 @@ struct OverviewView: View {
                             Button(russian ? "Новое соединение" : "New connection") { appState.bleConnectionPurpose = .record; pendingDevice = nil; pendingReplaySelection = false; pendingReplayURL = nil; isBLESelectionPresented = true }
                                 .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary).accessibilityIdentifier("devices.newConnection")
                                 .disabled(!appState.canOpenBLEPicker)
+                            if appState.isBLEDisconnectPending {
+                                Text(russian ? "Ожидаем завершения отключения Bluetooth перед новым подключением…" : "Waiting for Bluetooth disconnection before a new connection…").font(.footnote)
+                            }
                             if appState.selectedDogProfile == nil {
                                 Text(russian ? "Для записи сначала выберите или создайте анкету во вкладке «Животные». Предпросмотр V2 доступен без анкеты." : "For recording, first select or create an animal in Animals. V2 preview does not require a profile.").font(.footnote)
                             }

@@ -22,6 +22,7 @@ final class BleSessionManager {
     private var previewReady = false
     private var disconnecting = false
     private var failureDisconnectIdentifiers: Set<UUID> = []
+    private var awaitingDisconnectIdentifiers: Set<UUID> = []
     private var pendingScanUseServiceFilter: Bool?
     private var scanTimeoutTask: Task<Void, Never>?
     private var sessionState: BleSessionState = .idle
@@ -80,9 +81,11 @@ final class BleSessionManager {
         activePeripheralIdentifier
     }
 
+    func isAwaitingDisconnect() -> Bool { !awaitingDisconnectIdentifiers.isEmpty }
+
     func startScanning(useServiceFilter: Bool = true) {
         guard validateBluetoothAuthorization() else { return }
-        guard activePeripheralIdentifier == nil else {
+        guard activePeripheralIdentifier == nil, awaitingDisconnectIdentifiers.isEmpty else {
             onDiagnosticMessage("Disconnect before scanning for another BLE device")
             return
         }
@@ -118,8 +121,8 @@ final class BleSessionManager {
         prepareForCapture: () async -> Void = {}
     ) async -> Bool {
         guard validateBluetoothReady() else { return false }
-        guard activePeripheralIdentifier == nil else {
-            onDiagnosticMessage("BLE connection already in progress")
+        guard activePeripheralIdentifier == nil, awaitingDisconnectIdentifiers.isEmpty else {
+            onDiagnosticMessage(awaitingDisconnectIdentifiers.isEmpty ? "BLE connection already in progress" : "Wait for Bluetooth disconnection before reconnecting")
             return false
         }
         guard discoveredDevicesByID[identifier] != nil else {
@@ -155,6 +158,7 @@ final class BleSessionManager {
 
         centralClient.cancelControlWrites(for: activePeripheralIdentifier)
         previewReady = false
+        awaitingDisconnectIdentifiers.insert(activePeripheralIdentifier)
         centralClient.disconnect(from: activePeripheralIdentifier)
         if purpose == .v2Preview {
             // Do not reconnect the same CBPeripheral until its terminal callback;
@@ -262,12 +266,19 @@ final class BleSessionManager {
                 notificationSink.deactivate(identifier: activePeripheralIdentifier)
             } else {
                 failureDisconnectIdentifiers.insert(activePeripheralIdentifier)
+                awaitingDisconnectIdentifiers.insert(activePeripheralIdentifier)
                 centralClient.disconnect(from: activePeripheralIdentifier)
                 clearActivePeripheral(identifier: activePeripheralIdentifier)
             }
         }
         transition(.failure)
         onError(message, error)
+    }
+
+    private func clearUnavailableTransport() {
+        if let identifier = activePeripheralIdentifier { clearActivePeripheral(identifier: identifier) }
+        awaitingDisconnectIdentifiers.removeAll(); failureDisconnectIdentifiers.removeAll()
+        onStateChanged(sessionState)
     }
 
     private func clearActivePeripheral(identifier: UUID) {
@@ -286,8 +297,10 @@ extension BleSessionManager: BleCentralClientDelegate {
                 beginScanning(useServiceFilter: pendingScanUseServiceFilter)
             } else if client.powerState == .poweredOff {
                 fail("Bluetooth is off")
+                clearUnavailableTransport()
             } else if client.powerState == .unauthorized || client.authorization == .denied || client.authorization == .restricted {
                 fail("Bluetooth permission denied")
+                clearUnavailableTransport()
             }
         }
     }
@@ -308,28 +321,29 @@ extension BleSessionManager: BleCentralClientDelegate {
 
     nonisolated func centralClient(_ client: BleCentralClient, didFailToConnect identifier: UUID, error: Error?) {
         Task { @MainActor in
-            guard activePeripheralIdentifier == identifier else { return }
+            let expectedTermination = awaitingDisconnectIdentifiers.remove(identifier) != nil
+            if failureDisconnectIdentifiers.remove(identifier) != nil {
+                clearActivePeripheral(identifier: identifier); onStateChanged(sessionState); return
+            }
+            guard activePeripheralIdentifier == identifier || expectedTermination else { return }
             clearActivePeripheral(identifier: identifier)
-            fail("BLE connection failed", error: error)
+            if expectedTermination { transition(.disconnected) }
+            else { fail("BLE connection failed", error: error) }
         }
     }
 
     nonisolated func centralClient(_ client: BleCentralClient, didDisconnect identifier: UUID, error: Error?) {
         Task { @MainActor in
+            let expectedTermination = awaitingDisconnectIdentifiers.remove(identifier) != nil
             if failureDisconnectIdentifiers.remove(identifier) != nil {
                 clearActivePeripheral(identifier: identifier)
-                if let error {
-                    onError("BLE disconnected with error", error)
-                }
+                onStateChanged(sessionState)
                 return
             }
-
-            guard activePeripheralIdentifier == identifier else { return }
+            guard activePeripheralIdentifier == identifier || expectedTermination else { return }
             clearActivePeripheral(identifier: identifier)
             transition(.disconnected)
-            if let error {
-                onError("BLE disconnected with error", error)
-            }
+            if let error, !expectedTermination { onError("BLE disconnected with error", error) }
         }
     }
 
@@ -340,7 +354,7 @@ extension BleSessionManager: BleCentralClientDelegate {
         error: Error?
     ) {
         Task { @MainActor in
-            guard activePeripheralIdentifier == identifier else { return }
+            guard activePeripheralIdentifier == identifier, !disconnecting else { return }
             guard error == nil else {
                 fail("BLE service discovery failed", error: error)
                 return
@@ -362,7 +376,7 @@ extension BleSessionManager: BleCentralClientDelegate {
         error: Error?
     ) {
         Task { @MainActor in
-            guard activePeripheralIdentifier == identifier else { return }
+            guard activePeripheralIdentifier == identifier, !disconnecting else { return }
             guard error == nil else {
                 fail("BLE characteristic discovery failed", error: error)
                 return

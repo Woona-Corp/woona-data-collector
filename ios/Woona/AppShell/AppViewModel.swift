@@ -175,7 +175,8 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var isV2PreviewActive = false
     @Published var bleConnectionPurpose = BleConnectionPurpose.record
     let v2Preview = V2PreviewController()
-    private var hasOpenBLETransport: Bool { hasInitializedBleSessionManager && bleSessionManager.currentPeripheralIdentifier() != nil }
+    var isBLEDisconnectPending: Bool { hasInitializedBleSessionManager && bleSessionManager.isAwaitingDisconnect() }
+    private var hasOpenBLETransport: Bool { hasInitializedBleSessionManager && (bleSessionManager.currentPeripheralIdentifier() != nil || bleSessionManager.isAwaitingDisconnect()) }
     var canOpenBLEPicker: Bool { !hasOpenBLETransport && !isLocalRecoveryRunning && localRecoveryError == nil && activeRecording == nil && !captureStopInProgress && !isConnectionActive && !isV2PreviewActive && !isReplayRunning && !isAccountOperationRunning }
 
     var canStartNewSession: Bool { !hasOpenBLETransport && !isV2PreviewActive && !isLocalRecoveryRunning && localRecoveryError == nil && activeRecording == nil && !captureStopInProgress }
