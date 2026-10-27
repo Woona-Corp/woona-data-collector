@@ -254,13 +254,17 @@ class ServerApiClientIntegrationTest {
     fun embeddedServerDefaults_configureFreshInstall() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val store = ServerSettingsStore(context)
-        store.clearToken()
+        context.getSharedPreferences("woona_server",android.content.Context.MODE_PRIVATE).edit().clear().commit()
 
         val settings = store.get()
 
+        assertTrue(settings.wifiOnly)
         assertEquals(BuildConfig.WOONA_SERVER_BASE_URL, settings.baseUrl)
         assertEquals(BuildConfig.WOONA_SERVER_TOKEN, settings.token)
         assertEquals(BuildConfig.WOONA_SERVER_TOKEN.isNotBlank(), settings.isConfigured)
+        store.clearToken()
+        assertEquals("",store.get().token)
+        assertTrue(!store.get().isConfigured)
     }
 
     @Test

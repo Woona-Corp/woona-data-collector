@@ -702,6 +702,7 @@ class WoonaDatabase(
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 8) createRetirementCleanupTable(db)
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE artifacts RENAME TO artifacts_v1")
             db.execSQL("DROP INDEX IF EXISTS artifacts_recording")
@@ -814,6 +815,7 @@ class WoonaDatabase(
         createSyncTable(db)
         createArtifactsTable(db)
         createServerSyncTable(db)
+        createRetirementCleanupTable(db)
         db.execSQL("CREATE INDEX artifacts_recording ON artifacts(recording_id)")
         db.execSQL("CREATE INDEX artifacts_upload ON artifacts(upload_state, recording_id) WHERE upload_state <> 'available'")
         db.execSQL("PRAGMA user_version=$DATABASE_VERSION")
@@ -1761,7 +1763,7 @@ class WoonaDatabase(
     )
 
     companion object {
-        private const val DATABASE_VERSION = 7
+        private const val DATABASE_VERSION = 8
         private val RECORDING_COLUMNS = arrayOf(
             "id",
             "dog_id",

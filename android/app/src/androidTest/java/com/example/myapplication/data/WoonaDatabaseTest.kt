@@ -987,6 +987,73 @@ class WoonaDatabaseTest {
         }
     }
 
+    @Test fun restoreSkipsRetirementRacesReportsUnknown404AndPreservesOtherAccountOriginals() {
+        val original=completedPacketRecording("Other account source")
+        database.writableDatabase.execSQL("UPDATE dogs SET account_id='account-b' WHERE id=?",arrayOf(original.dogId))
+        val dogId=java.util.UUID.randomUUID().toString();val recordId=java.util.UUID.randomUUID().toString()
+        val profileId=java.util.UUID.randomUUID().toString();val retiredDog=java.util.UUID.randomUUID().toString();val retiredRecord=java.util.UUID.randomUUID().toString()
+        val template=com.example.myapplication.sync.ServerApiClient(com.example.myapplication.sync.ServerSettings("https://invalid.example","synthetic","device",true,"account-a"))
+        template.javaClass.getDeclaredField("authenticatedDeviceId").apply {isAccessible=true}.set(template,"00000000-0000-0000-0000-000000000099")
+        val manifest=template.javaClass.getDeclaredMethod("recordingManifest",RecordingSyncRecord::class.java).apply {isAccessible=true}.invoke(template,original) as JSONObject
+        val profile=manifest.getJSONObject("dogProfileVersion").put("id",profileId)
+        val dog=JSONObject().put("id",dogId).put("accountId","account-a").put("numberOrName","Restored active").put("revision",1).put("profileVersion",profile)
+        val record=manifest.getJSONObject("recording").put("id",recordId).put("dogId",dogId).put("accountId","account-a").put("profileVersion",profile)
+            .put("sync",manifest.getJSONObject("sync")).put("artifacts",org.json.JSONArray()).put("receiptSha256","a".repeat(64)).put("serverVerifiedAtUtc","2026-10-27T00:00:00Z")
+        fun page(vararg ids:String)=JSONObject().put("items",org.json.JSONArray(ids.map {JSONObject().put("id",it)})).put("nextCursor",JSONObject.NULL)
+        fun hash(id:String)=java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray()).joinToString(""){"%02x".format(it)}
+        val requested=mutableListOf<String>();val headers=mutableListOf<String?>()
+        val client=syntheticRestoreClient({url->
+            val path=url.file;requested+=path
+            when(path) {
+                "/v1/dogs?limit=200"->200 to page(dogId,retiredDog).toString()
+                "/v1/dogs/$dogId"->200 to dog.toString()
+                "/v1/dogs/$retiredDog"->410 to "{}"
+                "/v1/dogs/$dogId/recordings?limit=200"->200 to page(recordId,retiredRecord,original.id).toString()
+                "/v1/recordings/$recordId"->200 to record.toString()
+                "/v1/recordings/$retiredRecord"->410 to "{}"
+                "/v1/recordings/${original.id}"->404 to "{}"
+                "/v1/deletions"->200 to JSONObject().put("entities",org.json.JSONArray(listOf(JSONObject().put("kind","dog").put("id_sha256",hash(retiredDog)),JSONObject().put("kind","recording").put("id_sha256",hash(retiredRecord))))).toString()
+                else->error("Unexpected fixture path $path")
+            }
+        },headers)
+        val snapshot=client.fetchRestoreSnapshot()
+        assertEquals(1,snapshot.dogs.size);assertEquals(1,snapshot.recordings.size)
+        assertEquals(3,snapshot.warnings.size);assertEquals(1,snapshot.warnings.count {!it.confirmedRetirement})
+        assertEquals("/v1/deletions",requested.last());assertTrue(headers.all {it=="account-a"})
+        assertTrue(requireNotNull(com.example.myapplication.sync.restoreWarningsText(snapshot.warnings,com.example.myapplication.localization.AppLanguage.ENGLISH)).contains("partially"))
+        database.restoreServerMetadata(snapshot.dogs,snapshot.recordings);database.applyServerDeletions(snapshot.deletions)
+        assertEquals(original.sessionLabel,database.recording(original.id)?.sessionLabel)
+        assertEquals("packet data",database.resolveRelativePath(original.artifacts.single().relativePath).readText())
+        assertEquals("account-b",database.profile(original.dogId)?.accountId)
+    }
+
+    @Test fun restoreNeverMasksAuthOrServerFailureAndRepeatedCursorsAreBounded() {
+        val id=java.util.UUID.randomUUID().toString()
+        for(status in listOf(401,403,500)) {
+            val client=syntheticRestoreClient({url->if(url.file.startsWith("/v1/dogs?")) 200 to JSONObject().put("items",org.json.JSONArray(listOf(JSONObject().put("id",id)))).toString() else status to "{}"})
+            val error=org.junit.Assert.assertThrows(com.example.myapplication.sync.ServerHttpException::class.java) {client.fetchRestoreSnapshot()}
+            assertEquals(status,error.status)
+        }
+        var calls=0
+        val stalled=syntheticRestoreClient({_->calls++;200 to JSONObject().put("items",org.json.JSONArray()).put("nextCursor",id).toString()})
+        val error=org.junit.Assert.assertThrows(com.example.myapplication.sync.ServerTransferException::class.java) {stalled.fetchRestoreSnapshot()}
+        assertEquals("pagination_stalled",error.code);assertEquals(2,calls)
+    }
+
+    private fun syntheticRestoreClient(response:(java.net.URL)->Pair<Int,String>,headers:MutableList<String?> = mutableListOf()) =
+        com.example.myapplication.sync.ServerApiClient(com.example.myapplication.sync.ServerSettings("https://invalid.example","synthetic","device",true,"account-a"),connectionFactory={url->
+            val reply=response(url)
+            object:java.net.HttpURLConnection(url) {
+                override fun connect() {}
+                override fun disconnect() {}
+                override fun usingProxy()=false
+                override fun getResponseCode():Int {headers+=getRequestProperty("X-Woona-Account");return reply.first}
+                override fun getInputStream()=reply.second.byteInputStream()
+                override fun getErrorStream()=reply.second.byteInputStream()
+                override fun getHeaderFields():Map<String,List<String>> = emptyMap()
+            }
+        })
+
     private fun completedPacketRecording(name: String): RecordingSyncRecord {
         val profile = database.saveProfile(completeDogQuestionnaire(name))
         val recording = database.beginRecording(profile.id, RecordingSource.LIVE, completeSessionQuestionnaire())
