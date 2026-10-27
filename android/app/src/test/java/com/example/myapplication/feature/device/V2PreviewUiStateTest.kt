@@ -36,6 +36,21 @@ class V2PreviewUiStateTest {
         assertEquals(V2PreviewStage.NONE, state.uiState.v2PreviewStage)
     }
 
+    @Test fun explicitDisconnectClearsPreviewBeforeAnyGattCallbackSoOrdinaryRecordingCanStart() {
+        val state = DeviceUiStateHolder()
+        state.onV2PreviewConnecting()
+        state.onV2DiscoveryReady(3, 2047)
+        state.onV2LiveStarted()
+        state.stopCaptureSession()
+        state.prepareVideo()
+        state.videoReady()
+        state.onSessionStateChanged(BleSessionState.CONNECTED)
+        assertFalse(state.uiState.v2DiscoveryRequested)
+        assertFalse(state.uiState.v2LiveRunning)
+        assertEquals(V2PreviewStage.NONE, state.uiState.v2PreviewStage)
+        assertEquals(VideoCaptureState.READY, state.uiState.videoState)
+    }
+
     @Test fun streamSelectionCannotChangeWhileStartOrStopAcknowledgementIsPending() {
         val state = DeviceUiStateHolder()
         state.onV2PreviewConnecting()

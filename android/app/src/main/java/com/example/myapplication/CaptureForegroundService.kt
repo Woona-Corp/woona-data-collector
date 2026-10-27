@@ -33,6 +33,7 @@ class CaptureForegroundService : Service() {
             return START_NOT_STICKY
         }
 
+        val captureGeneration = intent?.getLongExtra(EXTRA_CAPTURE_GENERATION, 0L) ?: 0L
         val notification = buildNotification()
         val requestedCamera = intent?.getBooleanExtra(EXTRA_VIDEO_REQUESTED, false) == true
         val cameraGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
@@ -51,16 +52,16 @@ class CaptureForegroundService : Service() {
                 promote(notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             }
         } catch (error: SecurityException) {
-            reportStartFailure(startId, error)
+            reportStartFailure(startId, error, captureGeneration)
             return START_NOT_STICKY
         } catch (error: IllegalStateException) {
-            reportStartFailure(startId, error)
+            reportStartFailure(startId, error, captureGeneration)
             return START_NOT_STICKY
         }
         CaptureServiceBridge.isRunning = true
         CaptureServiceBridge.cameraForegroundEnabled = foregroundTypes and ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA != 0
-        CaptureServiceBridge.onForegroundReady?.invoke(CaptureServiceBridge.cameraForegroundEnabled)
-        cameraFailure?.let { CaptureServiceBridge.onStartFailed?.invoke("camera_foreground_unavailable", it) }
+        CaptureServiceBridge.onForegroundReady?.invoke(CaptureServiceBridge.cameraForegroundEnabled, captureGeneration)
+        cameraFailure?.let { CaptureServiceBridge.onStartFailed?.invoke("camera_foreground_unavailable", it, captureGeneration) }
         return START_NOT_STICKY
     }
 
@@ -70,10 +71,10 @@ class CaptureForegroundService : Service() {
         foregroundTypes = types
     }
 
-    private fun reportStartFailure(startId: Int, error: RuntimeException) {
+    private fun reportStartFailure(startId: Int, error: RuntimeException, captureGeneration: Long) {
         CaptureServiceBridge.isRunning = false
         CaptureServiceBridge.cameraForegroundEnabled = false
-        CaptureServiceBridge.onStartFailed?.invoke("capture_foreground_start_denied", error)
+        CaptureServiceBridge.onStartFailed?.invoke("capture_foreground_start_denied", error, captureGeneration)
         stopSelf(startId)
     }
 
@@ -128,12 +129,13 @@ class CaptureForegroundService : Service() {
         private const val REQUEST_OPEN = 1
         private const val REQUEST_STOP = 2
         const val ACTION_STOP = "com.example.myapplication.action.STOP_CAPTURE"
+        private const val EXTRA_CAPTURE_GENERATION = "capture_generation"
         private const val EXTRA_VIDEO_REQUESTED = "video_requested"
         private const val EXTRA_VISIBLE_CAMERA_START = "visible_camera_start"
 
         /** Pass the visible Activity for camera promotion; application Context
          * deliberately requests only the connected-device foreground type. */
-        fun start(context: Context, videoRequested: Boolean = false): Boolean {
+        fun start(context: Context, videoRequested: Boolean = false, captureGeneration: Long = 0L): Boolean {
             var candidate = context
             while (candidate is ContextWrapper && candidate !is Activity) {
                 val base = candidate.baseContext
@@ -147,14 +149,15 @@ class CaptureForegroundService : Service() {
             val allowCamera = videoRequested && cameraGranted && visible
             return try {
                 ContextCompat.startForegroundService(context, Intent(context, CaptureForegroundService::class.java)
+                    .putExtra(EXTRA_CAPTURE_GENERATION, captureGeneration)
                     .putExtra(EXTRA_VIDEO_REQUESTED, videoRequested)
                     .putExtra(EXTRA_VISIBLE_CAMERA_START, allowCamera))
                 true
             } catch (error: SecurityException) {
-                CaptureServiceBridge.onStartFailed?.invoke("capture_foreground_start_denied", error)
+                CaptureServiceBridge.onStartFailed?.invoke("capture_foreground_start_denied", error, captureGeneration)
                 false
             } catch (error: IllegalStateException) {
-                CaptureServiceBridge.onStartFailed?.invoke("capture_foreground_start_denied", error)
+                CaptureServiceBridge.onStartFailed?.invoke("capture_foreground_start_denied", error, captureGeneration)
                 false
             }
         }
@@ -173,10 +176,10 @@ object CaptureServiceBridge {
     var cameraForegroundEnabled: Boolean = false
 
     @Volatile
-    var onForegroundReady: ((cameraEnabled: Boolean) -> Unit)? = null
+    var onForegroundReady: ((cameraEnabled: Boolean, captureGeneration: Long) -> Unit)? = null
 
     @Volatile
-    var onStartFailed: ((code: String, error: RuntimeException) -> Unit)? = null
+    var onStartFailed: ((code: String, error: RuntimeException, captureGeneration: Long) -> Unit)? = null
 
     @Volatile
     var onStopRequested: (() -> Unit)? = null

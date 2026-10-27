@@ -243,7 +243,7 @@ class MainActivity : ComponentActivity() {
                 onRecordingChanged = ::handleRecordingChanged,
                 onCaptureLifecycleChanged = { active ->
                     if (active) {
-                        CaptureForegroundService.start(this@MainActivity, deviceFeatureController.isVideoRequested())
+                        CaptureForegroundService.start(this@MainActivity, deviceFeatureController.isVideoRequested(), deviceFeatureController.captureIdentityGeneration())
                     } else {
                         CaptureForegroundService.stop(applicationContext)
                     }
@@ -263,9 +263,10 @@ class MainActivity : ComponentActivity() {
             DeviceFeatureControllerHolder.requestStop()
         }
         val weakActivity = java.lang.ref.WeakReference(this)
-        CaptureServiceBridge.onForegroundReady = { cameraEnabled ->
+        CaptureServiceBridge.onForegroundReady = { cameraEnabled, generation ->
             weakActivity.get()?.let { activity -> activity.runOnUiThread {
                 if (activity.pendingForegroundCaptureStart && cameraEnabled && activity.startupReady &&
+                    activity.deviceFeatureController.captureIdentityGeneration() == generation &&
                     activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) &&
                     activity.deviceFeatureController.isCaptureActive()) {
                     activity.pendingForegroundCaptureStart = false
@@ -273,14 +274,14 @@ class MainActivity : ComponentActivity() {
                 }
             } }
         }
-        CaptureServiceBridge.onStartFailed = { code, error ->
+        CaptureServiceBridge.onStartFailed = { code, error, generation ->
             weakActivity.get()?.let { activity -> activity.runOnUiThread {
-                activity.pendingForegroundCaptureStart = false
-                if (activity.startupReady && !activity.isDestroyed) {
+                if (activity.startupReady && !activity.isDestroyed && activity.deviceFeatureController.captureIdentityGeneration() == generation) {
+                    activity.pendingForegroundCaptureStart = false
                     val message = activity.appTextResolver.getString(if (code == "camera_foreground_unavailable")
                         R.string.camera_foreground_unavailable else R.string.capture_foreground_start_denied)
-                    if (code == "camera_foreground_unavailable") activity.deviceFeatureController.onCaptureServiceFailure(code, message, error)
-                    else activity.backgroundExecutor.execute { activity.deviceFeatureController.onCaptureServiceFailure(code, message, error) }
+                    if (code == "camera_foreground_unavailable") activity.deviceFeatureController.onCaptureServiceFailure(code, message, error, generation)
+                    else activity.backgroundExecutor.execute { activity.deviceFeatureController.onCaptureServiceFailure(code, message, error, generation) }
                 }
             } }
         }
@@ -722,7 +723,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (startupReady) { refreshServerState(); ensureCaptureService() }
+        if (startupReady) { deviceFeatureController.onResume(); refreshServerState(); ensureCaptureService() }
     }
 
     override fun onStop() {
@@ -744,7 +745,7 @@ class MainActivity : ComponentActivity() {
 
     private fun ensureCaptureService(): Boolean {
         if (!startupReady || !deviceFeatureController.isLiveCapture() || deviceFeatureController.isV2PreviewConnection()) return false
-        return CaptureForegroundService.start(this, deviceFeatureController.isVideoRequested())
+        return CaptureForegroundService.start(this, deviceFeatureController.isVideoRequested(), deviceFeatureController.captureIdentityGeneration())
     }
 
     private fun startSynchronizedCaptureWhenServiceReady() {

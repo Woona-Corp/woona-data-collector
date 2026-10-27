@@ -87,7 +87,9 @@ class DeviceFeatureController(
     private var lastAlarmQuality: ConnectionQuality? = null
     private var manualDisconnectPending = false
     @Volatile private var v2PreviewConnection = false
+    @Volatile private var v2PreviewForeground = true
     private val connectionUiGeneration = AtomicLong()
+    private val captureIdentityGeneration = AtomicLong()
     private var pendingFinalizationStatus: RecordingStatus? = null
     private val finalizationRetryRunnable = Runnable {
         val status = pendingFinalizationStatus
@@ -115,8 +117,10 @@ class DeviceFeatureController(
 
     fun isCaptureActive(): Boolean = !recordingFinalized || recordingFinalizing
     fun isV2PreviewConnection(): Boolean = v2PreviewConnection
+    fun isV2PreviewForeground(): Boolean = v2PreviewConnection && v2PreviewForeground
     fun shouldRetainConnection(): Boolean = isCaptureActive() || v2PreviewConnection
     fun connectionUiGeneration(): Long = connectionUiGeneration.get()
+    fun captureIdentityGeneration(): Long = captureIdentityGeneration.get()
 
     fun setOnRecordingChanged(listener: () -> Unit) {
         recordingChangedListener = listener
@@ -170,6 +174,7 @@ class DeviceFeatureController(
         awaitingCaptureReady = false
         packetCaptureController.stopCapture()
         v2PreviewConnection = true
+        v2PreviewForeground = true
         uiStateHolder.onV2PreviewConnecting()
         bleSessionController.stopScanning()
         bleSessionController.connectForV2Preview(address)
@@ -214,6 +219,7 @@ class DeviceFeatureController(
         pendingFinalizationStatus = null
         finalizeRecording(RecordingStatus.INTERRUPTED)
         val staleSnapshot = synchronized(this) {
+            captureIdentityGeneration.incrementAndGet()
             currentRecordingId = recording.id
             currentRecording = recording
             recordingFinalized = false
@@ -384,15 +390,23 @@ class DeviceFeatureController(
         uiStateHolder.zoomChart(scaleFactor, anchorFractionY)
     }
 
+    fun onResume() { v2PreviewForeground = true }
+
+    fun onV2LiveStarted() {
+        if (!v2PreviewConnection) return
+        uiStateHolder.onV2LiveStarted()
+        if (!v2PreviewForeground) onV2LiveStopRequested()
+    }
+
     fun onPause() {
         if (v2PreviewConnection) {
-            // Never intentionally stop somebody else's active on-device session.
-            if (uiState.v2DeviceSessionMode in 1..2) return
-            onDisconnectRequested()
-            return
+            v2PreviewForeground = false
+            // Even an unknown/failed handshake may already have switched firmware
+            // to V2 while STORAGE is active. Never disconnect implicitly. Stop
+            // only the LIVE session whose START_ACK belongs to our controller.
+            if (uiState.v2LiveRunning) onV2LiveStopRequested()
         }
-        // Screen/background lifecycle does not own an active capture. The
-        // foreground capture service and the explicit Stop action own it.
+        // Ordinary capture is owned by its foreground service and explicit Stop.
     }
 
     fun onBleStateChanged(state: BleSessionState) {
@@ -1140,8 +1154,10 @@ class DeviceFeatureController(
         notifyRecordingChanged()
     }
 
-    fun onCaptureServiceFailure(code: String, message: String, error: RuntimeException) {
-        if (v2PreviewConnection || !isCaptureActive()) return
+    @Synchronized
+    fun onCaptureServiceFailure(code: String, message: String, error: RuntimeException,
+                                expectedCaptureGeneration: Long = captureIdentityGeneration.get()) {
+        if (expectedCaptureGeneration != captureIdentityGeneration.get() || v2PreviewConnection || !isCaptureActive()) return
         val details = "$code: $message: $error"
         if (code == "camera_foreground_unavailable") {
             handleVideoFailure(details)

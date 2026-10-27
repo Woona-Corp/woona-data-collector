@@ -95,10 +95,17 @@ class DeviceFeatureSmokeTest {
             assertEquals("PREVIEW", ble.connectedAddress)
             org.junit.Assert.assertFalse(controller.isV2PreviewConnection())
             assertTrue(controller.isCaptureActive())
+            val oldCaptureGeneration = controller.captureIdentityGeneration()
             controller.onCaptureServiceFailure("capture_foreground_start_denied", "Synthetic OS refusal", SecurityException("denied"))
             assertEquals(com.example.myapplication.data.RecordingStatus.FAILED, database.recording(active.id)?.status)
             assertEquals("capture_foreground_start_denied", database.recording(active.id)?.captureErrorCode)
             assertArrayEquals(bytes, packet.readBytes())
+            val next = database.beginRecording(profile.id, com.example.myapplication.data.RecordingSource.LIVE, null)
+            controller.beginRecordingSession(next)
+            controller.onCaptureServiceFailure("capture_foreground_start_denied", "Late error from previous capture", SecurityException("old"), oldCaptureGeneration)
+            assertTrue(controller.isCaptureActive())
+            assertEquals(com.example.myapplication.data.RecordingStatus.PREPARING, database.recording(next.id)?.status)
+            org.junit.Assert.assertNull(database.recording(next.id)?.captureErrorCode)
         } finally { controller.close(); database.close(); root.deleteRecursively() }
     }
 

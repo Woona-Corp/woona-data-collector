@@ -401,6 +401,10 @@ class DeviceUiStateHolder {
     fun stopCaptureSession() {
         clearChartHistory()
         uiState = uiState.copy(
+            v2DiscoveryRequested = false, v2DiscoveryError = null, v2Ready = false,
+            v2LiveRunning = false, v2PreviewStage = V2PreviewStage.NONE,
+            v2StreamMask = 0, v2SelectedStreamMask = 0, v2Capabilities = 0, v2DeviceSessionMode = 0,
+            v2PreviewBlocks = 0, v2SequenceGaps = 0, v2ChartSkippedBlocks = 0,
             showCaptureUi = false,
             isReplayPreparing = false,
             isReplayRunning = false,

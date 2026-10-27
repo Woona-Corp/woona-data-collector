@@ -161,7 +161,7 @@ fun createDeviceFeatureController(
             events to counters
         }
         val (batch, counters) = pending
-        if (batch.isNotEmpty()) {
+        if (batch.isNotEmpty() && deviceFeatureController?.isV2PreviewForeground() == true) {
             val charts = linkedMapOf<ChartStreamKey, MutableList<ChartPoint>>()
             var unplottable = 0
             batch.forEach { event ->
@@ -260,11 +260,12 @@ fun createDeviceFeatureController(
             override fun onV2LiveStarted(sessionId: Long, streamMask: Long) {
                 resetV2PreviewQueue()
                 v2OnMain {
-                    uiStateHolder.onV2LiveStarted()
+                    deviceFeatureController?.onV2LiveStarted()
                 }
             }
 
             override fun onV2LiveSamples(event: WoonaV2LiveSession.Event.Samples) {
+                if (deviceFeatureController?.isV2PreviewForeground() != true) return
                 val schedulePreview = synchronized(v2PreviewLock) {
                     v2ReceivedPending++
                     if (event.sequenceGap) v2GapsPending++

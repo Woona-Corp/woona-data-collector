@@ -35,7 +35,7 @@ class DeviceFeatureControllerTest {
     }
 
     @Test
-    fun previewConnectNeverStartsPersistentCaptureAndDisconnectsWhenBackgrounded() {
+    fun previewConnectNeverStartsPersistentCaptureAndRequiresExplicitDisconnect() {
         val ble = FakeBleSessionController()
         val capture = FakePacketCaptureController()
         val state = DeviceUiStateHolder()
@@ -52,9 +52,33 @@ class DeviceFeatureControllerTest {
         controller.startSynchronizedSession()
         assertFalse(capture.resetCalled)
         controller.onPause()
+        assertEquals(0, ble.disconnectCalls)
+        assertTrue(controller.isV2PreviewConnection())
+        assertFalse(controller.isV2PreviewForeground())
+        controller.onDisconnectRequested()
         assertEquals(1, ble.disconnectCalls)
         assertFalse(controller.isV2PreviewConnection())
         assertFalse(capture.finishCaptureCalled)
+    }
+
+    @Test
+    fun backgroundStopsOnlyOurConfirmedLiveAndAlsoHandlesLateStartAcknowledgment() {
+        for (lateAck in listOf(false, true)) {
+            val ble = FakeBleSessionController()
+            val state = DeviceUiStateHolder()
+            val controller = DeviceFeatureController(ble, FakePacketCaptureController(), FakeFileShareIntentFactory(), uiStateHolder = state)
+            controller.onV2PreviewConnectRequested("AA:BB")
+            state.onV2DiscoveryReady(3, 2047)
+            controller.onV2LiveStartRequested()
+            if (!lateAck) controller.onV2LiveStarted()
+            controller.onPause()
+            if (lateAck) controller.onV2LiveStarted()
+            assertEquals(1, ble.previewStopCalls)
+            assertEquals(0, ble.disconnectCalls)
+            assertEquals(V2PreviewStage.STOPPING, state.uiState.v2PreviewStage)
+            controller.onResume()
+            assertEquals(1, ble.previewStopCalls) // Foreground return never starts a new stream.
+        }
     }
 
     @Test
@@ -859,6 +883,9 @@ private fun sensorBlock(
 
 private class FakeBleSessionController : BleSessionController {
     var previewConnectCalls = 0
+    var previewStopCalls = 0
+    override fun startV2Live(streamMask: Long): Boolean = true
+    override fun stopV2Live(): Boolean { previewStopCalls++; return true }
     var startScanningCalls = 0
     var stopScanningCalls = 0
     var disconnectCalls = 0
