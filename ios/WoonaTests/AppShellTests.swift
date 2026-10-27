@@ -600,6 +600,32 @@ final class AppShellTests: XCTestCase {
         XCTAssertFalse(value.confirmsCurrentServerCopy)
     }
 
+    func testV2PreviewUsesExistingChartControlsAndRetainsRawIntegerTimesAcrossUpdatesAndNavigation() throws {
+        let model = AppViewModel(store: nil, uiTesting: true)
+        let base: UInt64 = 9_007_199_254_741_000
+        model.installSyntheticV2ChartFixtureForTesting(timestampBaseUs: base)
+        XCTAssertEqual(model.chartSensors.map { $0.type }, Array(2...8))
+        XCTAssertEqual(model.chart.latestPointMillis, (base + 200_000_000) / 1000)
+        XCTAssertLessThanOrEqual(model.chart.points.count, 1200)
+        model.selectSensorType(3); model.selectChannel(2); model.selectChartWindow(.sixtySeconds)
+        model.panChartLeft(); model.zoomChartIn()
+        XCTAssertFalse(model.chart.isFollowingLive)
+        XCTAssertTrue(model.chart.canPanRight); XCTAssertTrue(model.chart.canZoomOut)
+        let end = model.chart.viewportEndMillis
+        model.selectedTab = .settings; model.selectedTab = .session
+        model.showingSessionCharts = true
+        model.installV2PreviewSnapshotForTesting(model.v2Preview.snapshot)
+        XCTAssertEqual(model.selectedSensorType, 3); XCTAssertEqual(model.selectedChannel, 2)
+        XCTAssertEqual(model.chart.windowPreset, .sixtySeconds); XCTAssertEqual(model.chart.viewportEndMillis, end)
+        XCTAssertFalse(model.chart.isFollowingLive); XCTAssertTrue(model.chart.canZoomOut)
+        model.selectSensorType(8)
+        XCTAssertEqual(model.selectedChannel, 1)
+        XCTAssertFalse(model.chart.points.isEmpty)
+        model.jumpToLive(); model.resetChartY()
+        XCTAssertTrue(model.chart.isFollowingLive); XCTAssertFalse(model.chart.canZoomOut)
+        XCTAssertFalse(model.canOpenSessionExport, "Preview controls never offer a false recording export")
+    }
+
     func testInitialTabIsOverview() {
         let viewModel = AppViewModel()
 

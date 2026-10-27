@@ -11,6 +11,37 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
     }
 
+    func testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls() {
+        app.terminate(); app.launchArguments += ["--ui-testing-v2-charts"]; app.launch()
+        XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
+        app.buttons["tab.session"].tap()
+        XCTAssertTrue(app.staticTexts["v2.stage"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Start session"].exists)
+        attachScreen("V2-Session-EnglishLight")
+        app.segmentedControls["session.section"].buttons["Charts"].tap()
+        let sensor = app.segmentedControls["chart.sensor"]
+        XCTAssertTrue(sensor.waitForExistence(timeout: 5))
+        for title in ["AXL", "GIR", "MIC", "AMB", "PZ", "T1", "T2"] { XCTAssertTrue(sensor.buttons[title].exists) }
+        sensor.buttons["GIR"].tap()
+        app.segmentedControls["chart.channel"].buttons["Channel 2"].tap()
+        app.segmentedControls["chart.window"].buttons["60s"].tap()
+        XCTAssertTrue(app.buttons["chart.panLeft"].isEnabled); app.buttons["chart.panLeft"].tap()
+        app.buttons["chart.zoomIn"].tap()
+        XCTAssertTrue(app.buttons["chart.panRight"].isEnabled); XCTAssertTrue(app.buttons["chart.zoomOut"].isEnabled)
+        app.buttons["chart.fullscreen.open"].tap()
+        let fullscreen = app.otherElements["chart.fullscreen"]
+        XCTAssertTrue(app.buttons["chart.fullscreen.close"].waitForExistence(timeout: 5))
+        XCTAssertTrue(fullscreen.segmentedControls["chart.sensor"].buttons["GIR"].isSelected)
+        XCTAssertTrue(fullscreen.segmentedControls["chart.channel"].buttons["Channel 2"].isSelected)
+        XCTAssertTrue(fullscreen.segmentedControls["chart.window"].buttons["60s"].isSelected)
+        app.buttons["chart.fullscreen.close"].tap()
+        attachScreen("V2-Charts-EnglishLight")
+        sensor.buttons["T2"].tap()
+        XCTAssertTrue(app.segmentedControls["chart.channel"].buttons["Channel 1"].isSelected)
+        XCTAssertFalse(app.segmentedControls["chart.channel"].buttons["Channel 2"].exists)
+        XCTAssertFalse(app.navigationBars.buttons["Export"].isEnabled)
+    }
+
     func testV2PickerIsExplicitAndReturnsToRecordAfterClosingWithoutConnecting() {
         app.buttons["tab.session"].tap()
         app.buttons["devices.newConnection"].tap()

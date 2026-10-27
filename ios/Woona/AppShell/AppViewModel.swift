@@ -326,6 +326,7 @@ final class AppViewModel: ObservableObject {
                 if recovered > 0 { appendDiagnostic("Recovered \(recovered) interrupted upload states; local files and confirmed progress are preserved") }
             } catch { errorMessage = "Unable to recover interrupted upload queue: \(error.localizedDescription)" }
         }
+        v2Preview.didUpdate = { [weak self] value in self?.applyV2PreviewSnapshot(value) }
         reloadProfiles(selecting: defaults.string(forKey: "selectedDogID").flatMap(UUID.init(uuidString:)))
         if uiTesting, let profile = dogProfiles.first(where: { $0.numberOrName == "UI Dog 1" }) { selectDogProfile(profile) }
         if store == nil { errorMessage = "Unable to open local Woona database" }
@@ -727,6 +728,7 @@ final class AppViewModel: ObservableObject {
         guard canOpenBLEPicker else { return }
         isV2PreviewActive = true
         isCaptureReady = false
+        clearChartHistory()
         v2Preview.prepare()
         let intent = UUID(); previewConnectIntent = intent
         let generation = v2Preview.generation
@@ -744,6 +746,7 @@ final class AppViewModel: ObservableObject {
         previewConnectIntent = nil
         v2Preview.disconnected()
         isV2PreviewActive = false
+        clearChartHistory(); selectedSensorType = 2; selectedChannel = 1
         bleConnectionPurpose = .record
         bleSessionManager.disconnect()
     }
@@ -960,6 +963,30 @@ final class AppViewModel: ObservableObject {
     }
 
 #if DEBUG
+    func installSyntheticV2ChartFixtureForTesting(timestampBaseUs: UInt64 = 12_000_000) {
+        var value = V2PreviewSnapshot()
+        value.stage = .running; value.selectedMask = 127; value.decodedBlocks = 100
+        for streamID in 1...7 {
+            let count = streamID <= 2 ? 3 : 1
+            value.streams.append(V2Stream(id: streamID, format: streamID == 5 ? 2 : 1, channels: count, nativeRateHz: 1000))
+            for channel in 0..<count {
+                var points: [V2PreviewPoint] = []
+                for index in 0...2000 {
+                    let timestamp = timestampBaseUs + UInt64(index) * 100_000
+                    points.append(V2PreviewPoint(time: Double(index) / 10, value: Double((index + channel * 10) % 200), breakBefore: index == 1000, timestampUs: timestamp))
+                }
+                value.channels.append(V2PreviewChannel(streamID: streamID, channel: channel, points: points))
+            }
+        }
+        installV2PreviewSnapshotForTesting(value)
+    }
+
+    func installV2PreviewSnapshotForTesting(_ snapshot: V2PreviewSnapshot) {
+        if !isV2PreviewActive { clearChartHistory() }
+        isV2PreviewActive = true
+        v2Preview.installSnapshotForTesting(snapshot)
+    }
+
     func applyPacketUpdateForTesting(_ update: PacketProcessingUpdate) {
         applyPacketUpdate(update)
     }
@@ -988,6 +1015,41 @@ final class AppViewModel: ObservableObject {
         await packetProcessor.currentPacketFile()
     }
 #endif
+
+    var chartSensors: [(type: Int, title: String)] {
+        guard isV2PreviewActive else { return [(1, "T"), (2, "AXL"), (3, "GIR"), (4, "MIC")] }
+        let labels = [1: "AXL", 2: "GIR", 3: "MIC", 4: "AMB", 5: "PZ", 6: "T1", 7: "T2"]
+        var choices: [(type: Int, title: String)] = []
+        for stream in v2Preview.snapshot.streams {
+            if let label = labels[stream.id] { choices.append((stream.id + 1, label)) }
+        }
+        return choices.sorted { $0.type < $1.type }
+    }
+
+    private func applyV2PreviewSnapshot(_ snapshot: V2PreviewSnapshot) {
+        guard isV2PreviewActive else { return }
+        // Replace this bounded preview snapshot; never append it to Legacy
+        // history or persist V2 bytes as a recording. Reuse the same viewport,
+        // sensor/channel selection, pan, zoom, follow and fullscreen controls.
+        var history: [ChartStreamKey: [ChartPoint]] = [:]
+        for channel in snapshot.channels {
+            history[ChartStreamKey(sensorType: channel.streamID + 1, channel: channel.channel + 1)] = channel.points.map { point in
+                ChartPoint(timeMillis: point.timestampUs / 1000, value: Float(point.value), startsNewSegment: point.breakBefore)
+            }
+        }
+        chartHistory = history
+        sessionStartMillis = history.values.compactMap { $0.first?.timeMillis }.min()
+        latestChartTimeMillis = history.values.compactMap { $0.last?.timeMillis }.max()
+        if !snapshot.streams.isEmpty, !snapshot.streams.contains(where: { $0.id + 1 == selectedSensorType }) {
+            selectedSensorType = snapshot.streams.map { $0.id + 1 }.min() ?? 2
+            selectedChannel = 1; chartVerticalCenterOverride = nil
+        }
+        if let stream = snapshot.streams.first(where: { $0.id + 1 == selectedSensorType }), selectedChannel > stream.channels {
+            selectedChannel = 1
+        }
+        trimChartHistory()
+        rebuildChartState()
+    }
 
     func selectSensorType(_ sensorType: Int) {
         selectedSensorType = sensorType

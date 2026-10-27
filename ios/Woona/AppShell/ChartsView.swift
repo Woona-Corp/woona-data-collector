@@ -9,9 +9,6 @@ struct ChartsView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 10) {
-                if appState.isV2PreviewActive {
-                    ScrollView { V2PreviewView(controller: appState.v2Preview, showCharts: true) }
-                } else {
                 if let error = appState.errorMessage {
                     Text(error).foregroundStyle(.red).textSelection(.enabled)
                 }
@@ -20,7 +17,6 @@ struct ChartsView: View {
                 ChartControls()
                 DeviceChartView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
             }
             .padding(12)
             .background(Color.woonaBackground)
@@ -46,10 +42,8 @@ struct ChartsView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if !appState.isV2PreviewActive {
                     Button(appState.selectedLanguage == .russian ? "Полный экран" : "Fullscreen") { isFullscreen = true }
                         .accessibilityIdentifier("chart.fullscreen.open")
-                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(appState.text(.export)) {
@@ -78,12 +72,18 @@ private struct ChartStatusLine: View {
     @EnvironmentObject private var appState: AppViewModel
 
     var body: some View {
-        Text("\(appState.text(.status)): \(appState.statusText) | \(appState.text(.packets)) \(appState.packetsReceived) | \(appState.text(.lost)) \(appState.packetsLost) | \(appState.text(.rejected)) \(appState.packetsRejected)")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity)
-            .lineLimit(2)
-            .multilineTextAlignment(.center)
+        Group {
+            if appState.isV2PreviewActive {
+                let value = appState.v2Preview.snapshot
+                let russian = appState.selectedLanguage == .russian
+                Text("V2 · " + v2PreviewStageText(value.stage, russian: russian) +
+                     (russian ? " · блоков \(value.decodedBlocks), разрывов \(value.wireGaps), отклонено \(value.rejectedFrames), не показано \(value.skippedUIBlocks). T1/T2: raw." : " · blocks \(value.decodedBlocks), gaps \(value.wireGaps), rejected \(value.rejectedFrames), UI-skipped \(value.skippedUIBlocks). T1/T2: raw."))
+            } else {
+                Text("\(appState.text(.status)): \(appState.statusText) | \(appState.text(.packets)) \(appState.packetsReceived) | \(appState.text(.lost)) \(appState.packetsLost) | \(appState.text(.rejected)) \(appState.packetsRejected)")
+            }
+        }
+        .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
+        .lineLimit(3).multilineTextAlignment(.center)
     }
 }
 
@@ -96,12 +96,11 @@ private struct SensorSelector: View {
                 get: { appState.selectedSensorType },
                 set: { appState.selectSensorType($0) }
             )) {
-                Text("T").tag(1)
-                Text("AXL").tag(2)
-                Text("GIR").tag(3)
-                Text("MIC").tag(4)
+                ForEach(appState.chartSensors, id: \.type) { sensor in
+                    Text(sensor.title).tag(sensor.type)
+                }
             }
-            .pickerStyle(.segmented)
+            .pickerStyle(.segmented).accessibilityIdentifier("chart.sensor")
 
             Picker(appState.text(.channel), selection: Binding(
                 get: { appState.selectedChannel },
@@ -111,7 +110,7 @@ private struct SensorSelector: View {
                     Text("\(appState.text(.channel)) \(channel)").tag(channel)
                 }
             }
-            .pickerStyle(.segmented)
+            .pickerStyle(.segmented).accessibilityIdentifier("chart.channel")
         }
     }
 
@@ -133,42 +132,42 @@ private struct ChartControls: View {
                     Text(preset.rawValue).tag(preset)
                 }
             }
-            .pickerStyle(.segmented)
+            .pickerStyle(.segmented).accessibilityIdentifier("chart.window")
 
             HStack(spacing: 8) {
                 Toggle(appState.text(.follow), isOn: Binding(
                     get: { appState.chart.isFollowingLive },
                     set: { appState.setFollowLive($0) }
                 ))
-                .toggleStyle(.button)
+                .toggleStyle(.button).accessibilityIdentifier("chart.follow")
 
                 Button {
                     appState.panChartLeft()
                 } label: {
                     Image(systemName: "chevron.left")
                 }
-                .disabled(!appState.chart.canPanLeft)
+                .disabled(!appState.chart.canPanLeft).accessibilityIdentifier("chart.panLeft")
 
                 Button {
                     appState.panChartRight()
                 } label: {
                     Image(systemName: "chevron.right")
                 }
-                .disabled(!appState.chart.canPanRight)
+                .disabled(!appState.chart.canPanRight).accessibilityIdentifier("chart.panRight")
 
                 Button {
                     appState.zoomChartOut()
                 } label: {
                     Image(systemName: "minus.magnifyingglass")
                 }
-                .disabled(!appState.chart.canZoomOut)
+                .disabled(!appState.chart.canZoomOut).accessibilityIdentifier("chart.zoomOut")
 
                 Button {
                     appState.zoomChartIn()
                 } label: {
                     Image(systemName: "plus.magnifyingglass")
                 }
-                .disabled(!appState.chart.canZoomIn)
+                .disabled(!appState.chart.canZoomIn).accessibilityIdentifier("chart.zoomIn")
 
                 Button(appState.text(.yReset)) {
                     appState.resetChartY()

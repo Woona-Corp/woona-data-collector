@@ -5,6 +5,10 @@ struct V2PreviewPoint: Sendable {
     let time: Double
     let value: Double
     var breakBefore: Bool
+    let timestampUs: UInt64
+    init(time: Double, value: Double, breakBefore: Bool, timestampUs: UInt64) {
+        self.time = time; self.value = value; self.breakBefore = breakBefore; self.timestampUs = timestampUs
+    }
 }
 
 struct V2PreviewChannel: Identifiable, Sendable {
@@ -51,6 +55,7 @@ final class V2PreviewWorker: @unchecked Sendable {
     private var connected = false
     private var originUs: UInt64?
     private var mostRecentlyWrittenRequestID: UInt32 = 0
+    private var lastPlottedEndUs: [Int: UInt64] = [:]
     private struct PendingBlock { let block: V2LiveData; let descriptor: V2Stream; let gap: Bool }
     private var blocks: [PendingBlock] = []
     private var channels: [String: V2PreviewChannel] = [:]
@@ -66,7 +71,7 @@ final class V2PreviewWorker: @unchecked Sendable {
             cancelTimers()
             self.generation = generation; snapshot = V2PreviewSnapshot(); snapshot.stage = .connecting
             decoder = WoonaV2StreamDecoder(); discovery = WoonaV2Discovery(); live = nil
-            blocks = []; channels = [:]; pendingBreaks = []; originUs = nil
+            blocks = []; channels = [:]; pendingBreaks = []; originUs = nil; lastPlottedEndUs = [:]
             connected = true; foreground = true; mostRecentlyWrittenRequestID = 0
             publish()
         }
@@ -113,7 +118,7 @@ final class V2PreviewWorker: @unchecked Sendable {
             guard connected, foreground, [.ready, .stopped].contains(snapshot.stage), let live else { return }
             do {
                 let event = try live.start(streamMask: snapshot.selectedMask)
-                blocks = []; channels = [:]; pendingBreaks = []; originUs = nil
+                blocks = []; channels = [:]; pendingBreaks = []; originUs = nil; lastPlottedEndUs = [:]
                 snapshot.channels = []; snapshot.decodedBlocks = 0; snapshot.wireGaps = 0; snapshot.skippedUIBlocks = 0
                 snapshot.stage = .starting; snapshot.reason = nil; handle(event); publish()
             } catch { fail(error.localizedDescription); publish() }
@@ -286,13 +291,12 @@ final class V2PreviewWorker: @unchecked Sendable {
         let block = pending.block; let descriptor = pending.descriptor
         guard (1...7).contains(block.streamID), block.rateHz > 0 else { snapshot.skippedUIBlocks += 1; return }
         if originUs == nil { originUs = block.timestampUs }
-        guard let originUs, block.timestampUs >= originUs else {
-            snapshot.skippedUIBlocks += 1; pendingBreaks.insert(block.streamID); return
-        }
-        let seconds = Double(block.timestampUs - originUs) / 1_000_000
-        if let last = channels["\(block.streamID)-0"]?.points.last, seconds <= last.time {
-            // Keep protocol acceptance separate from chart continuity. Do not
-            // rewrite a backwards/overlapping source clock to fit the x-axis.
+        guard let originUs else { return }
+        let finalOffset = UInt64(block.count - 1) * 1_000_000 / UInt64(block.rateHz)
+        let (finalTimestamp, overflow) = block.timestampUs.addingReportingOverflow(finalOffset)
+        if overflow || lastPlottedEndUs[block.streamID].map({ block.timestampUs <= $0 }) == true {
+            // Keep protocol acceptance separate from chart continuity; never
+            // rewrite a backwards source clock to make a continuous curve.
             snapshot.skippedUIBlocks += 1; pendingBreaks.insert(block.streamID); return
         }
         let bytes = [UInt8](block.samples)
@@ -304,13 +308,14 @@ final class V2PreviewWorker: @unchecked Sendable {
                 let offset = (index * descriptor.channels + channel) * 2
                 let raw = UInt16(bytes[offset]) | UInt16(bytes[offset + 1]) << 8
                 let value = descriptor.format == 1 ? Double(Int16(bitPattern: raw)) : Double(raw)
-                let time = seconds + Double(index) / Double(block.rateHz)
-                let regression = series.points.last.map { time <= $0.time } ?? false
-                series.points.append(V2PreviewPoint(time: time, value: value, breakBefore: (index == 0 && breakBefore) || regression))
+                let timestamp = block.timestampUs + UInt64(index) * 1_000_000 / UInt64(block.rateHz)
+                let time = timestamp >= originUs ? Double(timestamp - originUs) / 1_000_000 : -Double(originUs - timestamp) / 1_000_000
+                series.points.append(V2PreviewPoint(time: time, value: value, breakBefore: index == 0 && breakBefore, timestampUs: timestamp))
             }
             if series.points.count > 6000 { series.points = Self.coarsen(series.points) }
             channels[key] = series
         }
+        lastPlottedEndUs[block.streamID] = finalTimestamp
     }
 
     // Preserve endpoints. When a skipped interval contains a segment boundary,
@@ -335,9 +340,11 @@ final class V2PreviewController: ObservableObject {
     @Published private(set) var snapshot = V2PreviewSnapshot()
     private(set) var generation = UUID()
     var send: ((Data, @escaping @Sendable (Result<Void, Error>) -> Void) -> Void)?
+    var didUpdate: ((V2PreviewSnapshot) -> Void)?
     private(set) lazy var worker = V2PreviewWorker(update: { [weak self] generation, value in
         guard let self, self.generation == generation else { return }
         self.snapshot = value
+        self.didUpdate?(value)
     }, write: { [weak self] generation, wire, completion in
         guard let self, self.generation == generation, let send = self.send else {
             completion(.failure(BleControlWriteError.disconnected)); return
@@ -351,4 +358,7 @@ final class V2PreviewController: ObservableObject {
     func stop() { worker.stop() }
     func setForeground(_ value: Bool) { worker.setForeground(value) }
     func disconnected(reason: String? = nil) { worker.disconnected(reason: reason) }
+#if DEBUG
+    func installSnapshotForTesting(_ value: V2PreviewSnapshot) { snapshot = value; didUpdate?(value) }
+#endif
 }

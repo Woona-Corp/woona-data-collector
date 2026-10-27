@@ -58,6 +58,7 @@ struct WoonaApp: App {
             }
             let model = AppViewModel(store: store, uiTesting: true)
             if let historyFixtureError { model.errorMessage = historyFixtureError }
+            if ProcessInfo.processInfo.arguments.contains("--ui-testing-v2-charts") { model.installSyntheticV2ChartFixtureForTesting() }
             if ProcessInfo.processInfo.arguments.contains("--ui-language=ru") { model.selectedLanguage = .russian }
             if ProcessInfo.processInfo.arguments.contains("--ui-theme=dark") { model.selectedThemeMode = .dark }
             _appState = StateObject(wrappedValue: model)
