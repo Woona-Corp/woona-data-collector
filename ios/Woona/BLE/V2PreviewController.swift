@@ -219,7 +219,7 @@ final class V2PreviewWorker: @unchecked Sendable {
                     // This command has not reached CoreBluetooth yet. Cancel it
                     // before writing; reset retains monotonically allocated IDs.
                     self.live?.reset(); self.cancelResponseTimer(); self.snapshot.stage = .stopped
-                    self.snapshot.reason = "Preview start was cancelled before transmission because the app left the self.foreground."
+                    self.snapshot.reason = "Preview start was cancelled before transmission because the app left the foreground."
                     self.publish(); return false
                 }
                 self.mostRecentlyWrittenRequestID = requestID
