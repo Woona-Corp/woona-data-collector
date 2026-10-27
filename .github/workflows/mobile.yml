@@ -12,6 +12,10 @@ on:
         type: choice
         options: [all, android, ios, server]
         default: all
+      ios_test_filter:
+        description: Optional XCTest target/class/method for a focused diagnostic run
+        type: string
+        default: ''
       android_instrumentation:
         description: Run Android SQLite, Compose and fake-BLE instrumentation tests
         type: boolean
@@ -116,9 +120,11 @@ jobs:
           WOONA_TEST_ZIP64_LARGE: '1'
         run: python3 ios/tools/test_complete_archive.py
       - name: Test iOS on simulator
+        timeout-minutes: 30
         if: ${{ !cancelled() }}
         env:
           WOONA_SANITIZER: ${{ inputs.sanitizer || 'none' }}
+          WOONA_IOS_TEST_FILTER: ${{ inputs.ios_test_filter }}
         run: |
           simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for devices in json.load(sys.stdin)["devices"].values() for d in devices if d["name"].startswith("iPhone")))')"
           sanitizer_args=()
@@ -128,7 +134,12 @@ jobs:
             thread) sanitizer_args=(-enableThreadSanitizer YES -enableAddressSanitizer NO -only-testing:WoonaTests -parallel-testing-enabled NO) ;;
             *) echo 'Unsupported sanitizer mode' >&2; exit 2 ;;
           esac
-          xcodebuild "${sanitizer_args[@]}" -project ios/Woona.xcodeproj -scheme Woona -derivedDataPath "$RUNNER_TEMP/WoonaDerived" -resultBundlePath "$RUNNER_TEMP/WoonaTests.xcresult" -destination "platform=iOS Simulator,id=$simulator_id" CODE_SIGNING_ALLOWED=NO test || {
+          filter_args=()
+          if [[ -n "$WOONA_IOS_TEST_FILTER" ]]; then
+            [[ "$WOONA_IOS_TEST_FILTER" =~ ^WoonaTests(/[A-Za-z0-9_]+){0,2}$ ]] || { echo 'Invalid XCTest filter'; exit 2; }
+            filter_args=(-only-testing:"$WOONA_IOS_TEST_FILTER" -parallel-testing-enabled NO)
+          fi
+          xcodebuild "${sanitizer_args[@]}" "${filter_args[@]}" -project ios/Woona.xcodeproj -scheme Woona -derivedDataPath "$RUNNER_TEMP/WoonaDerived" -resultBundlePath "$RUNNER_TEMP/WoonaTests.xcresult" -destination "platform=iOS Simulator,id=$simulator_id" CODE_SIGNING_ALLOWED=NO test || {
             xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/WoonaTests.xcresult" --compact
             exit 1
           }
@@ -139,7 +150,7 @@ jobs:
             xcrun xcresulttool export attachments --path "$RUNNER_TEMP/WoonaTests.xcresult" --output-path "$RUNNER_TEMP/WoonaTestAttachments"
           fi
       - name: Verify session export attachments
-        if: ${{ success() && (inputs.sanitizer == '' || inputs.sanitizer == 'none') }}
+        if: ${{ success() && inputs.ios_test_filter == '' && (inputs.sanitizer == '' || inputs.sanitizer == 'none') }}
         run: python3 ios/tools/check-recording-export.py "$RUNNER_TEMP/WoonaTestAttachments"
       - uses: actions/upload-artifact@v7
         if: always()

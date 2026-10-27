@@ -183,9 +183,13 @@ final class WoonaDataTests: XCTestCase {
             var puts = 0
             var reject = true
             NetworkFaultProtocol.handler = { request in
-                XCTAssertEqual(request.value(forHTTPHeaderField: "X-Woona-Account"), "scope-a")
-                if request.url!.path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                if request.url!.path == "/v1/deletions" {
+                    // Maintenance is global; the selected workspace is unassigned.
+                    XCTAssertNil(request.value(forHTTPHeaderField: "X-Woona-Account"))
+                    return .init(body: Data(#"{"entities":[]}"#.utf8))
+                }
                 if request.httpMethod == "PUT" {
+                    XCTAssertEqual(request.value(forHTTPHeaderField: "X-Woona-Account"), "scope-a")
                     puts += 1
                     XCTAssertTrue(request.url!.path.hasSuffix(profile.profileVersionID.uuidString))
                     if reject { return .init(status: 409, body: Data(#"{"detail":{"code":"animal_id_already_exists","message":"Synthetic identity conflict"}}"#.utf8)) }
@@ -194,7 +198,7 @@ final class WoonaDataTests: XCTestCase {
                 throw URLError(.badServerResponse)
             }
             let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { account in
-                XCTAssertEqual(account, "scope-a")
+                XCTAssertTrue(account == nil || account == "scope-a") // Global check or profile-origin upload.
                 let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [NetworkFaultProtocol.self]
                 return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
             })
