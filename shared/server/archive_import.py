@@ -255,6 +255,10 @@ def apply_plan(engine, storage_root: Path, plan):
         state = preflight(connection, plan)
         if state['state'] == 'already_imported':
             return state
+        if plan.get('sourceKind') == 'native_directory':
+            required = sum(item['sizeBytes'] for item in plan['artifacts']) + 2 * 1024**3
+            if shutil.disk_usage(storage_root).free < required:
+                raise OSError('Insufficient space for independent canonical copies; original export preserved')
         nullable = connection.execute(text("SELECT is_nullable FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='recording_sync' AND column_name='calibration_offset_ns'")).scalar_one()
         if nullable != 'YES':
             raise ValueError('Migration 0008 is required; unknown calibration cannot become a false zero')
@@ -325,14 +329,19 @@ def apply_plan(engine, storage_root: Path, plan):
                 if destination.stat().st_size != artifact['sizeBytes'] or file_hash(destination) != artifact['sha256']:
                     raise ValueError('Canonical destination already exists with different bytes')
             else:
-                # A hardlink keeps verified bytes and originals intact without a second GB copy.
-                try:
-                    os.link(artifact['stagedPath'], destination)
-                except OSError as error:
-                    if error.errno != errno.EXDEV:
-                        raise
+                # Original loose exports can be edited later. Canonical files
+                # must own their bytes instead of sharing that mutable inode.
+                copy_required = plan.get('sourceKind') == 'native_directory'
+                if not copy_required:
+                    try:
+                        os.link(artifact['stagedPath'], destination)
+                    except OSError as error:
+                        if error.errno != errno.EXDEV:
+                            raise
+                        copy_required = True
+                if copy_required:
                     partial = destination.with_suffix(destination.suffix + '.import-part')
-                    with Path(artifact['stagedPath']).open('rb') as source, partial.open('wb') as output:
+                    with Path(artifact['stagedPath']).open('rb') as source, partial.open('xb') as output:
                         shutil.copyfileobj(source, output, 4 * 1024 * 1024)
                         output.flush()
                         os.fsync(output.fileno())
@@ -340,6 +349,7 @@ def apply_plan(engine, storage_root: Path, plan):
                         raise ValueError('Canonical copy failed integrity verification; sources preserved')
                     # Do not replace an externally-created immutable target.
                     os.link(partial, destination)
+                    partial.unlink()
             directory_fd = os.open(destination.parent, os.O_RDONLY)
             try:os.fsync(directory_fd)
             finally:os.close(directory_fd)

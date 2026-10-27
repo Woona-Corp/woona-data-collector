@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 import uuid
 import zipfile
 
@@ -145,6 +146,15 @@ class DirectoryImportApiTest(unittest.TestCase):
         self.assertEqual(alignment['archive_import']['source_kind'], 'native_directory')
         self.assertEqual(alignment['archive_import']['identity_review'], self.review)
         self.assertIsNone(alignment['archive_import']['archive_sha256'])
+        with engine.connect() as c:
+            artifact = c.execute(text("SELECT server_relative_path,sha256 FROM artifacts WHERE recording_id=:id AND artifact_type='packet'"),
+                {'id': uuid.UUID(plan['recordingId'])}).mappings().one()
+        packet = self.source / 'packets.bin'
+        packet.write_bytes(b'x' * packet.stat().st_size)
+        canonical = STORAGE_ROOT / artifact['server_relative_path']
+        self.assertEqual(hashlib.sha256(canonical.read_bytes()).hexdigest(), artifact['sha256'])
+        self.assertNotEqual(packet.stat().st_ino, canonical.stat().st_ino)
+        self.assertFalse(canonical.with_suffix(canonical.suffix + '.import-part').exists())
 
     def test_unreviewed_merge_and_wrong_external_identity_are_rejected(self):
         from server.app import engine
@@ -157,3 +167,15 @@ class DirectoryImportApiTest(unittest.TestCase):
             plan['manifest']['profile']['questionnaire']['animalId'] = 'different-identity'
             with self.assertRaisesRegex(ValueError, 'existing canonical external'):
                 preflight(c, plan)
+
+    def test_insufficient_copy_space_does_not_publish_or_remove_originals(self):
+        from server.app import engine, STORAGE_ROOT
+        plan = inspect_directory(self.source, self.review)
+        usage = type('Disk', (), {'free': 1})()
+        with patch('server.archive_import.shutil.disk_usage', return_value=usage):
+            with self.assertRaisesRegex(OSError, 'independent canonical copies'):
+                apply_plan(engine, STORAGE_ROOT, plan)
+        with engine.connect() as c:
+            self.assertEqual(c.execute(text('SELECT count(*) FROM recordings WHERE id=:id'),
+                {'id': uuid.UUID(plan['recordingId'])}).scalar_one(), 0)
+        verify_directory_plan(plan)
