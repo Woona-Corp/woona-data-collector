@@ -90,7 +90,25 @@ final class V2PreviewTests: XCTestCase {
         worker.disconnected()
     }
 
-    func testBoundedChartAndQueueTrackDecodedVersusUIOmissionsAndRetainNavigationState() async throws {
+    func testQueuedStartIsCancelledBeforeTransmissionWhenTheAppLeavesForeground() async throws {
+        let writes = PreviewWrites(); var snapshot = V2PreviewSnapshot()
+        let worker = V2PreviewWorker(update: { _, value in snapshot = value }, write: { _, wire, completion in writes.frames.append(wire); completion(.success(())) })
+        try await discover(worker, writes: writes); try await wait { snapshot.stage == .ready }
+        // No MainActor yield occurs between these actions: the START transmission
+        // is still queued when the protocol worker receives the lifecycle change.
+        worker.start(); worker.setForeground(false)
+        try await wait { snapshot.stage == .stopped }
+        XCTAssertEqual(writes.count, 3, "An unsent START must not run after cancellation")
+        XCTAssertNotNil(snapshot.reason)
+        worker.setForeground(true); worker.start(); try await wait { writes.count == 4 }
+        let decoder = WoonaV2StreamDecoder()
+        let nextStart = try XCTUnwrap(decoder.append(writes.frames[3]).first)
+        XCTAssertEqual(nextStart.type, WoonaV2Codec.startSession)
+        XCTAssertEqual(nextStart.requestID, 5, "Cancelled command IDs are never reused on the same connection")
+        worker.disconnected()
+    }
+
+    func testBoundedChartAndQueueTrackDecodedVersusUIOmissionsWithoutRewritingClocks() async throws {
         let writes = PreviewWrites(); var snapshot = V2PreviewSnapshot()
         let worker = V2PreviewWorker(update: { _, value in snapshot = value }, write: { _, wire, completion in writes.frames.append(wire); completion(.success(())) })
         try await discover(worker, writes: writes); try await wait { snapshot.stage == .ready }

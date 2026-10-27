@@ -203,6 +203,19 @@ final class V2PreviewWorker: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + 8, execute: writeDeadline)
         Task { @MainActor [weak self] in
             guard let self else { return }
+            let maySend = queue.sync { [self] in
+                guard connected, generation == identity, timerToken == writeToken,
+                      requestID == (discoveryCommand ? discovery.pendingRequestID : live?.pendingRequestID ?? 0) else { return false }
+                if !foreground, !discoveryCommand, live?.phase == .waitStart {
+                    // This command has not reached CoreBluetooth yet. Cancel it
+                    // before writing; reset retains monotonically allocated IDs.
+                    live?.reset(); cancelResponseTimer(); snapshot.stage = .stopped
+                    snapshot.reason = "Preview start was cancelled before transmission because the app left the foreground."
+                    publish(); return false
+                }
+                return true
+            }
+            guard maySend else { return }
             write(identity, wire) { [weak self] result in
                 guard let self else { return }
                 queue.async { [self] in
