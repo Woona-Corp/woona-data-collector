@@ -1,6 +1,8 @@
 """Stable machine actions and safe explanations for API failures."""
 
 ERRORS = {
+    'storage_space_low': ('The server has insufficient free storage to accept this chunk safely. Keep the original files and retry after server space is freed; the acknowledged offset has not advanced.', 'retry_after_storage_available'),
+    'storage_full': ('The server ran out of storage while writing this chunk. Preserve local originals and resume from the acknowledged offset after storage is available.', 'retry_after_storage_available'),
     'missing_bearer_token': ('The server token is missing. Enter the device token in server settings; local data is unchanged.', 'update_server_token'),
     'invalid_bearer_token': ('The server token is invalid or revoked. Check the server address and replace the token in settings.', 'update_server_token'),
     'invalid_account_identifier': ('The account identifier must contain 1–64 Latin letters, digits, dots, underscores or hyphens.', 'review_account'),

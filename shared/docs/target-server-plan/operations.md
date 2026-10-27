@@ -23,8 +23,19 @@ curl http://127.0.0.1:8080/health/ready
 5. Публиковать API только через HTTPS reverse proxy/VPN; не публиковать
    PostgreSQL и storage.
 6. Ограничить права service account каталогом storage и БД Woona.
-7. Настроить мониторинг `/health/live`, `/health/ready`, 5xx, свободного места
-   и PostgreSQL backup.
+7. Настроить мониторинг `/health/live`, `/health/ready`, 5xx и свободного места.
+
+Production overlays устанавливают `WOONA_ENVIRONMENT=production`: API не
+запустится с пустым/example token или если в БД остаётся активное устройство с
+известным локальным example token. Обычный `compose.yaml` сохраняет локальный
+development режим. Для другого способа deployment production режим необходимо
+задать явно. Проверка не меняет и не отзывает существующие credentials.
+
+Startup создаёт bootstrap device только при отсутствии его UUID. Он не заменяет
+уже provisioned token/label и не отменяет revoke. Менять или отзывать token
+нужно явно через `python -m server.device_admin provision <uuid> <label>` /
+`revoke <uuid>`; `provision` читает token скрытым вводом. Одного изменения env
+для rotation существующего устройства недостаточно.
 
 Token отзывается заполнением `client_devices.revoked_at`. После revoke все
 доменные endpoints возвращают 401.
@@ -75,7 +86,15 @@ Timer/service templates удалены из текущей конфигурац�
 - `/health/ready = 200` — доступны БД и запись/чтение storage.
 - `database_unavailable` — проверять PostgreSQL health/DNS/password/pool.
 - `storage_unavailable` — проверять mount, права, inode и свободное место.
-- `/v1/integrity` с device token — проверяет доступные файлы, размер и SHA.
+- `/v1/integrity` с device token проверяет доступные файлы, размер и SHA только
+  выбранного `X-Woona-Account`; без него проверяются непривязанные записи.
+  `checkedScope` явно сообщает область, `checkedArtifacts`, `hashedArtifacts`
+  и `hashedBytes` — объём проверки. `ok` не означает проверку всех аккаунтов.
+- `storage_space_low` / `storage_full` (507) — upload offset не подтверждается
+  вперёд. Сохранить исходники, проверить место и после `Retry-After` повторить
+  HEAD перед продолжением. По умолчанию сервер оставляет 256 MiB свободного
+  места сверх текущего chunk (`WOONA_UPLOAD_FREE_SPACE_RESERVE_BYTES`);
+  это проверка доступного места, не quota и не автоматическое удаление `.part`.
 - `offset_mismatch` — клиент должен повторить HEAD и продолжить с серверного
   offset, а не начинать новый файл.
 - `artifact_hash_mismatch` — локальный файл или manifest изменился; повторная

@@ -23,6 +23,8 @@ services:
       WOONA_DEVICE_ID: ${WOONA_DEVICE_ID:-00000000-0000-0000-0000-000000000001}
       WOONA_DEVICE_LABEL: ${WOONA_DEVICE_LABEL:-Local device}
       WOONA_DEBUG_TOKEN: ${WOONA_DEBUG_TOKEN:-change-me-local-token}
+      WOONA_ENVIRONMENT: ${WOONA_ENVIRONMENT:-development}
+      WOONA_UPLOAD_FREE_SPACE_RESERVE_BYTES: ${WOONA_UPLOAD_FREE_SPACE_RESERVE_BYTES:-268435456}
       WOONA_ALLOW_LEGACY_MIGRATION: ${WOONA_ALLOW_LEGACY_MIGRATION:-true}
       WOONA_SCHEMA_PATH: /app/docs/target-server-plan/models/postgresql.sql
       WOONA_DOG_SCHEMA_PATH: /app/docs/target-server-plan/models/dog-questionnaire.schema.json

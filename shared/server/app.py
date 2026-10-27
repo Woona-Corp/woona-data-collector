@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import logging
 import math
@@ -22,8 +23,11 @@ from jsonschema import Draft202012Validator, ValidationError as SchemaValidation
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from server.safety import (LOCAL_ONLY_TOKEN, active_entity_sql, append_upload,
+                           identity_lock, production_auth_guard)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -34,7 +38,7 @@ DEVICE_ID = uuid.UUID(
     os.getenv("WOONA_DEVICE_ID", "00000000-0000-0000-0000-000000000001")
 )
 DEVICE_LABEL = os.getenv("WOONA_DEVICE_LABEL", "Local device")
-DEBUG_TOKEN = os.getenv("WOONA_DEBUG_TOKEN", "change-me-local-token")
+DEBUG_TOKEN = os.getenv("WOONA_DEBUG_TOKEN", LOCAL_ONLY_TOKEN)
 ALLOW_LEGACY_MIGRATION = os.getenv("WOONA_ALLOW_LEGACY_MIGRATION", "false").lower() == "true"
 MAX_CHUNK_BYTES = 16 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
@@ -379,8 +383,7 @@ def ensure_device() -> None:
                 """
                 INSERT INTO client_devices(id,label,token_hash)
                 VALUES(:id,:label,:hash)
-                ON CONFLICT(id) DO UPDATE
-                SET label=EXCLUDED.label, token_hash=EXCLUDED.token_hash
+                ON CONFLICT(id) DO NOTHING
                 """
             ),
             {"id": DEVICE_ID, "label": DEVICE_LABEL, "hash": token_hash()},
@@ -390,6 +393,8 @@ def ensure_device() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global dog_validator, session_validator
+    with engine.connect() as connection:
+        production_auth_guard(connection, DEBUG_TOKEN)
     STORAGE_ROOT.joinpath("incoming").mkdir(parents=True, exist_ok=True)
     STORAGE_ROOT.joinpath("recordings").mkdir(parents=True, exist_ok=True)
     dog_validator = load_validator(
@@ -509,6 +514,34 @@ async def unexpected_error(request: Request, exception: Exception) -> JSONRespon
         headers={"X-Request-ID": request_id})
 
 
+@app.exception_handler(IntegrityError)
+async def constraint_error(request: Request, exception: IntegrityError) -> JSONResponse:
+    # A concurrent insert may win after an initial existence check. Only known
+    # identity/immutability constraints are conflicts; never expose SQL/values.
+    original = exception.orig
+    constraint = getattr(getattr(original, "diag", None), "constraint_name", None)
+    codes = {
+        "artifacts_pkey": "immutable_artifact_conflict",
+        "artifacts_recording_id_file_name_key": "immutable_artifact_conflict",
+        "dogs_pkey": "revision_conflict",
+        "recordings_pkey": "immutable_recording_conflict",
+        "dog_profile_versions_pkey": "immutable_profile_conflict",
+        "dog_profile_versions_dog_id_content_sha256_key": "profile_content_already_exists",
+        "dog_external_ids_pkey": "animal_id_already_exists",
+    }
+    if getattr(original, "sqlstate", None) == "23505" and constraint in codes:
+        return await http_error(request, HTTPException(409, detail={"code": codes[constraint]}))
+    return await unexpected_error(request, exception)
+
+
+@app.exception_handler(OSError)
+async def storage_error(request: Request, exception: OSError) -> JSONResponse:
+    if exception.errno in {errno.ENOSPC, errno.EDQUOT}:
+        return await http_error(request, HTTPException(507, detail={"code": "storage_full"},
+                                                       headers={"Retry-After": "60"}))
+    return await unexpected_error(request, exception)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error(
     request: Request, exception: RequestValidationError
@@ -624,6 +657,8 @@ def apply_profile(
     device_id: uuid.UUID,
     account: str | None = None,
 ) -> int:
+    identity_lock(connection, "dog", dog.id)
+    identity_lock(connection, "profile", profile.id)
     assert_dog_account(connection, dog.id, account)
     if account is not None:
         ensure_account(connection, account)
@@ -864,11 +899,15 @@ def add_reference(recording_id: uuid.UUID, artifact: ArtifactPayload,
         raise HTTPException(422, detail={"code": "reference_type_required"})
     validate_artifact(artifact)
     with engine.begin() as connection:
+        identity_lock(connection, "recording", recording_id)
+        identity_lock(connection, "artifact", artifact.id)
         ensure_not_retired(connection, "recording", recording_id)
-        recording = connection.execute(text("SELECT capture_device_id FROM recordings WHERE id=:id FOR UPDATE"),
+        recording = connection.execute(text("SELECT capture_device_id,dog_id,dog_profile_version_id FROM recordings WHERE id=:id FOR UPDATE"),
                                        {"id": recording_id}).mappings().first()
         if recording is None:
             raise HTTPException(404, detail={"code": "recording_not_found"})
+        ensure_not_retired(connection, "dog", recording["dog_id"])
+        ensure_not_retired(connection, "profile", recording["dog_profile_version_id"])
         existing = connection.execute(text("SELECT * FROM artifacts WHERE id=:id OR (recording_id=:recording AND file_name=:name)"),
                                       {"id": artifact.id, "recording": recording_id, "name": artifact.file_name}).mappings().first()
         if existing:
@@ -931,6 +970,17 @@ def put_recording(
         validate_artifact(artifact)
 
     with engine.begin() as connection:
+        identity_lock(connection, "recording", recording_id)
+        # Preserve account-scoped 404s before reporting a manifest collision.
+        assert_dog_account(connection, manifest.dog.id, account)
+        # All paths creating an artifact take the same global UUID locks. Sort
+        # multi-file manifests to prevent lock-order inversions across workers.
+        for artifact in sorted(manifest.artifacts, key=lambda item: item.id):
+            identity_lock(connection, "artifact", artifact.id)
+            other = connection.execute(text("SELECT recording_id FROM artifacts WHERE id=:id"),
+                                       {"id": artifact.id}).scalar_one_or_none()
+            if other is not None and other != recording_id:
+                raise HTTPException(409, detail={"code": "immutable_artifact_conflict"})
         ensure_not_retired(connection, "recording", recording_id)
         existing = connection.execute(
             text(
@@ -1075,10 +1125,11 @@ def artifact_row(
 ):
     ensure_not_retired(connection, "artifact", artifact_id)
     suffix = " FOR UPDATE" if for_update else ""
-    return connection.execute(
+    row = connection.execute(
         text(
             """
-            SELECT a.*,COALESCE(a.uploaded_by_device_id,r.capture_device_id) AS capture_device_id
+            SELECT a.*,r.dog_id,r.dog_profile_version_id,
+                   COALESCE(a.uploaded_by_device_id,r.capture_device_id) AS capture_device_id
             FROM artifacts a JOIN recordings r ON r.id=a.recording_id
             WHERE a.id=:id
             """
@@ -1086,6 +1137,11 @@ def artifact_row(
         ),
         {"id": artifact_id},
     ).mappings().first()
+    if row is not None:
+        ensure_not_retired(connection, "recording", row["recording_id"])
+        ensure_not_retired(connection, "dog", row["dog_id"])
+        ensure_not_retired(connection, "profile", row["dog_profile_version_id"])
+    return row
 
 
 def assert_owner(row: Any, device_id: uuid.UUID) -> None:
@@ -1193,10 +1249,7 @@ async def patch_artifact(
                 )
             if current + length > row["expected_size_bytes"]:
                 raise HTTPException(413, detail={"code": "artifact_size_exceeded"})
-            with part.open("ab", buffering=0) as output:
-                output.write(body)
-                output.flush()
-                os.fsync(output.fileno())
+            append_upload(part, body, current)
             next_offset = current + length
             connection.execute(
                 text(
@@ -1334,6 +1387,8 @@ def complete_recording(
         ).mappings().first()
         if recording is None:
             raise HTTPException(404, detail={"code": "recording_not_found"})
+        ensure_not_retired(connection, "dog", recording["dog_id"])
+        ensure_not_retired(connection, "profile", recording["dog_profile_version_id"])
         artifacts = connection.execute(
             text(
                 """
@@ -1476,6 +1531,8 @@ def get_dogs(
                 WHERE d.archived_at IS NULL
                   AND d.account_id IS NOT DISTINCT FROM CAST(:account AS text)
                   AND (CAST(:cursor AS uuid) IS NULL OR d.id > CAST(:cursor AS uuid))
+                  AND """ + active_entity_sql("dog", "d.id") + """
+                  AND """ + active_entity_sql("profile", "v.id") + """
                 ORDER BY d.id LIMIT :limit
                 """
             ),
@@ -1522,6 +1579,8 @@ def get_dog(
             ),
             {"id": dog_id},
         ).mappings().first()
+        if row is not None:
+            ensure_not_retired(connection, "profile", row["profile_version_id"])
         versions = connection.execute(
             text(
                 """
@@ -1529,6 +1588,7 @@ def get_dog(
                        content_sha256,client_created_at,superseded_at
                 FROM dog_profile_versions
                 WHERE dog_id=:id
+                  AND """ + active_entity_sql("profile", "dog_profile_versions.id") + """
                 ORDER BY server_created_at,id
                 """
             ),
@@ -1584,6 +1644,8 @@ def get_dog_recordings(
                        session_label,video_requested
                 FROM recordings WHERE dog_id=:dog
                   AND (CAST(:cursor AS uuid) IS NULL OR id > CAST(:cursor AS uuid))
+                  AND """ + active_entity_sql("recording", "recordings.id") + """
+                  AND """ + active_entity_sql("profile", "recordings.dog_profile_version_id") + """
                 ORDER BY id LIMIT :limit
                 """
             ),
@@ -1638,6 +1700,9 @@ def get_recording(
             ),
             {"id": recording_id},
         ).mappings().first()
+        if recording is not None:
+            ensure_not_retired(connection, "dog", recording["dog_id"])
+            ensure_not_retired(connection, "profile", recording["dog_profile_version_id"])
         sync = connection.execute(
             text("SELECT * FROM recording_sync WHERE recording_id=:id"),
             {"id": recording_id},
@@ -1647,7 +1712,9 @@ def get_recording(
                 """
                 SELECT id,artifact_type,file_name,mime_type,expected_size_bytes,
                        sha256,storage_status,reference_metadata
-                FROM artifacts WHERE recording_id=:id ORDER BY id
+                FROM artifacts WHERE recording_id=:id
+                  AND """ + active_entity_sql("artifact", "artifacts.id") + """
+                ORDER BY id
                 """
             ),
             {"id": recording_id},
@@ -1751,7 +1818,7 @@ def get_recording_status(
         row = connection.execute(
             text(
                 """
-                SELECT id,ingest_status,server_verified_at,receipt_sha256,
+                SELECT id,dog_id,dog_profile_version_id,ingest_status,server_verified_at,receipt_sha256,
                        capture_status,capture_error_code,capture_error_message,
                        session_questionnaire,server_updated_at,
                        (SELECT alignment FROM recording_sync WHERE recording_id=recordings.id) AS alignment
@@ -1760,11 +1827,16 @@ def get_recording_status(
             ),
             {"id": recording_id},
         ).mappings().first()
+        if row is not None:
+            ensure_not_retired(connection, "dog", row["dog_id"])
+            ensure_not_retired(connection, "profile", row["dog_profile_version_id"])
         artifacts = connection.execute(text("""
             SELECT id,artifact_type,file_name,expected_size_bytes,stored_size_bytes,
                    sha256,storage_status,server_relative_path,verified_at,
                    upload_updated_at,error_code,error_message
-            FROM artifacts WHERE recording_id=:id ORDER BY id
+            FROM artifacts WHERE recording_id=:id
+              AND """ + active_entity_sql("artifact", "artifacts.id") + """
+            ORDER BY id
         """), {"id": recording_id}).mappings().all()
     if row is None:
         raise HTTPException(404, detail={"code": "recording_not_found"})
@@ -1846,6 +1918,8 @@ def integrity(
     account: Annotated[str | None, Depends(selected_account)] = None,
 ) -> dict[str, Any]:
     problems: list[dict[str, str]] = []
+    hashed_artifacts = 0
+    hashed_bytes = 0
     with engine.connect() as connection:
         rows = connection.execute(
             text(
@@ -1872,6 +1946,12 @@ def integrity(
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest_builder.update(chunk)
         digest = digest_builder.hexdigest()
+        hashed_artifacts += 1
+        hashed_bytes += row["expected_size_bytes"]
         if digest != row["sha256"]:
             problems.append({"artifactId": str(row["id"]), "problem": "hash"})
-    return {"status": "ok" if not problems else "failed", "problems": problems}
+    return {"status": "ok" if not problems else "failed", "problems": problems,
+            "checkedScope": {"accountId": account, "unassignedOnly": account is None,
+                             "includesAllAccounts": False},
+            "checkedArtifacts": len(rows), "hashedArtifacts": hashed_artifacts,
+            "hashedBytes": hashed_bytes}
