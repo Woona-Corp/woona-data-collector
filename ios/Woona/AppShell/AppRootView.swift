@@ -100,6 +100,7 @@ struct AppRootView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
+            .contentShape(Rectangle())
             .foregroundStyle(selected ? Color.woonaSelectionText : Color.woonaMuted)
             .background(selected ? Color.woonaSelection : .clear, in: RoundedRectangle(cornerRadius: 18))
         }
