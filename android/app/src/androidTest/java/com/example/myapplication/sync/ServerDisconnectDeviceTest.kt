@@ -30,7 +30,7 @@ class ServerDisconnectDeviceTest {
         prefs.edit().clear().commit()
         val accepted=java.util.concurrent.CountDownLatch(1)
         val release=java.util.concurrent.CountDownLatch(1)
-        java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress()).use { server ->
+        java.net.ServerSocket(0,1,java.net.InetAddress.getByName("127.0.0.1")).use { server ->
             val responder=Thread {
                 server.accept().use { socket ->
                     val input=socket.getInputStream();val header=java.io.ByteArrayOutputStream()

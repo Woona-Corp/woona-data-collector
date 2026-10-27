@@ -907,15 +907,17 @@ class WoonaDatabaseTest {
                         kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Unit> { continuation ->
                             method.invoke(activity,displayed,draft,null,false,continuation)
                         }
-                    } } catch(error:Throwable) { failed=error }
+                    } } catch(error:Throwable) { failed=if(error is java.lang.reflect.InvocationTargetException) error.targetException else error }
                     assertTrue("The editor must remain open",(editor.get(activity) as androidx.compose.runtime.State<*>).value!=null)
                 }
                 return failed
             }
-            assertTrue(attempt() is IllegalStateException)
+            val offlineFailure=attempt()
+            assertTrue("Expected offline server-edit rejection; got ${offlineFailure?.javaClass?.name}: ${offlineFailure?.message}",offlineFailure is IllegalStateException)
+            assertTrue("Expected the server-configuration reason; got ${offlineFailure?.message}",offlineFailure?.message?.contains("Configure server URL and token")==true)
             assertEquals(remote.sessionLabel,database.recording(remote.id)?.sessionLabel)
             val requests=java.util.concurrent.CopyOnWriteArrayList<String>()
-            java.net.ServerSocket(0,10,java.net.InetAddress.getLoopbackAddress()).use { server ->
+            java.net.ServerSocket(0,10,java.net.InetAddress.getByName("127.0.0.1")).use { server ->
                 val responder=Thread {
                     try { while(!server.isClosed) server.accept().use { socket ->
                         socket.soTimeout=5000
@@ -929,7 +931,9 @@ class WoonaDatabaseTest {
                     } } catch (_:java.net.SocketException) { }
                 }.apply { isDaemon=true;start() }
                 store.save("http://127.0.0.1:${server.localPort}","synthetic-review-token",true)
-                assertTrue(attempt() is com.example.myapplication.sync.ServerHttpException)
+                val missingFailure=attempt()
+                assertTrue("Expected HTTP404 without local fallback; got ${missingFailure?.javaClass?.name}: ${missingFailure?.message}",missingFailure is com.example.myapplication.sync.ServerHttpException)
+                assertEquals(404,(missingFailure as com.example.myapplication.sync.ServerHttpException).status)
                 assertTrue(requests.any {it.startsWith("PUT /v1/recordings/${remote.id}/questionnaire ")})
                 assertEquals(remote.sessionLabel,database.recording(remote.id)?.sessionLabel)
                 store.clearToken();server.close();responder.join(2000)
