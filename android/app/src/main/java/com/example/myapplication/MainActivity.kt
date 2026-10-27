@@ -276,7 +276,7 @@ class MainActivity : ComponentActivity() {
         CaptureServiceBridge.onStartFailed = { code, error ->
             weakActivity.get()?.let { activity -> activity.runOnUiThread {
                 activity.pendingForegroundCaptureStart = false
-                if (activity.startupReady) {
+                if (activity.startupReady && !activity.isDestroyed) {
                     val message = activity.appTextResolver.getString(if (code == "camera_foreground_unavailable")
                         R.string.camera_foreground_unavailable else R.string.capture_foreground_start_denied)
                     if (code == "camera_foreground_unavailable") activity.deviceFeatureController.onCaptureServiceFailure(code, message, error)
