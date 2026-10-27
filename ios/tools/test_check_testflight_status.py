@@ -40,6 +40,12 @@ class TesterAccessTest(unittest.TestCase):
         result = target_access([group('internal', True, [person('other', 'other@example.invalid')])], {'internal'})
         self.assertFalse(result['matched']);self.assertFalse(result['assignedBuild'])
 
+    def test_different_ids_for_email_and_same_name_are_not_assumed_one_person(self):
+        digest = hashlib.sha256(b'synthetic person').hexdigest()
+        rows = [group('external', False, [person('email-id', 'tester@example.invalid', 'Synthetic', 'Person')], digest),
+                group('internal', True, [person('different-id', first='Synthetic', last='Person')], digest)]
+        self.assertIsNone(target_access(rows, {'internal'})['internal'])
+
     def test_incomplete_listing_cannot_prove_absence(self):
         for body in [{'data': [], 'meta': {'paging': {'total': 1}}}, {'data': [], 'links': {'next': 'not-fetched'}}]:
             with self.assertRaises(RuntimeError):tester_identities(body, TARGET)

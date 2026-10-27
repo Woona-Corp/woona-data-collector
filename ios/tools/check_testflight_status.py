@@ -77,6 +77,9 @@ def target_access(groups, assigned_group_ids):
     name_ids = {item['id'] for item in identities if item['name_match']}
     chosen = next(iter(email_ids)) if len(email_ids) == 1 else None
     proof = 'email_digest' if chosen else 'unverified'
+    if chosen and name_ids - {chosen}:
+        return {'matched': None, 'internal': None, 'external': None, 'assignedBuild': None,
+                'identityEvidence': 'conflicting_tester_ids_require_review'}
     if not email_ids and len(name_ids) == 1:
         chosen = next(iter(name_ids)); proof = 'unique_exact_name_digest'
     if not chosen:
