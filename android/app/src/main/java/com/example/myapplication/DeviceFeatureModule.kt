@@ -246,6 +246,10 @@ fun createDeviceFeatureController(
                 }
             }
 
+            override fun onV2DeviceBusy(sessionMode: Int) {
+                v2OnMain { uiStateHolder.onV2DeviceBusy(sessionMode) }
+            }
+
             override fun onV2DiscoveryStarted() {
                 resetV2PreviewQueue()
                 v2OnMain {
@@ -485,7 +489,7 @@ object DeviceFeatureControllerHolder {
         create: () -> DeviceFeatureController,
     ): DeviceFeatureController {
         val existing = controller
-        if (existing != null && existing.isCaptureActive()) {
+        if (existing != null && existing.shouldRetainConnection()) {
             existing.setOnRecordingChanged(onRecordingChanged)
             return existing
         }
@@ -499,7 +503,7 @@ object DeviceFeatureControllerHolder {
 
     @Synchronized
     fun releaseIfInactive(candidate: DeviceFeatureController) {
-        if (controller !== candidate || candidate.isCaptureActive()) return
+        if (controller !== candidate || candidate.shouldRetainConnection()) return
         candidate.close()
         controller = null
     }

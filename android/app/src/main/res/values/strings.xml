@@ -249,4 +249,6 @@
     <string name="v2_stream_temp2">Temperature 2 (raw)</string>
     <string name="v2_sd_disconnect_warning">Connect only to an idle sensor. With the current firmware, a Bluetooth disconnect can stop an SD-card recording.</string>
     <string name="v2_sd_disconnect_confirm">Disconnecting may stop an SD-card recording. Continue?</string>
+    <string name="camera_foreground_unavailable">Android could not enable camera capture in the background. Keep the app visible and retry; local files are preserved.</string>
+    <string name="capture_foreground_start_denied">Android could not start the capture service. The session was stopped; local files are preserved. Open the app and retry.</string>
 </resources>

@@ -19,6 +19,22 @@ import java.util.zip.ZipFile
 
 class DeviceFeatureControllerTest {
     @Test
+    fun busyDeviceIsNotDisconnectedWhenAppGoesIntoBackground() {
+        val ble = FakeBleSessionController()
+        val state = DeviceUiStateHolder()
+        val controller = DeviceFeatureController(ble, FakePacketCaptureController(), FakeFileShareIntentFactory(), uiStateHolder = state)
+        controller.onV2PreviewConnectRequested("AA:BB")
+        state.onV2DeviceBusy(2)
+        state.onV2DiscoveryFailed("Sensor is recording to SD")
+        controller.onPause()
+        assertEquals(0, ble.disconnectCalls)
+        assertTrue(controller.shouldRetainConnection())
+        controller.onDisconnectRequested() // Explicit confirmed user action still works.
+        assertEquals(1, ble.disconnectCalls)
+        assertFalse(controller.shouldRetainConnection())
+    }
+
+    @Test
     fun previewConnectNeverStartsPersistentCaptureAndDisconnectsWhenBackgrounded() {
         val ble = FakeBleSessionController()
         val capture = FakePacketCaptureController()

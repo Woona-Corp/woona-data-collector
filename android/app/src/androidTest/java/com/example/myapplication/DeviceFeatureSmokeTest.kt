@@ -95,6 +95,10 @@ class DeviceFeatureSmokeTest {
             assertEquals("PREVIEW", ble.connectedAddress)
             org.junit.Assert.assertFalse(controller.isV2PreviewConnection())
             assertTrue(controller.isCaptureActive())
+            controller.onCaptureServiceFailure("capture_foreground_start_denied", "Synthetic OS refusal", SecurityException("denied"))
+            assertEquals(com.example.myapplication.data.RecordingStatus.FAILED, database.recording(active.id)?.status)
+            assertEquals("capture_foreground_start_denied", database.recording(active.id)?.captureErrorCode)
+            assertArrayEquals(bytes, packet.readBytes())
         } finally { controller.close(); database.close(); root.deleteRecursively() }
     }
 

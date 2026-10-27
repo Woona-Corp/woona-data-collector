@@ -223,6 +223,8 @@ class DeviceUiStateHolder {
         )
     }
 
+    fun onV2DeviceBusy(mode: Int) { uiState = uiState.copy(v2DeviceSessionMode = mode) }
+
     fun onV2DiscoveryFailed(reason: String) {
         // HELLO may already have switched the firmware; never offer automatic
         // fallback to Legacy on this connection.

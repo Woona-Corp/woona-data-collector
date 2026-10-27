@@ -99,6 +99,7 @@ class WoonaV2DiscoveryTest {
             }
             val failure = d.receive(inbound(0x83, 3, busy)).single() as WoonaV2Discovery.Event.Failure
             assertTrue(failure.reason.contains("busy"))
+            assertEquals(mode, failure.busySessionMode)
             assertEquals(WoonaV2Discovery.Phase.FAILED, d.phase)
         }
         val d = WoonaV2Discovery(); d.begin(); d.receive(inbound(0x81, 1, helloPayload))

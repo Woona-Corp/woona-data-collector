@@ -141,6 +141,7 @@ class MainActivity : ComponentActivity() {
     private var isChartFullscreenActive = false
     private var isStopSessionInProgress = false
     private var isCameraPermissionRequestInProgress = false
+    private var pendingForegroundCaptureStart = false
     private var startCaptureAfterCameraPermission = false
     private var startPolarScanAfterPermission = false
     private var pendingPreviewSurface: Surface? = null
@@ -169,10 +170,11 @@ class MainActivity : ComponentActivity() {
     ) { granted ->
         isCameraPermissionRequestInProgress = false
         if (granted) {
+            ensureCaptureService()
             deviceFeatureController.setVideoPreviewSurface(pendingPreviewSurface)
             if (startCaptureAfterCameraPermission) {
                 startCaptureAfterCameraPermission = false
-                deviceFeatureController.startSynchronizedSession()
+                startSynchronizedCaptureWhenServiceReady()
             }
         } else {
             startCaptureAfterCameraPermission = false
@@ -241,7 +243,7 @@ class MainActivity : ComponentActivity() {
                 onRecordingChanged = ::handleRecordingChanged,
                 onCaptureLifecycleChanged = { active ->
                     if (active) {
-                        CaptureForegroundService.start(applicationContext)
+                        CaptureForegroundService.start(this@MainActivity, deviceFeatureController.isVideoRequested())
                     } else {
                         CaptureForegroundService.stop(applicationContext)
                     }
@@ -259,6 +261,28 @@ class MainActivity : ComponentActivity() {
 
         CaptureServiceBridge.onStopRequested = {
             DeviceFeatureControllerHolder.requestStop()
+        }
+        val weakActivity = java.lang.ref.WeakReference(this)
+        CaptureServiceBridge.onForegroundReady = { cameraEnabled ->
+            weakActivity.get()?.let { activity -> activity.runOnUiThread {
+                if (activity.pendingForegroundCaptureStart && cameraEnabled && activity.startupReady &&
+                    activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) &&
+                    activity.deviceFeatureController.isCaptureActive()) {
+                    activity.pendingForegroundCaptureStart = false
+                    activity.deviceFeatureController.startSynchronizedSession()
+                }
+            } }
+        }
+        CaptureServiceBridge.onStartFailed = { code, error ->
+            weakActivity.get()?.let { activity -> activity.runOnUiThread {
+                activity.pendingForegroundCaptureStart = false
+                if (activity.startupReady) {
+                    val message = activity.appTextResolver.getString(if (code == "camera_foreground_unavailable")
+                        R.string.camera_foreground_unavailable else R.string.capture_foreground_start_denied)
+                    if (code == "camera_foreground_unavailable") activity.deviceFeatureController.onCaptureServiceFailure(code, message, error)
+                    else activity.backgroundExecutor.execute { activity.deviceFeatureController.onCaptureServiceFailure(code, message, error) }
+                }
+            } }
         }
         enableEdgeToEdge()
         setContent {
@@ -698,18 +722,39 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (startupReady) refreshServerState()
+        if (startupReady) { refreshServerState(); ensureCaptureService() }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        pendingForegroundCaptureStart = false
+        if (startupReady && !isChangingConfigurations) deviceFeatureController.onPause()
     }
 
     override fun onDestroy() {
         setChartFullscreenActive(false)
-        if (startupReady && !deviceFeatureController.isCaptureActive()) {
+        if (startupReady && !deviceFeatureController.shouldRetainConnection()) {
             DeviceFeatureControllerHolder.releaseIfInactive(deviceFeatureController)
             CaptureServiceBridge.onStopRequested = null
             woonaDatabase.close()
         }
         backgroundExecutor.shutdownNow()
         super.onDestroy()
+    }
+
+    private fun ensureCaptureService(): Boolean {
+        if (!startupReady || !deviceFeatureController.isLiveCapture() || deviceFeatureController.isV2PreviewConnection()) return false
+        return CaptureForegroundService.start(this, deviceFeatureController.isVideoRequested())
+    }
+
+    private fun startSynchronizedCaptureWhenServiceReady() {
+        if (!startupReady || pendingForegroundCaptureStart || !deviceFeatureController.isCaptureActive()) return
+        if (deviceFeatureController.isVideoRequested() && !CaptureServiceBridge.cameraForegroundEnabled) {
+            pendingForegroundCaptureStart = true
+            ensureCaptureService()
+            return
+        }
+        deviceFeatureController.startSynchronizedSession()
     }
 
     private fun toggleCapture() {
@@ -729,12 +774,12 @@ class MainActivity : ComponentActivity() {
             VideoCaptureState.FAILED,
             -> {
                 if (!deviceFeatureController.isVideoRequested()) {
-                    deviceFeatureController.startSynchronizedSession()
+                    startSynchronizedCaptureWhenServiceReady()
                 } else if (
                     ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
                     android.content.pm.PackageManager.PERMISSION_GRANTED
                 ) {
-                    deviceFeatureController.startSynchronizedSession()
+                    startSynchronizedCaptureWhenServiceReady()
                 } else {
                     startCaptureAfterCameraPermission = true
                     isCameraPermissionRequestInProgress = true
@@ -747,6 +792,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopSession() {
+        pendingForegroundCaptureStart = false
         if (isStopSessionInProgress) return
         isStopSessionInProgress = true
         lifecycleScope.launch {

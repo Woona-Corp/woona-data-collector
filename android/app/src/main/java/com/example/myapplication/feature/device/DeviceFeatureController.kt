@@ -111,9 +111,11 @@ class DeviceFeatureController(
         get() = uiStateHolder.uiState
 
     fun isVideoRequested(): Boolean = currentRecording?.videoRequested == true
+    fun isLiveCapture(): Boolean = currentRecording?.source == RecordingSource.LIVE && isCaptureActive()
 
     fun isCaptureActive(): Boolean = !recordingFinalized || recordingFinalizing
     fun isV2PreviewConnection(): Boolean = v2PreviewConnection
+    fun shouldRetainConnection(): Boolean = isCaptureActive() || v2PreviewConnection
     fun connectionUiGeneration(): Long = connectionUiGeneration.get()
 
     fun setOnRecordingChanged(listener: () -> Unit) {
@@ -384,6 +386,8 @@ class DeviceFeatureController(
 
     fun onPause() {
         if (v2PreviewConnection) {
+            // Never intentionally stop somebody else's active on-device session.
+            if (uiState.v2DeviceSessionMode in 1..2) return
             onDisconnectRequested()
             return
         }
@@ -1134,6 +1138,19 @@ class DeviceFeatureController(
         }
         runOnUiThread { uiStateHolder.videoFinished() }
         notifyRecordingChanged()
+    }
+
+    fun onCaptureServiceFailure(code: String, message: String, error: RuntimeException) {
+        if (v2PreviewConnection || !isCaptureActive()) return
+        val details = "$code: $message: $error"
+        if (code == "camera_foreground_unavailable") {
+            handleVideoFailure(details)
+        } else {
+            currentRecordingId?.let { woonaDatabase?.markCaptureError(it, code, details) }
+            finalizeRecording(RecordingStatus.FAILED)
+            bleSessionController.disconnect()
+        }
+        showErrorOnMainThread(details)
     }
 
     fun onVideoPermissionDenied() {

@@ -249,4 +249,6 @@
     <string name="v2_stream_temp2">Температура 2 (исходные значения)</string>
     <string name="v2_sd_disconnect_warning">Подключайте только свободный датчик. В текущей прошивке разрыв Bluetooth может остановить запись на SD-карту.</string>
     <string name="v2_sd_disconnect_confirm">Отключение может остановить запись на SD-карту. Продолжить?</string>
+    <string name="camera_foreground_unavailable">Android не разрешил фоновую работу камеры. Оставьте приложение на экране и повторите запуск; локальные файлы сохранены.</string>
+    <string name="capture_foreground_start_denied">Android не разрешил запустить службу записи. Сессия остановлена; локальные файлы сохранены. Откройте приложение и повторите запуск.</string>
 </resources>

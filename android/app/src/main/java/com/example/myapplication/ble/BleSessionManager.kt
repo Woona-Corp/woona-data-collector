@@ -41,6 +41,7 @@ interface BleSessionListener {
     fun onDiagnosticMessage(message: String)
     fun onCaptureReady()
     fun onV2DiscoveryStarted() = Unit
+    fun onV2DeviceBusy(sessionMode: Int) = Unit
     /** Called only after explicit V2 discovery has completed successfully. */
     fun onV2DiscoveryReady(device: WoonaV2Discovery.Device) = Unit
     fun onV2LiveStarted(sessionId: Long, streamMask: Long) = Unit
@@ -1099,7 +1100,10 @@ class BleSessionManager(
                 v2LiveReceiver = WoonaV2StreamDecoder()
                 listener.onV2DiscoveryReady(event.device)
             }
-            is WoonaV2Discovery.Event.Failure -> failV2Discovery(event.reason)
+            is WoonaV2Discovery.Event.Failure -> {
+                event.busySessionMode?.let(listener::onV2DeviceBusy)
+                failV2Discovery(event.reason)
+            }
         }
     }
 

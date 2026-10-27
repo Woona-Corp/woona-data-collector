@@ -14,7 +14,7 @@ class WoonaV2Discovery {
         /** Write exactly these bytes on FFF2, in order, before sending another command. */
         class Transmit(val bytes: ByteArray) : Event
         class Complete(val device: Device) : Event
-        class Failure(val reason: String) : Event
+        class Failure(val reason: String, val busySessionMode: Int? = null) : Event
     }
 
     data class Status(
@@ -115,7 +115,7 @@ class WoonaV2Discovery {
                         continue
                     }
                     if (status.sessionMode != 0 || status.sessionId != 0L) {
-                        events += fail("V2 device is busy with ${if (status.sessionMode == 2) "STORAGE" else "LIVE"} session ${status.sessionId}; preserve the active session")
+                        events += fail("V2 device is busy with ${if (status.sessionMode == 2) "STORAGE" else "LIVE"} session ${status.sessionId}; preserve the active session", status.sessionMode)
                         continue
                     }
                     if (frame.payload.size == 48 && frame.payload[36] != 0.toByte()) {
@@ -180,10 +180,10 @@ class WoonaV2Discovery {
         )
     }
 
-    private fun fail(reason: String): Event.Failure {
+    private fun fail(reason: String, busySessionMode: Int? = null): Event.Failure {
         phase = Phase.FAILED
         pendingRequestId = 0
         pendingWire = ByteArray(0)
-        return Event.Failure(reason)
+        return Event.Failure(reason, busySessionMode)
     }
 }
