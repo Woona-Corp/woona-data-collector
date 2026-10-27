@@ -341,10 +341,13 @@ def apply_plan(engine, storage_root: Path, plan):
                         copy_required = True
                 if copy_required:
                     partial = destination.with_suffix(destination.suffix + '.import-part')
-                    with Path(artifact['stagedPath']).open('rb') as source, partial.open('xb') as output:
-                        shutil.copyfileobj(source, output, 4 * 1024 * 1024)
-                        output.flush()
-                        os.fsync(output.fileno())
+                    if partial.is_symlink() or (partial.exists() and not partial.is_file()):
+                        raise ValueError('Canonical temporary copy is unsafe; originals preserved')
+                    if not partial.exists():
+                        with Path(artifact['stagedPath']).open('rb') as source, partial.open('xb') as output:
+                            shutil.copyfileobj(source, output, 4 * 1024 * 1024)
+                            output.flush()
+                            os.fsync(output.fileno())
                     if partial.stat().st_size != artifact['sizeBytes'] or file_hash(partial) != artifact['sha256']:
                         raise ValueError('Canonical copy failed integrity verification; sources preserved')
                     # Do not replace an externally-created immutable target.

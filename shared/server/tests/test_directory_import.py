@@ -179,3 +179,20 @@ class DirectoryImportApiTest(unittest.TestCase):
             self.assertEqual(c.execute(text('SELECT count(*) FROM recordings WHERE id=:id'),
                 {'id': uuid.UUID(plan['recordingId'])}).scalar_one(), 0)
         verify_directory_plan(plan)
+
+    def test_conflicting_temporary_copy_is_preserved_without_publication(self):
+        from server.app import engine, STORAGE_ROOT
+        plan = inspect_directory(self.source, self.review)
+        target = (STORAGE_ROOT / 'recordings' / plan['dogId'] / '2026-10-05'
+                  / plan['recordingId'] / plan['artifacts'][0]['fileName'])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_suffix(target.suffix + '.import-part')
+        partial.write_bytes(b'preserve conflicting bytes')
+        with self.assertRaisesRegex(ValueError, 'copy failed integrity'):
+            apply_plan(engine, STORAGE_ROOT, plan)
+        self.assertEqual(partial.read_bytes(), b'preserve conflicting bytes')
+        self.assertFalse(target.exists())
+        with engine.connect() as c:
+            self.assertEqual(c.execute(text('SELECT count(*) FROM recordings WHERE id=:id'),
+                {'id': uuid.UUID(plan['recordingId'])}).scalar_one(), 0)
+        verify_directory_plan(plan)
