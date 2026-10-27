@@ -31,6 +31,7 @@ class WoonaV2Discovery {
         private set
 
     private val receiver = WoonaV2StreamDecoder()
+    val rejectedFrames: Long get() = receiver.rejectedFrames
     private var nextSequence = 1L
     private var nextRequestId = 1L
     private var pendingRequestId = 0L

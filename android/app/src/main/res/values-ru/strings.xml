@@ -238,7 +238,7 @@
     <string name="v2_finish_capture_first">Завершите запись и отключите датчик перед выбором предпросмотра V2.</string>
     <string name="v2_ordinary_recording_unavailable">Для обычной записи отключите датчик и выберите режим «Запись».</string>
     <string name="v2_preview_streams">Потоки для предпросмотра</string>
-    <string name="v2_preview_metrics">Блоки: %1$d · Пропуски потока: %2$d · Пропуски графика: %3$d</string>
+    <string name="v2_preview_metrics">Декодировано блоков: %1$d · Разрывов последовательности: %2$d · Отклонено кадров: %4$d · Не показано блоков: %3$d</string>
     <string name="v2_preview_no_live">Этот датчик не сообщает о поддержке живого предпросмотра.</string>
     <string name="v2_stream_accel">Акселерометр</string>
     <string name="v2_stream_gyro">Гироскоп</string>
@@ -251,4 +251,6 @@
     <string name="v2_sd_disconnect_confirm">Отключение может остановить запись на SD-карту. Продолжить?</string>
     <string name="camera_foreground_unavailable">Android не разрешил фоновую работу камеры. Оставьте приложение на экране и повторите запуск; локальные файлы сохранены.</string>
     <string name="capture_foreground_start_denied">Android не разрешил запустить службу записи. Сессия остановлена; локальные файлы сохранены. Откройте приложение и повторите запуск.</string>
+    <string name="v2_preview_storage_unavailable">Сохранение V2 и чтение SD пока недоступны.</string>
+    <string name="v2_rejected_frames_explanation">Кадры не прошли проверку COBS, длины, заголовка или CRC и не были приняты. Разрывы последовательности сами по себе не доказывают потерю измерений.</string>
 </resources>

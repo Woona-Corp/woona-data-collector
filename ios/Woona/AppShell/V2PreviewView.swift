@@ -32,6 +32,10 @@ struct V2PreviewView: View {
                 .disabled(![.ready, .stopped].contains(state.stage))
                 .accessibilityIdentifier("v2.stream.\(stream.id)")
             }
+            if state.rejectedFrames > 0 {
+                Text(russian ? "Кадры не прошли проверку COBS, длины, заголовка или CRC и не были приняты. Разрывы последовательности сами по себе не доказывают потерю измерений." : "Frames failed COBS, length, header or CRC validation and were not accepted. Sequence gaps alone do not prove missing measurements.")
+                    .font(.footnote)
+            }
             HStack {
                 Button(russian ? "Начать предпросмотр" : "Start preview") { controller.start() }
                     .disabled(![.ready, .stopped].contains(state.stage) || state.selectedMask == 0)

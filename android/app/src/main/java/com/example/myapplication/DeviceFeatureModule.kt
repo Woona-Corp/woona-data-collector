@@ -152,6 +152,7 @@ fun createDeviceFeatureController(
     var v2PreviewScheduled = false
     var v2ReceivedPending = 0
     var v2GapsPending = 0
+    var v2RejectedPendingTotal = 0L
     var v2DroppedPending = 0
     val flushV2Preview = Runnable {
         val pending = synchronized(v2PreviewLock) {
@@ -160,9 +161,10 @@ fun createDeviceFeatureController(
             v2PreviewEvents.clear()
             val counters = intArrayOf(v2ReceivedPending, v2GapsPending, v2DroppedPending)
             v2ReceivedPending = 0; v2GapsPending = 0; v2DroppedPending = 0
-            events to counters
+            Triple(events, counters, v2RejectedPendingTotal)
         }
-        val (batch, counters) = pending
+        val (batch, counters, rejectedTotal) = pending
+        if (deviceFeatureController?.isV2PreviewForeground() == true) uiStateHolder.onV2FrameRejections(rejectedTotal)
         if (batch.isNotEmpty() && deviceFeatureController?.isV2PreviewForeground() == true) {
             val charts = linkedMapOf<ChartStreamKey, MutableList<ChartPoint>>()
             var unplottable = 0
@@ -181,10 +183,11 @@ fun createDeviceFeatureController(
             )
         }
     }
-    fun resetV2PreviewQueue() {
+    fun resetV2PreviewQueue(resetRejected: Boolean = false) {
         mainHandler.removeCallbacks(flushV2Preview)
         synchronized(v2PreviewLock) {
             v2PreviewEvents.clear(); v2PreviewScheduled = false
+            if (resetRejected) v2RejectedPendingTotal = 0
             v2ReceivedPending = 0; v2GapsPending = 0; v2DroppedPending = 0
         }
     }
@@ -248,12 +251,21 @@ fun createDeviceFeatureController(
                 }
             }
 
+            override fun onV2FrameRejections(total: Long) {
+                if (deviceFeatureController?.isV2PreviewForeground() != true) return
+                val schedule = synchronized(v2PreviewLock) {
+                    v2RejectedPendingTotal = total
+                    if (v2PreviewScheduled) false else { v2PreviewScheduled = true; true }
+                }
+                if (schedule) mainHandler.postDelayed(flushV2Preview, 100L)
+            }
+
             override fun onV2DeviceBusy(sessionMode: Int) {
                 v2OnMain { uiStateHolder.onV2DeviceBusy(sessionMode) }
             }
 
             override fun onV2DiscoveryStarted() {
-                resetV2PreviewQueue()
+                resetV2PreviewQueue(resetRejected = true)
                 v2OnMain {
                     v2Timeline.reset()
                     uiStateHolder.onV2DiscoveryRequested()

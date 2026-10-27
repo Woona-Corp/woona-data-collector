@@ -177,20 +177,24 @@ object WoonaV2Codec {
 class WoonaV2StreamDecoder {
     private val pending = ArrayList<Byte>()
     private var discardUntilDelimiter = false
+    var rejectedFrames: Long = 0
+        private set
+    private fun reject() { if (rejectedFrames < Long.MAX_VALUE) rejectedFrames++ }
     /** A corrupt oversized COBS segment is discarded until the next 0x00 boundary. */
-    fun reset() { pending.clear(); discardUntilDelimiter = false }
+    fun reset() { pending.clear(); discardUntilDelimiter = false; rejectedFrames = 0 }
     fun append(bytes: ByteArray): List<V2Frame> {
         val frames = mutableListOf<V2Frame>()
         for (value in bytes) {
             if (value == 0.toByte()) {
                 if (!discardUntilDelimiter && pending.isNotEmpty()) {
                     val raw = WoonaV2Codec.cobsDecode(pending.toByteArray())
-                    if (raw != null) WoonaV2Codec.decodeRaw(raw)?.let(frames::add)
+                    val frame = raw?.let(WoonaV2Codec::decodeRaw)
+                    if (frame != null) frames.add(frame) else reject()
                 }
                 pending.clear(); discardUntilDelimiter = false
             } else if (!discardUntilDelimiter) {
                 if (pending.size >= WoonaV2Codec.MAX_ENCODED) {
-                    pending.clear(); discardUntilDelimiter = true
+                    pending.clear(); discardUntilDelimiter = true; reject()
                 } else pending.add(value)
             }
         }

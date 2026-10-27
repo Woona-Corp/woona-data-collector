@@ -238,7 +238,7 @@
     <string name="v2_finish_capture_first">Finish the recording and disconnect before choosing V2 preview.</string>
     <string name="v2_ordinary_recording_unavailable">Disconnect and select Recording to save a normal session.</string>
     <string name="v2_preview_streams">Streams to preview</string>
-    <string name="v2_preview_metrics">Blocks: %1$d · Stream gaps: %2$d · Chart skips: %3$d</string>
+    <string name="v2_preview_metrics">Decoded blocks: %1$d · Sequence gaps: %2$d · Rejected frames: %4$d · UI-skipped blocks: %3$d</string>
     <string name="v2_preview_no_live">This sensor does not advertise live preview support.</string>
     <string name="v2_stream_accel">Accelerometer</string>
     <string name="v2_stream_gyro">Gyroscope</string>
@@ -251,4 +251,6 @@
     <string name="v2_sd_disconnect_confirm">Disconnecting may stop an SD-card recording. Continue?</string>
     <string name="camera_foreground_unavailable">Android could not enable camera capture in the background. Keep the app visible and retry; local files are preserved.</string>
     <string name="capture_foreground_start_denied">Android could not start the capture service. The session was stopped; local files are preserved. Open the app and retry.</string>
+    <string name="v2_preview_storage_unavailable">V2 recording and SD download are not available yet.</string>
+    <string name="v2_rejected_frames_explanation">Frames failed COBS, length, header or CRC validation and were not accepted. Sequence gaps alone do not prove missing measurements.</string>
 </resources>

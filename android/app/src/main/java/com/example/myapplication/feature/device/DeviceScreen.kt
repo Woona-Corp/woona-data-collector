@@ -118,7 +118,7 @@ fun DeviceOverviewScreen(
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        item {
+        if (!uiState.v2DiscoveryRequested) item {
             profileContent()
         }
 
@@ -157,16 +157,13 @@ fun DeviceOverviewScreen(
                     onReplayRequest = onReplayRequest,
                 )
             }
-        } else {
-            item {
-                DisconnectCard(onDisconnect = onDisconnect, warnAboutSd = uiState.v2DiscoveryRequested)
-            }
+        } else if (!uiState.v2DiscoveryRequested) {
+            item { DisconnectCard(onDisconnect = onDisconnect) }
         }
 
         if (uiState.v2DiscoveryRequested) {
-            item {
-                V2LivePreviewCard(uiState, onV2LiveStart, onV2LiveStop, onV2StreamToggle)
-            }
+            item { V2LivePreviewCard(uiState, onV2LiveStart, onV2LiveStop, onV2StreamToggle) }
+            item { DisconnectCard(onDisconnect = onDisconnect, warnAboutSd = true) }
         }
 
         item {
@@ -206,26 +203,11 @@ private fun V2LivePreviewCard(
                 V2PreviewStage.FAILED -> R.string.v2_connection_failed
             }
             Text(appStringResource(stageLabel), modifier = Modifier.testTag("v2.preview.status"))
-            when {
-                uiState.v2DiscoveryError != null -> {
-                    androidx.compose.foundation.text.selection.SelectionContainer {
-                    Text(uiState.v2DiscoveryError, color = MaterialTheme.colorScheme.error)
-                    }
-                }
-                uiState.v2PreviewStage == V2PreviewStage.RUNNING -> OutlinedButton(onClick = onStop,
-                    modifier = Modifier.testTag("v2.preview.stop")) {
-                    Text(appStringResource(R.string.v2_preview_stop))
-                }
-                uiState.v2PreviewStage in setOf(V2PreviewStage.READY, V2PreviewStage.STOPPED) -> {
-                    if (uiState.v2Capabilities and 1L == 0L) {
-                        Text(appStringResource(R.string.v2_preview_no_live))
-                    } else Button(onClick = onStart, enabled = uiState.v2SelectedStreamMask != 0L,
-                        modifier = Modifier.testTag("v2.preview.start")) {
-                        Text(appStringResource(R.string.v2_preview_start))
-                    }
-                }
+            uiState.v2DiscoveryError?.let { reason ->
+                SelectionContainer { Text(reason, color = MaterialTheme.colorScheme.error) }
             }
-            if (uiState.v2Ready) {
+            Text(appStringResource(R.string.v2_sd_disconnect_warning), style = MaterialTheme.typography.bodySmall)
+            if (uiState.v2StreamMask != 0L) {
                 Text(appStringResource(R.string.v2_preview_streams), style = MaterialTheme.typography.labelMedium)
                 val streams = listOf(R.string.v2_stream_accel, R.string.v2_stream_gyro,
                     R.string.v2_stream_contact, R.string.v2_stream_ambient, R.string.v2_stream_piezo,
@@ -242,12 +224,22 @@ private fun V2LivePreviewCard(
                         Text(appStringResource(label))
                     }
                 }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onStart,
+                    enabled = uiState.v2Ready && uiState.v2SelectedStreamMask != 0L &&
+                        uiState.v2PreviewStage in setOf(V2PreviewStage.READY, V2PreviewStage.STOPPED),
+                    modifier = Modifier.testTag("v2.preview.start")) { Text(appStringResource(R.string.v2_preview_start)) }
+                OutlinedButton(onClick = onStop, enabled = uiState.v2PreviewStage == V2PreviewStage.RUNNING,
+                    modifier = Modifier.testTag("v2.preview.stop")) { Text(appStringResource(R.string.v2_preview_stop)) }
+            }
+            Text(appStringResource(R.string.v2_preview_storage_unavailable), style = MaterialTheme.typography.bodySmall)
+            if (uiState.v2RejectedFrames > 0) Text(appStringResource(R.string.v2_rejected_frames_explanation), style = MaterialTheme.typography.bodySmall)
                 Text(
                     appStringResource(R.string.v2_preview_metrics, uiState.v2PreviewBlocks,
-                        uiState.v2SequenceGaps, uiState.v2ChartSkippedBlocks),
+                        uiState.v2SequenceGaps, uiState.v2ChartSkippedBlocks, uiState.v2RejectedFrames),
                     style = MaterialTheme.typography.bodySmall,
                 )
-            }
         }
     }
 }

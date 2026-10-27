@@ -109,6 +109,7 @@ data class DeviceUiState(
     val v2PreviewBlocks: Long = 0,
     val v2SequenceGaps: Long = 0,
     val v2ChartSkippedBlocks: Long = 0,
+    val v2RejectedFrames: Long = 0,
     val packetsReceived: Long = 0L,
     val packetsLost: Long = 0L,
     val packetsRejected: Long = 0L,
@@ -185,7 +186,7 @@ class DeviceUiStateHolder {
         uiState = uiState.copy(
             v2DiscoveryRequested = true, v2DiscoveryError = null, v2Ready = false,
             v2PreviewStage = V2PreviewStage.CONNECTING, v2LiveRunning = false,
-            v2PreviewBlocks = 0, v2SequenceGaps = 0, v2ChartSkippedBlocks = 0,
+            v2PreviewBlocks = 0, v2SequenceGaps = 0, v2ChartSkippedBlocks = 0, v2RejectedFrames = 0,
             v2StreamMask = 0, v2SelectedStreamMask = 0, v2Capabilities = 0, v2DeviceSessionMode = 0,
             packetsReceived = 0, packetsLost = 0, packetsRejected = 0, fragmentsReceived = 0, rawBytesReceived = 0,
             diagnosticEvents = emptyList(), connectionQuality = ConnectionQuality.IDLE, lastPacketIssue = null,
@@ -221,6 +222,10 @@ class DeviceUiStateHolder {
             v2PreviewStage = V2PreviewStage.READY,
             errorMessage = null,
         )
+    }
+
+    fun onV2FrameRejections(total: Long) {
+        if (uiState.v2DiscoveryRequested) uiState = uiState.copy(v2RejectedFrames = total)
     }
 
     fun onV2DeviceBusy(mode: Int) { uiState = uiState.copy(v2DeviceSessionMode = mode) }
@@ -404,7 +409,7 @@ class DeviceUiStateHolder {
             v2DiscoveryRequested = false, v2DiscoveryError = null, v2Ready = false,
             v2LiveRunning = false, v2PreviewStage = V2PreviewStage.NONE,
             v2StreamMask = 0, v2SelectedStreamMask = 0, v2Capabilities = 0, v2DeviceSessionMode = 0,
-            v2PreviewBlocks = 0, v2SequenceGaps = 0, v2ChartSkippedBlocks = 0,
+            v2PreviewBlocks = 0, v2SequenceGaps = 0, v2ChartSkippedBlocks = 0, v2RejectedFrames = 0,
             showCaptureUi = false,
             isReplayPreparing = false,
             isReplayRunning = false,

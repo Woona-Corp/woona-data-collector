@@ -54,10 +54,13 @@ class V2WireInteropTest {
             assertNull(row.getString("name"), WoonaV2Codec.decodeRaw(row.getString("rawHex").hex()))
             val decoder = WoonaV2StreamDecoder()
             assertTrue(decoder.append(row.getString("wireHex").hex()).isEmpty())
+            assertEquals(1L, decoder.rejectedFrames)
             assertEquals(1, decoder.append(good).size)
+            assertEquals(1L, decoder.rejectedFrames)
         }
         val decoder = WoonaV2StreamDecoder()
         assertTrue(decoder.append(ByteArray(WoonaV2Codec.MAX_RAW * 5) { 1 }).isEmpty())
+        assertEquals(1L, decoder.rejectedFrames) // One corrupt segment, not one error per discarded byte.
         assertEquals(1, decoder.append(byteArrayOf(0) + good).size)
     }
 

@@ -42,6 +42,7 @@ interface BleSessionListener {
     fun onCaptureReady()
     fun onV2DiscoveryStarted() = Unit
     fun onV2DeviceBusy(sessionMode: Int) = Unit
+    fun onV2FrameRejections(total: Long) = Unit
     /** Called only after explicit V2 discovery has completed successfully. */
     fun onV2DiscoveryReady(device: WoonaV2Discovery.Device) = Unit
     fun onV2LiveStarted(sessionId: Long, streamMask: Long) = Unit
@@ -98,6 +99,7 @@ class BleSessionManager(
     @Volatile private var v2Requested = false
     @Volatile private var v2ConnectionIntent = false
     private var v2Failed = false
+    private var v2ReportedRejectedFrames = 0L
     // Each armed timeout has its own identity; removing a Handler callback cannot
     // cancel a callback already dequeued on another thread.
     private var v2ResponseTimeoutRunnable: Runnable? = null
@@ -1077,6 +1079,11 @@ class BleSessionManager(
                         if (events.isNotEmpty()) cancelV2ResponseTimeout()
                         events.forEach(::dispatchV2Event)
                     }
+                    val rejected = (v2Discovery?.rejectedFrames ?: 0) + (v2LiveReceiver?.rejectedFrames ?: 0)
+                    if (rejected != v2ReportedRejectedFrames) {
+                        v2ReportedRejectedFrames = rejected
+                        listener.onV2FrameRejections(rejected)
+                    }
             }
             return
         }
@@ -1216,6 +1223,7 @@ class BleSessionManager(
     @Synchronized
     private fun resetV2OnDisconnect() {
         v2ConnectionIntent = false
+        v2ReportedRejectedFrames = 0
         cancelV2ResponseTimeout()
         cancelV2ChunkTimeout()
         v2GattWrites.reset()
