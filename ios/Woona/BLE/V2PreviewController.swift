@@ -211,32 +211,32 @@ final class V2PreviewWorker: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + 8, execute: writeDeadline)
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let maySend = queue.sync { [self] in
-                guard connected, generation == identity, timerToken == writeToken,
-                      requestID == (discoveryCommand ? discovery.pendingRequestID : live?.pendingRequestID ?? 0) else { return false }
-                if !foreground, !discoveryCommand, live?.phase == .waitStart,
-                   mostRecentlyWrittenRequestID != requestID {
+            let maySend = self.queue.sync { [self] in
+                guard self.connected, self.generation == identity, self.timerToken == writeToken,
+                      requestID == (discoveryCommand ? self.discovery.pendingRequestID : self.live?.pendingRequestID ?? 0) else { return false }
+                if !self.foreground, !discoveryCommand, self.live?.phase == .waitStart,
+                   self.mostRecentlyWrittenRequestID != requestID {
                     // This command has not reached CoreBluetooth yet. Cancel it
                     // before writing; reset retains monotonically allocated IDs.
-                    live?.reset(); cancelResponseTimer(); snapshot.stage = .stopped
-                    snapshot.reason = "Preview start was cancelled before transmission because the app left the foreground."
-                    publish(); return false
+                    self.live?.reset(); self.cancelResponseTimer(); self.snapshot.stage = .stopped
+                    self.snapshot.reason = "Preview start was cancelled before transmission because the app left the self.foreground."
+                    self.publish(); return false
                 }
-                mostRecentlyWrittenRequestID = requestID
+                self.mostRecentlyWrittenRequestID = requestID
                 return true
             }
             guard maySend else { return }
-            write(identity, wire) { [weak self] result in
+            self.write(identity, wire) { [weak self] result in
                 guard let self else { return }
-                queue.async { [self] in
-                    guard connected, generation == identity,
+                self.queue.async { [self] in
+                    guard self.connected, self.generation == identity,
                           requestID != 0,
-                          requestID == (discoveryCommand ? discovery.pendingRequestID : live?.pendingRequestID ?? 0) else { return }
-                    guard timerToken == writeToken else { return }
-                    cancelResponseTimer()
+                          requestID == (discoveryCommand ? self.discovery.pendingRequestID : self.live?.pendingRequestID ?? 0) else { return }
+                    guard self.timerToken == writeToken else { return }
+                    self.cancelResponseTimer()
                     switch result {
-                    case .failure(let error): fail(error.localizedDescription); publish()
-                    case .success: armResponseTimeout(requestID: requestID, discoveryCommand: discoveryCommand)
+                    case .failure(let error): self.fail(error.localizedDescription); self.publish()
+                    case .success: self.armResponseTimeout(requestID: requestID, discoveryCommand: discoveryCommand)
                     }
                 }
             }
@@ -283,7 +283,7 @@ final class V2PreviewWorker: @unchecked Sendable {
         Task { @MainActor [weak self] in
             guard let self else { return }
             update(identity, value)
-            queue.async { [self] in deliveryPending = false }
+            self.queue.async { [self] in self.deliveryPending = false }
         }
     }
 
