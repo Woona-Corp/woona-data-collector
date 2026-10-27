@@ -11,6 +11,28 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
     }
 
+    func testV2PickerIsExplicitAndReturnsToRecordAfterClosingWithoutConnecting() {
+        app.buttons["tab.session"].tap()
+        app.buttons["devices.newConnection"].tap()
+        let purpose = app.segmentedControls["devices.purpose"]
+        XCTAssertTrue(purpose.waitForExistence(timeout: 5))
+        XCTAssertTrue(purpose.buttons["Record"].isSelected)
+        XCTAssertTrue(app.buttons["devices.replay"].exists)
+        purpose.buttons["V2 preview"].tap()
+        XCTAssertTrue(purpose.buttons["V2 preview"].isSelected)
+        XCTAssertTrue(app.staticTexts["A sensor test stream. Sessions and video are not saved or uploaded."].exists)
+        XCTAssertTrue(app.staticTexts["Connect only to an idle sensor. With the current firmware, a Bluetooth disconnect can stop an SD-card recording."].exists)
+        XCTAssertFalse(app.buttons["devices.replay"].exists)
+        XCTAssertFalse(app.buttons["Start session"].exists)
+        app.buttons["Close"].tap()
+        app.buttons["devices.newConnection"].tap()
+        XCTAssertTrue(purpose.waitForExistence(timeout: 5))
+        XCTAssertTrue(purpose.buttons["Record"].isSelected)
+        XCTAssertTrue(app.buttons["devices.replay"].exists)
+        XCTAssertFalse(app.staticTexts["A sensor test stream. Sessions and video are not saved or uploaded."].exists)
+        app.buttons["Close"].tap()
+    }
+
     func testHistoryExplainsCaptureFailureSeparatelyAndRemovalCanBeCancelled() {
         app.terminate()
         app.launchArguments += ["--ui-testing-history"]
