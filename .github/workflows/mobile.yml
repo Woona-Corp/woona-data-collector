@@ -12,6 +12,10 @@ on:
         type: choice
         options: [all, android, ios, server]
         default: all
+      android_instrumentation:
+        description: Run Android SQLite, Compose and fake-BLE instrumentation tests
+        type: boolean
+        default: false
       sanitizer:
         description: Optional iOS unit-test diagnostics (Simulator only)
         type: choice
@@ -37,8 +41,21 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
       - name: Install Android SDK
         run: ./android/tools/setup-android-sdk.sh
+      - name: Enable KVM for Android instrumentation
+        if: inputs.android_instrumentation == true
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - name: Test, lint, and build Android
-        run: ./android/tools/check.sh fast
+        env:
+          ANDROID_INSTRUMENTATION: ${{ inputs.android_instrumentation }}
+        run: |
+          if [[ "$ANDROID_INSTRUMENTATION" == 'true' ]]; then
+            ./android/tools/check.sh full
+          else
+            ./android/tools/check.sh fast
+          fi
       - name: Prepare Android APK for release tag
         if: startsWith(github.ref, 'refs/tags/android-v')
         env:

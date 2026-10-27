@@ -19,6 +19,29 @@ import java.util.zip.ZipFile
 
 class DeviceFeatureControllerTest {
     @Test
+    fun previewConnectNeverStartsPersistentCaptureAndDisconnectsWhenBackgrounded() {
+        val ble = FakeBleSessionController()
+        val capture = FakePacketCaptureController()
+        val state = DeviceUiStateHolder()
+        val controller = DeviceFeatureController(ble, capture, FakeFileShareIntentFactory(), uiStateHolder = state)
+        controller.onV2PreviewConnectRequested("AA:BB")
+        assertEquals("AA:BB", ble.connectedAddress)
+        assertEquals(1, ble.previewConnectCalls)
+        assertTrue(controller.isV2PreviewConnection())
+        assertFalse(controller.isCaptureActive())
+        assertFalse(capture.resetCalled)
+        assertFalse(capture.finishCaptureCalled)
+        controller.onTransportDiagnostic("preview diagnostic must not be appended to an old file")
+        assertTrue(capture.recordedDiagnostics.isEmpty())
+        controller.startSynchronizedSession()
+        assertFalse(capture.resetCalled)
+        controller.onPause()
+        assertEquals(1, ble.disconnectCalls)
+        assertFalse(controller.isV2PreviewConnection())
+        assertFalse(capture.finishCaptureCalled)
+    }
+
+    @Test
     fun operationFailureKeepsExceptionDetailsWithoutStoppingCapture() {
         val ble = FakeBleSessionController()
         val capture = FakePacketCaptureController()
@@ -819,6 +842,7 @@ private fun sensorBlock(
 }
 
 private class FakeBleSessionController : BleSessionController {
+    var previewConnectCalls = 0
     var startScanningCalls = 0
     var stopScanningCalls = 0
     var disconnectCalls = 0
@@ -843,6 +867,11 @@ private class FakeBleSessionController : BleSessionController {
     }
 
     override fun connect(address: String) {
+        connectedAddress = address
+    }
+
+    override fun connectForV2Preview(address: String) {
+        previewConnectCalls++
         connectedAddress = address
     }
 

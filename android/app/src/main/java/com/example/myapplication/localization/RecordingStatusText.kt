@@ -33,6 +33,10 @@ private val serverReasons = mapOf(
     "invalid_account_identifier" to ("Недопустимый идентификатор аккаунта" to "The account identifier is invalid"),
     "invalid_bearer_token" to ("Токен устройства отсутствует или отклонён сервером. Переподключите сервер в настройках" to "The device token is missing or rejected. Reconnect the server in Settings"),
     "missing_bearer_token" to ("Токен устройства отсутствует или отклонён сервером. Переподключите сервер в настройках" to "The device token is missing or rejected. Reconnect the server in Settings"),
+    "hash_mismatch" to ("Контрольная сумма файла не совпала: целостность загрузки не подтверждена" to "The file checksum does not match: upload integrity is not verified"),
+    "storage_space_low" to ("На сервере недостаточно свободного места для загрузки. Локальные файлы и принятые сервером байты сохранены. Повторите отправку после освобождения места на сервере." to "The server has insufficient free space for this upload. Local files and accepted server bytes are preserved. Retry after server storage is available."),
+    "storage_full" to ("Хранилище сервера заполнено. Передача остановлена; локальные файлы и подтверждённая позиция сохранены. Повторите после освобождения места на сервере." to "Server storage is full. Transfer stopped; local files and the confirmed offset are preserved. Retry after server storage is available."),
+    "capture_recovery_requires_review" to ("Запись прервалась при закрытии приложения. Не удалось подтвердить привязку времени или файлов к сессии; автоматическая отправка приостановлена. Создайте полный архив для проверки исходных данных." to "The recording was interrupted when the app closed. File ownership or timing could not be verified; automatic upload is paused. Create a complete archive to review the original data."),
     "artifact_hash_mismatch" to ("Контрольная сумма файла не совпала: целостность загрузки не подтверждена" to "The file checksum does not match: upload integrity is not verified"),
     "artifact_not_available" to ("Не все обязательные файлы полностью загружены на сервер" to "Required files are not all fully uploaded to the server"),
     "artifacts_incomplete" to ("Не все обязательные файлы полностью загружены на сервер" to "Required files are not all fully uploaded to the server"),
@@ -147,6 +151,7 @@ internal fun recordingCaptureText(status: String, code: String?, message: String
         "camera_failed" -> errorText(language, "сбой камеры; видео могло записаться не полностью", "camera failure; the video may be incomplete")
         "queue_overflow" -> errorText(language, "переполнена очередь обработки данных датчика", "the sensor data processing queue overflowed")
         "storage_error", "storage_failed" -> errorText(language, "не удалось сохранить файлы записи", "recording files could not be saved")
+        "process_interrupted" -> errorText(language, "приложение завершилось до сохранения сессии; время окончания не подтверждено", "the app closed before session finalization; the end time is not verified")
         "no_sensor_data" -> errorText(language, "не получено ни одного корректного пакета датчика", "no valid sensor packets were received")
         null -> message?.takeIf { it.isNotBlank() }
         else -> listOfNotNull(code, message?.takeIf { it.isNotBlank() }).joinToString(": ")

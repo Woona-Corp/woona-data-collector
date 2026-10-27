@@ -85,6 +85,7 @@ class DeviceFeatureController(
     private var weakSinceMillis: Long? = null
     private var lastAlarmQuality: ConnectionQuality? = null
     private var manualDisconnectPending = false
+    @Volatile private var v2PreviewConnection = false
     private var pendingFinalizationStatus: RecordingStatus? = null
     private val finalizationRetryRunnable = Runnable {
         val status = pendingFinalizationStatus
@@ -110,6 +111,7 @@ class DeviceFeatureController(
     fun isVideoRequested(): Boolean = currentRecording?.videoRequested == true
 
     fun isCaptureActive(): Boolean = !recordingFinalized || recordingFinalizing
+    fun isV2PreviewConnection(): Boolean = v2PreviewConnection
 
     fun setOnRecordingChanged(listener: () -> Unit) {
         recordingChangedListener = listener
@@ -136,6 +138,7 @@ class DeviceFeatureController(
     }
 
     fun onConnectRequested(address: String) {
+        v2PreviewConnection = false
         manualDisconnectPending = false
         packetReplayController?.stop()
         pendingTransportDiagnostics.clear()
@@ -149,10 +152,26 @@ class DeviceFeatureController(
         bleSessionController.connect(address)
     }
 
+    fun onV2PreviewConnectRequested(address: String) {
+        if (isCaptureActive() || uiState.isReplayRunning || uiState.isReplayPreparing) {
+            uiStateHolder.showError(appTextResolver.getString(R.string.v2_finish_capture_first))
+            return
+        }
+        manualDisconnectPending = false
+        packetReplayController?.stop()
+        pendingTransportDiagnostics.clear()
+        awaitingCaptureReady = false
+        packetCaptureController.stopCapture()
+        v2PreviewConnection = true
+        uiStateHolder.onV2PreviewConnecting()
+        bleSessionController.stopScanning()
+        bleSessionController.connectForV2Preview(address)
+    }
+
     /** V2 is opt-in because HELLO permanently ends Legacy streaming for this BLE connection. */
     fun onV2DiscoveryRequested() {
-        if (synchronizedCaptureStarted) {
-            uiStateHolder.showError("Stop the current Legacy recording before switching to V2")
+        if (!v2PreviewConnection || isCaptureActive()) {
+            uiStateHolder.showError(appTextResolver.getString(R.string.v2_finish_capture_first))
             return
         }
         if (bleSessionController.beginV2Discovery()) {
@@ -164,27 +183,22 @@ class DeviceFeatureController(
 
     fun onV2StreamToggled(streamId: Int) = uiStateHolder.toggleV2Stream(streamId)
 
-    fun onV2RecordingTargetSelected(target: V2RecordingTarget) =
-        uiStateHolder.selectV2RecordingTarget(target)
-
-    /** Starts a validated V2 LIVE preview via the normal Start session UI. */
+    /** Starts a diagnostic preview; no recording row, file writer or camera is started. */
     fun onV2LiveStartRequested() {
-        if (!uiState.v2Ready || uiState.v2LiveRunning) return
-        if (uiState.v2RecordingTarget == V2RecordingTarget.STORAGE) {
-            uiStateHolder.showError(
-                "V2 storage acquisition and upload are not connected yet; select LIVE for this build"
-            )
-            return
-        }
+        if (!v2PreviewConnection || isCaptureActive() || !uiState.v2Ready ||
+            uiState.v2PreviewStage !in setOf(V2PreviewStage.READY, V2PreviewStage.STOPPED)) return
         val selectedMask = uiState.v2SelectedStreamMask and uiState.v2StreamMask
+        uiStateHolder.onV2StartRequested()
         if (selectedMask == 0L || !bleSessionController.startV2Live(selectedMask)) {
-            uiStateHolder.showError("Cannot start V2 LIVE: check selected streams and BLE state")
+            uiStateHolder.onV2DiscoveryFailed("Cannot start V2 LIVE: check selected streams and BLE state")
         }
     }
 
     fun onV2LiveStopRequested() {
+        if (!v2PreviewConnection || uiState.v2PreviewStage != V2PreviewStage.RUNNING) return
+        uiStateHolder.onV2StopRequested()
         if (!bleSessionController.stopV2Live()) {
-            uiStateHolder.showError("Cannot stop V2 preview: session is not running")
+            uiStateHolder.onV2DiscoveryFailed("Cannot stop V2 preview: session is not running")
         }
     }
 
@@ -227,6 +241,8 @@ class DeviceFeatureController(
 
     fun onDisconnectRequested() {
         manualDisconnectPending = true
+        if (v2PreviewConnection) bleSessionController.stopV2Live()
+        v2PreviewConnection = false
         stopLinkMonitor()
         packetReplayController?.stop()
         pendingTransportDiagnostics.clear()
@@ -361,11 +377,23 @@ class DeviceFeatureController(
     }
 
     fun onPause() {
+        if (v2PreviewConnection) {
+            onDisconnectRequested()
+            return
+        }
         // Screen/background lifecycle does not own an active capture. The
         // foreground capture service and the explicit Stop action own it.
     }
 
     fun onBleStateChanged(state: BleSessionState) {
+        if (v2PreviewConnection) {
+            uiStateHolder.onSessionStateChanged(state)
+            if (state == BleSessionState.FAILED) {
+                uiStateHolder.onV2DiscoveryFailed(appTextResolver.getString(R.string.v2_connection_failed))
+            }
+            if (state == BleSessionState.DISCONNECTED) v2PreviewConnection = false
+            return
+        }
         val unexpectedDisconnect =
             state in setOf(BleSessionState.FAILED, BleSessionState.DISCONNECTED) &&
                 synchronizedCaptureStarted &&
@@ -549,6 +577,12 @@ class DeviceFeatureController(
     }
 
     fun onCaptureReady() {
+        if (v2PreviewConnection) {
+            // Compatibility for injected transports: the real GATT implementation
+            // starts negotiation itself after the notification descriptor ACK.
+            if (!uiState.v2Ready) onV2DiscoveryRequested()
+            return
+        }
         if (woonaDatabase != null && recordingFinalized) {
             awaitingCaptureReady = false
             return
@@ -650,6 +684,7 @@ class DeviceFeatureController(
     }
 
     fun onTransportDiagnostic(message: String) {
+        if (v2PreviewConnection) return // Never append preview diagnostics to an old recording.
         if (awaitingCaptureReady) {
             pendingTransportDiagnostics += message
             return
@@ -663,6 +698,11 @@ class DeviceFeatureController(
 
     fun onSessionError(message: String, throwable: Throwable? = null) {
         val details = if (throwable == null) message else "$message: $throwable"
+        if (v2PreviewConnection) {
+            awaitingCaptureReady = false
+            uiStateHolder.onV2DiscoveryFailed(details)
+            return
+        }
         val disconnectedQuality = if (synchronizedCaptureStarted && !manualDisconnectPending) {
             connectionQualityTracker.disconnect(monotonicMillis())
         } else {

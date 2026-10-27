@@ -359,6 +359,16 @@ class MainActivity : ComponentActivity() {
                         onServerCheck = ::checkServerConnection,
                         onDisconnect = ::stopSession,
                         onV2Discovery = deviceFeatureController::onV2DiscoveryRequested,
+                        onV2PreviewConnect = ::connectV2Preview,
+                        onV2PreviewScan = {
+                            if (!accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive()) {
+                                deviceFeatureController.onStartScanRequested(
+                                    hasPermissions = ::hasBlePermissions,
+                                    requestPermissions = { requestPermissionLauncher.launch(blePermissions) },
+                                )
+                            }
+                        },
+                        onV2StreamToggle = deviceFeatureController::onV2StreamToggled,
                         onV2LiveStart = deviceFeatureController::onV2LiveStartRequested,
                         onV2LiveStop = deviceFeatureController::onV2LiveStopRequested,
                         onSensorSelect = deviceFeatureController::onSensorSelected,
@@ -658,15 +668,7 @@ class MainActivity : ComponentActivity() {
     private fun toggleCapture() {
         val state = deviceFeatureController.uiState
         if (state.v2DiscoveryRequested) {
-            if (!state.v2Ready) {
-                deviceFeatureController.showErrorOnMainThread(
-                    "V2 is not ready: complete HELLO / STREAMS / STATUS first"
-                )
-            } else if (state.v2LiveRunning) {
-                deviceFeatureController.onV2LiveStopRequested()
-            } else {
-                deviceFeatureController.onV2LiveStartRequested()
-            }
+            deviceFeatureController.showErrorOnMainThread(getString(R.string.v2_ordinary_recording_unavailable))
             return
         }
         when (state.videoState) {
@@ -726,8 +728,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun connectV2Preview(address: String) {
+        if (accountBusy || isServerRestoreInProgress || deviceFeatureController.isCaptureActive()) return
+        pendingLiveAddress = null
+        isSessionQuestionnaireVisible = false
+        deviceFeatureController.onV2PreviewConnectRequested(address)
+    }
+
     private fun startLiveRecording(address: String, questionnaire: SessionQuestionnaire) {
         check(!accountBusy) { "Дождитесь применения аккаунта / Wait for the account operation" }
+        check(!deviceFeatureController.isV2PreviewConnection()) { getString(R.string.v2_ordinary_recording_unavailable) }
         val profileId = requireNotNull(selectedProfileId) { "Выберите карточку животного / Select an animal profile" }
         val recording = woonaDatabase.beginRecording(
             profileId = profileId,

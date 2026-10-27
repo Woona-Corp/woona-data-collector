@@ -78,4 +78,12 @@ class RecordingStatusTextTest {
         assertTrue(recordingSourceText("future_source", AppLanguage.RUSSIAN).contains("неизвестен (future_source)"))
     }
 
+    @Test fun recoveryAndStorageErrorsExplainPreservedDataAndNextStep() {
+        assertEquals(recordingUploadErrorText("artifact_hash_mismatch", ru), recordingUploadErrorText("hash_mismatch", ru))
+        assertTrue(recordingUploadErrorText("storage_full", en).contains("preserved"))
+        assertTrue(recordingUploadErrorText("storage_space_low", ru).contains("после освобождения"))
+        assertTrue(recordingUploadErrorText("capture_recovery_requires_review", en).contains("automatic upload is paused"))
+        assertTrue(recordingCaptureText("interrupted", "process_interrupted", null, en).contains("end time is not verified"))
+    }
+
 }

@@ -148,25 +148,49 @@ fun createDeviceFeatureController(
     val v2PreviewLock = Any()
     val v2PreviewEvents = ArrayDeque<WoonaV2LiveSession.Event.Samples>()
     var v2PreviewScheduled = false
+    var v2ReceivedPending = 0
+    var v2GapsPending = 0
+    var v2DroppedPending = 0
     val flushV2Preview = Runnable {
-        val batch = synchronized(v2PreviewLock) {
+        val pending = synchronized(v2PreviewLock) {
             v2PreviewScheduled = false
             val events = v2PreviewEvents.toList()
             v2PreviewEvents.clear()
-            events
+            val counters = intArrayOf(v2ReceivedPending, v2GapsPending, v2DroppedPending)
+            v2ReceivedPending = 0; v2GapsPending = 0; v2DroppedPending = 0
+            events to counters
         }
+        val (batch, counters) = pending
         if (batch.isNotEmpty()) {
             val charts = linkedMapOf<ChartStreamKey, MutableList<ChartPoint>>()
+            var unplottable = 0
             batch.forEach { event ->
-                WoonaV2ChartMapper.map(event).forEach { (key, points) ->
+                val mapped = WoonaV2ChartMapper.map(event)
+                if (mapped.isEmpty()) unplottable++
+                mapped.forEach { (key, points) ->
                     charts.getOrPut(key) { mutableListOf() }.addAll(points)
                 }
             }
             uiStateHolder.onV2LivePreview(
                 samplesByStream = charts,
-                receivedBlocks = batch.size,
-                sequenceGaps = batch.count { it.sequenceGap },
+                receivedBlocks = counters[0],
+                sequenceGaps = counters[1],
+                chartSkippedBlocks = counters[2] + unplottable,
             )
+        }
+    }
+    fun resetV2PreviewQueue() {
+        mainHandler.removeCallbacks(flushV2Preview)
+        synchronized(v2PreviewLock) {
+            v2PreviewEvents.clear(); v2PreviewScheduled = false
+            v2ReceivedPending = 0; v2GapsPending = 0; v2DroppedPending = 0
+        }
+    }
+    fun v2OnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (deviceFeatureController?.isV2PreviewConnection() == true) action()
+        } else mainHandler.post {
+            if (deviceFeatureController?.isV2PreviewConnection() == true) action()
         }
     }
     val listener = object : BleSessionListener {
@@ -177,6 +201,7 @@ fun createDeviceFeatureController(
             }
 
             override fun onPacketReceived(packetFragment: ByteArray) {
+                if (deviceFeatureController?.isV2PreviewConnection() == true) return
                 submitPacketFragment(
                     packetFragment,
                     System.currentTimeMillis(),
@@ -189,6 +214,7 @@ fun createDeviceFeatureController(
                 receivedAtWallClockMillis: Long,
                 receivedAtMonotonicNs: Long,
             ) {
+                if (deviceFeatureController?.isV2PreviewConnection() == true) return
                 submitPacketFragment(packetFragment, receivedAtWallClockMillis, receivedAtMonotonicNs)
             }
 
@@ -205,21 +231,35 @@ fun createDeviceFeatureController(
             }
 
             override fun onV2DiscoveryReady(device: WoonaV2Discovery.Device) {
-                mainHandler.post {
+                v2OnMain {
                     uiStateHolder.onV2DiscoveryReady(
-                        device.streams.streamMask, device.hello.capabilities
+                        device.streams.streamMask, device.hello.capabilities, device.status.sessionMode,
                     )
                 }
             }
 
+            override fun onV2DiscoveryStarted() {
+                resetV2PreviewQueue()
+                v2OnMain {
+                    uiStateHolder.onV2DiscoveryRequested()
+                }
+            }
+
             override fun onV2LiveStarted(sessionId: Long, streamMask: Long) {
-                synchronized(v2PreviewLock) { v2PreviewEvents.clear() }
-                mainHandler.post { uiStateHolder.onV2LiveStarted() }
+                resetV2PreviewQueue()
+                v2OnMain {
+                    uiStateHolder.onV2LiveStarted()
+                }
             }
 
             override fun onV2LiveSamples(event: WoonaV2LiveSession.Event.Samples) {
                 val schedulePreview = synchronized(v2PreviewLock) {
-                    if (v2PreviewEvents.size >= 64) v2PreviewEvents.removeFirst()
+                    v2ReceivedPending++
+                    if (event.sequenceGap) v2GapsPending++
+                    if (v2PreviewEvents.size >= 64) {
+                        v2PreviewEvents.removeFirst()
+                        v2DroppedPending++
+                    }
                     v2PreviewEvents.addLast(event)
                     if (v2PreviewScheduled) false else {
                         v2PreviewScheduled = true
@@ -230,11 +270,12 @@ fun createDeviceFeatureController(
             }
 
             override fun onV2LiveStopped(sessionId: Long) {
-                mainHandler.post { uiStateHolder.onV2LiveStopped() }
+                v2OnMain { uiStateHolder.onV2LiveStopped() }
             }
 
             override fun onStateChanged(state: BleSessionState) {
                 mainHandler.post {
+                    if (state in setOf(BleSessionState.DISCONNECTED, BleSessionState.FAILED)) resetV2PreviewQueue()
                     deviceFeatureController?.onBleStateChanged(state)
                         ?: uiStateHolder.onSessionStateChanged(state)
                 }

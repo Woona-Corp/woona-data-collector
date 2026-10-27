@@ -509,9 +509,9 @@ internal fun recordingDisplayTime(value: String, zoneId: ZoneId = ZoneId.systemD
 internal fun recordingDataLabels(recording: Recording, language: AppLanguage): List<String> = buildList {
     val names = recording.artifacts.map { it.fileName }.toSet()
     val types = recording.artifacts.map { it.type.value }.toSet()
-    if ("ecg" in types) add("ЭКГ")
-    if ("heart_rate" in types) add("ЧСС")
-    if ("rr" in types) add("Интервалы между ударами")
+    if ("ecg" in types) add(tr(language, "ECG", "ЭКГ"))
+    if ("heart_rate" in types) add(tr(language, "Heart rate", "ЧСС"))
+    if ("rr" in types) add(tr(language, "Beat intervals", "Интервалы между ударами"))
     if (names.any { it in setOf("packets.bin", "raw_fragments.binlog", "channel.csv") }) {
         add(tr(language, "collar", "ошейник"))
     }

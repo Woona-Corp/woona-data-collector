@@ -103,6 +103,9 @@ fun DeviceOverviewScreen(
     onConnect: (String) -> Unit,
     onDisconnect: () -> Unit,
     onV2Discovery: () -> Unit = {},
+    onV2PreviewConnect: (String) -> Unit = {},
+    onV2PreviewScan: () -> Unit = {},
+    onV2StreamToggle: (Int) -> Unit = {},
     onV2LiveStart: () -> Unit = {},
     onV2LiveStop: () -> Unit = {},
     showReplayAction: Boolean,
@@ -136,7 +139,7 @@ fun DeviceOverviewScreen(
             }
         }
 
-        if (shouldShowSessionSummary(uiState)) {
+        if (shouldShowSessionSummary(uiState) && !uiState.v2DiscoveryRequested) {
             item {
                 SessionSummaryCard(uiState = uiState, compact = false)
             }
@@ -148,17 +151,23 @@ fun DeviceOverviewScreen(
                     uiState = uiState,
                     onStartScan = onStartScan,
                     onConnect = onConnect,
+                    onV2PreviewConnect = onV2PreviewConnect,
+                    onV2PreviewScan = onV2PreviewScan,
                     showReplayAction = showReplayAction,
                     onReplayRequest = onReplayRequest,
                 )
             }
         } else {
             item {
-                DisconnectCard(onDisconnect = onDisconnect)
+                DisconnectCard(onDisconnect = onDisconnect, warnAboutSd = uiState.v2DiscoveryRequested)
             }
         }
 
-        // V2 controls live by the main Start session action in ProfilesOverview.
+        if (uiState.v2DiscoveryRequested) {
+            item {
+                V2LivePreviewCard(uiState, onV2LiveStart, onV2LiveStop, onV2StreamToggle)
+            }
+        }
 
         item {
             EventLogSection(uiState = uiState)
@@ -170,41 +179,72 @@ fun DeviceOverviewScreen(
 @Composable
 private fun V2LivePreviewCard(
     uiState: DeviceUiState,
-    onDiscovery: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onStreamToggle: (Int) -> Unit,
 ) {
     Card(colors = appCardColors()) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Woona V2 (diagnostic preview)", style = MaterialTheme.typography.titleSmall)
+            Text(appStringResource(R.string.v2_preview_title), style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.testTag("v2.preview.title"))
             Text(
-                "V2 preview is not yet saved or uploaded. Switching to V2 ends Legacy output until disconnect.",
+                appStringResource(R.string.v2_preview_intro),
                 style = MaterialTheme.typography.bodySmall,
             )
+            Text(appStringResource(R.string.v2_preview_foreground), style = MaterialTheme.typography.bodySmall)
+            val stageLabel = when (uiState.v2PreviewStage) {
+                V2PreviewStage.NONE, V2PreviewStage.CONNECTING -> R.string.v2_preview_connecting
+                V2PreviewStage.CHECKING -> R.string.v2_preview_checking
+                V2PreviewStage.READY -> R.string.v2_preview_ready
+                V2PreviewStage.STARTING -> R.string.v2_preview_starting
+                V2PreviewStage.RUNNING -> R.string.v2_preview_running
+                V2PreviewStage.STOPPING -> R.string.v2_preview_stopping
+                V2PreviewStage.STOPPED -> R.string.v2_preview_stopped
+                V2PreviewStage.FAILED -> R.string.v2_connection_failed
+            }
+            Text(appStringResource(stageLabel), modifier = Modifier.testTag("v2.preview.status"))
             when {
-                !uiState.v2DiscoveryRequested -> Button(onClick = onDiscovery) {
-                    Text("Switch to V2")
-                }
                 uiState.v2DiscoveryError != null -> {
+                    androidx.compose.foundation.text.selection.SelectionContainer {
                     Text(uiState.v2DiscoveryError, color = MaterialTheme.colorScheme.error)
-                    Text("Disconnect, reset the F405 test device, then reconnect to retry.",
-                        style = MaterialTheme.typography.bodySmall)
+                    }
                 }
-                !uiState.v2Ready -> Text("Negotiating HELLO / STREAMS / STATUS…")
-                uiState.v2LiveRunning -> OutlinedButton(onClick = onStop) {
-                    Text("Stop V2 preview")
+                uiState.v2PreviewStage == V2PreviewStage.RUNNING -> OutlinedButton(onClick = onStop,
+                    modifier = Modifier.testTag("v2.preview.stop")) {
+                    Text(appStringResource(R.string.v2_preview_stop))
                 }
-                else -> Button(onClick = onStart, enabled = uiState.v2StreamMask and 3L != 0L) {
-                    Text("Start V2 IMU preview")
+                uiState.v2PreviewStage in setOf(V2PreviewStage.READY, V2PreviewStage.STOPPED) -> {
+                    if (uiState.v2Capabilities and 1L == 0L) {
+                        Text(appStringResource(R.string.v2_preview_no_live))
+                    } else Button(onClick = onStart, enabled = uiState.v2SelectedStreamMask != 0L,
+                        modifier = Modifier.testTag("v2.preview.start")) {
+                        Text(appStringResource(R.string.v2_preview_start))
+                    }
                 }
             }
             if (uiState.v2Ready) {
+                Text(appStringResource(R.string.v2_preview_streams), style = MaterialTheme.typography.labelMedium)
+                val streams = listOf(R.string.v2_stream_accel, R.string.v2_stream_gyro,
+                    R.string.v2_stream_contact, R.string.v2_stream_ambient, R.string.v2_stream_piezo,
+                    R.string.v2_stream_temp1, R.string.v2_stream_temp2)
+                streams.forEachIndexed { index, label ->
+                    val id = index + 1
+                    if (uiState.v2StreamMask and (1L shl index) != 0L) Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.Checkbox(
+                            checked = uiState.v2SelectedStreamMask and (1L shl index) != 0L,
+                            onCheckedChange = { onStreamToggle(id) },
+                            enabled = uiState.v2PreviewStage in setOf(V2PreviewStage.READY, V2PreviewStage.STOPPED),
+                            modifier = Modifier.testTag("v2.preview.stream.$id"),
+                        )
+                        Text(appStringResource(label))
+                    }
+                }
                 Text(
-                    "V2 streams: 0x${uiState.v2StreamMask.toString(16)}  ·  " +
-                        "blocks: ${uiState.v2PreviewBlocks}  ·  gaps: ${uiState.v2SequenceGaps}",
+                    appStringResource(R.string.v2_preview_metrics, uiState.v2PreviewBlocks,
+                        uiState.v2SequenceGaps, uiState.v2ChartSkippedBlocks),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -512,19 +552,39 @@ private fun DeviceDiscoverySection(
     uiState: DeviceUiState,
     onStartScan: () -> Unit,
     onConnect: (String) -> Unit,
+    onV2PreviewConnect: (String) -> Unit,
+    onV2PreviewScan: () -> Unit,
     showReplayAction: Boolean,
     onReplayRequest: () -> Unit,
 ) {
     var showConnectionDialog by rememberSaveable { mutableStateOf(false) }
-    OutlinedButton(onClick = { showConnectionDialog = true }, modifier = Modifier.fillMaxWidth()) {
+    var preview by rememberSaveable { mutableStateOf(false) }
+    OutlinedButton(onClick = { preview = false; showConnectionDialog = true }, modifier = Modifier.fillMaxWidth()) {
         Text(appStringResource(R.string.new_connection))
     }
     if (showConnectionDialog) {
         androidx.compose.ui.window.Dialog(onDismissRequest = { showConnectionDialog = false }) {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Surface {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(selected = !preview, onClick = { preview = false },
+                                label = { Text(appStringResource(R.string.v2_recording_purpose)) },
+                                modifier = Modifier.testTag("ble.purpose.recording"))
+                            FilterChip(selected = preview, onClick = { preview = true },
+                                label = { Text(appStringResource(R.string.v2_preview_title)) },
+                                modifier = Modifier.testTag("ble.purpose.v2"))
+                        }
+                        if (preview) {
+                            Text(appStringResource(R.string.v2_preview_intro), style = MaterialTheme.typography.bodySmall)
+                            Text(appStringResource(R.string.v2_sd_disconnect_warning), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
                 DeviceDiscoveryDialogContent(
-                    uiState, onStartScan,
-                    onConnect = { address -> showConnectionDialog = false; onConnect(address) },
+                    uiState, if (preview) onV2PreviewScan else onStartScan,
+                    onConnect = { address -> showConnectionDialog = false; if (preview) onV2PreviewConnect(address) else onConnect(address) },
                     showReplayAction = showReplayAction,
                     onReplayRequest = { showConnectionDialog = false; onReplayRequest() },
                 )
@@ -630,7 +690,17 @@ private fun DeviceDiscoveryDialogContent(
 }
 
 @Composable
-private fun DisconnectCard(onDisconnect: () -> Unit) {
+private fun DisconnectCard(onDisconnect: () -> Unit, warnAboutSd: Boolean = false) {
+    var confirmDisconnect by rememberSaveable { mutableStateOf(false) }
+    if (confirmDisconnect) androidx.compose.material3.AlertDialog(
+        onDismissRequest = { confirmDisconnect = false },
+        title = { Text(appStringResource(R.string.action_disconnect)) },
+        text = { Text(appStringResource(R.string.v2_sd_disconnect_confirm)) },
+        confirmButton = { TextButton(onClick = { confirmDisconnect = false; onDisconnect() }) {
+            Text(appStringResource(R.string.action_disconnect))
+        } },
+        dismissButton = { TextButton(onClick = { confirmDisconnect = false }) { Text(appStringResource(android.R.string.cancel)) } },
+    )
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = appCardColors(),
@@ -643,7 +713,7 @@ private fun DisconnectCard(onDisconnect: () -> Unit) {
             Text(appStringResource(R.string.connection_title), style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(6.dp))
             OutlinedButton(
-                onClick = onDisconnect,
+                onClick = { if (warnAboutSd) confirmDisconnect = true else onDisconnect() },
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(appStringResource(R.string.action_disconnect))
@@ -1495,7 +1565,7 @@ private fun ChartFullscreenControls(
             ) {
                 val sensorItems = if (uiState.v2Ready) {
                     listOf("AXL" to 2, "GIR" to 3, "MIC" to 4,
-                        "AMB" to 5, "PZ" to 6).filter { (_, type) ->
+                        "AMB" to 5, "PZ" to 6, "T1" to 7, "T2" to 8).filter { (_, type) ->
                         uiState.v2StreamMask and (1L shl (type - 2)) != 0L
                     }
                 } else listOf("T" to 1, "AXL" to 2, "GIR" to 3, "MIC" to 4)
@@ -1816,7 +1886,7 @@ private fun SensorSelector(
             ) {
                 val sensors = if (uiState.v2Ready) {
                     listOf("AXL" to 2, "GIR" to 3, "MIC" to 4,
-                        "AMB" to 5, "PZ" to 6).filter { (_, type) ->
+                        "AMB" to 5, "PZ" to 6, "T1" to 7, "T2" to 8).filter { (_, type) ->
                         uiState.v2StreamMask and (1L shl (type - 2)) != 0L
                     }
                 } else listOf("T" to 1, "AXL" to 2, "GIR" to 3, "MIC" to 4)
@@ -2356,6 +2426,9 @@ object DeviceScreenEntryPoint {
         onConnect: (String) -> Unit,
         onDisconnect: () -> Unit,
         onV2Discovery: () -> Unit = {},
+        onV2PreviewConnect: (String) -> Unit = {},
+        onV2PreviewScan: () -> Unit = {},
+        onV2StreamToggle: (Int) -> Unit = {},
         onV2LiveStart: () -> Unit = {},
         onV2LiveStop: () -> Unit = {},
         showReplayAction: Boolean,
@@ -2369,6 +2442,9 @@ object DeviceScreenEntryPoint {
             onConnect = onConnect,
             onDisconnect = onDisconnect,
             onV2Discovery = onV2Discovery,
+            onV2PreviewConnect = onV2PreviewConnect,
+            onV2PreviewScan = onV2PreviewScan,
+            onV2StreamToggle = onV2StreamToggle,
             onV2LiveStart = onV2LiveStart,
             onV2LiveStop = onV2LiveStop,
             showReplayAction = showReplayAction,

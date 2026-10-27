@@ -71,8 +71,7 @@ enum class ExportPhase(
     PACKAGING_ARCHIVE(R.string.export_phase_packaging_archive),
 }
 
-/** Destination of the next V2 session. STORAGE is not yet integrated into Android export. */
-enum class V2RecordingTarget { LIVE, STORAGE }
+enum class V2PreviewStage { NONE, CONNECTING, CHECKING, READY, STARTING, RUNNING, STOPPING, STOPPED, FAILED }
 
 enum class VideoCaptureState {
     IDLE,
@@ -103,11 +102,13 @@ data class DeviceUiState(
     val v2Ready: Boolean = false,
     val v2StreamMask: Long = 0,
     val v2Capabilities: Long = 0L,
+    val v2DeviceSessionMode: Int = 0,
     val v2SelectedStreamMask: Long = 0L,
-    val v2RecordingTarget: V2RecordingTarget = V2RecordingTarget.LIVE,
     val v2LiveRunning: Boolean = false,
+    val v2PreviewStage: V2PreviewStage = V2PreviewStage.NONE,
     val v2PreviewBlocks: Long = 0,
     val v2SequenceGaps: Long = 0,
+    val v2ChartSkippedBlocks: Long = 0,
     val packetsReceived: Long = 0L,
     val packetsLost: Long = 0L,
     val packetsRejected: Long = 0L,
@@ -179,17 +180,34 @@ class DeviceUiStateHolder {
         uiState = uiState.copy(transportProfile = profile)
     }
 
+    fun onV2PreviewConnecting() {
+        clearChartHistory()
+        uiState = uiState.copy(
+            v2DiscoveryRequested = true, v2DiscoveryError = null, v2Ready = false,
+            v2PreviewStage = V2PreviewStage.CONNECTING, v2LiveRunning = false,
+            v2PreviewBlocks = 0, v2SequenceGaps = 0, v2ChartSkippedBlocks = 0,
+            v2StreamMask = 0, v2SelectedStreamMask = 0, v2Capabilities = 0, v2DeviceSessionMode = 0,
+            packetsReceived = 0, packetsLost = 0, packetsRejected = 0, fragmentsReceived = 0, rawBytesReceived = 0,
+            diagnosticEvents = emptyList(), connectionQuality = ConnectionQuality.IDLE, lastPacketIssue = null,
+            rejectionBreakdown = null, packetSilenceMillis = 0, recentLossPercent = 0.0, recentRejectedPercent = 0.0,
+            selectedSensorType = 2, selectedChannel = 1,
+            showCaptureUi = true, isReplayRunning = false, videoState = VideoCaptureState.IDLE,
+            chart = ChartUiState(), errorMessage = null,
+        )
+    }
+
     fun onV2DiscoveryRequested() {
         uiState = uiState.copy(
             v2DiscoveryRequested = true,
             v2DiscoveryError = null,
             v2Ready = false,
             v2StreamMask = 0L,
+            v2PreviewStage = V2PreviewStage.CHECKING,
             errorMessage = null,
         )
     }
 
-    fun onV2DiscoveryReady(streamMask: Long, capabilities: Long) {
+    fun onV2DiscoveryReady(streamMask: Long, capabilities: Long, sessionMode: Int = 0) {
         val defaultMask = (streamMask and 0x03L).takeIf { it != 0L }
             ?: java.lang.Long.lowestOneBit(streamMask)
         uiState = uiState.copy(
@@ -198,8 +216,9 @@ class DeviceUiStateHolder {
             v2Ready = true,
             v2StreamMask = streamMask,
             v2Capabilities = capabilities,
+            v2DeviceSessionMode = sessionMode,
             v2SelectedStreamMask = defaultMask,
-            v2RecordingTarget = V2RecordingTarget.LIVE,
+            v2PreviewStage = V2PreviewStage.READY,
             errorMessage = null,
         )
     }
@@ -212,17 +231,12 @@ class DeviceUiStateHolder {
             v2DiscoveryError = reason,
             v2Ready = false,
             v2LiveRunning = false,
+            v2PreviewStage = V2PreviewStage.FAILED,
         )
     }
 
-    fun selectV2RecordingTarget(target: V2RecordingTarget) {
-        if (uiState.v2LiveRunning) return
-        if (target == V2RecordingTarget.STORAGE && uiState.v2Capabilities and (1L shl 1) == 0L) return
-        uiState = uiState.copy(v2RecordingTarget = target)
-    }
-
     fun toggleV2Stream(streamId: Int) {
-        if (uiState.v2LiveRunning || streamId !in 1..32) return
+        if (uiState.v2PreviewStage !in setOf(V2PreviewStage.READY, V2PreviewStage.STOPPED) || streamId !in 1..7) return
         val bit = 1L shl (streamId - 1)
         if (uiState.v2StreamMask and bit == 0L) return
         val next = uiState.v2SelectedStreamMask xor bit
@@ -234,26 +248,34 @@ class DeviceUiStateHolder {
         clearChartHistory()
         uiState = uiState.copy(
             v2LiveRunning = true,
+            v2PreviewStage = V2PreviewStage.RUNNING,
             v2PreviewBlocks = 0L,
             v2SequenceGaps = 0L,
+            v2ChartSkippedBlocks = 0L,
             chart = buildChartUiState(uiState.selectedSensorType, uiState.selectedChannel),
         )
     }
 
     fun onV2LiveStopped() {
-        uiState = uiState.copy(v2LiveRunning = false)
+        uiState = uiState.copy(v2LiveRunning = false, v2PreviewStage = V2PreviewStage.STOPPED)
     }
+
+    fun onV2StartRequested() { uiState = uiState.copy(v2PreviewStage = V2PreviewStage.STARTING) }
+    fun onV2StopRequested() { uiState = uiState.copy(v2PreviewStage = V2PreviewStage.STOPPING) }
 
     /** Visual preview only. Persistent V2 recording will use a separate file format. */
     fun onV2LivePreview(
         samplesByStream: Map<ChartStreamKey, List<ChartPoint>>,
         receivedBlocks: Int,
         sequenceGaps: Int,
+        chartSkippedBlocks: Int = 0,
     ) {
+        if (!uiState.v2DiscoveryRequested || uiState.v2PreviewStage !in setOf(V2PreviewStage.RUNNING, V2PreviewStage.STOPPING, V2PreviewStage.STOPPED)) return
         appendChartSamples(samplesByStream)
         uiState = uiState.copy(
             v2PreviewBlocks = uiState.v2PreviewBlocks + receivedBlocks,
             v2SequenceGaps = uiState.v2SequenceGaps + sequenceGaps,
+            v2ChartSkippedBlocks = uiState.v2ChartSkippedBlocks + chartSkippedBlocks,
             chart = buildChartUiState(uiState.selectedSensorType, uiState.selectedChannel),
         )
     }
@@ -284,9 +306,10 @@ class DeviceUiStateHolder {
                 v2Ready = false,
                 v2StreamMask = 0L,
                 v2Capabilities = 0L,
+                v2DeviceSessionMode = 0,
                 v2SelectedStreamMask = 0L,
-                v2RecordingTarget = V2RecordingTarget.LIVE,
                 v2LiveRunning = false,
+                v2PreviewStage = V2PreviewStage.NONE,
             )
         } else {
             updatedState
@@ -649,6 +672,11 @@ class DeviceUiStateHolder {
 
             val history = chartHistory.getOrPut(streamKey) { mutableListOf() }
             history += points
+            if (uiState.v2DiscoveryRequested && history.size > MAX_V2_PREVIEW_POINTS_PER_STREAM) {
+                val reduced = downsampleVisiblePoints(history, MAX_V2_PREVIEW_POINTS_PER_STREAM / 2)
+                history.clear()
+                history.addAll(reduced)
+            }
 
             val earliestPoint = points.first().timeMillis
             val latestPoint = points.last().timeMillis
@@ -827,6 +855,7 @@ class DeviceUiStateHolder {
     }
 
     private companion object {
+        const val MAX_V2_PREVIEW_POINTS_PER_STREAM = 6_000
         const val MAX_DIAGNOSTIC_EVENTS = 40
         const val MAX_RENDER_CHART_POINTS = 1_200
         const val MIN_CHART_PAN_STEP_MILLIS = 1_000L

@@ -40,6 +40,7 @@ interface BleSessionListener {
     ) = onPacketReceived(packetFragment)
     fun onDiagnosticMessage(message: String)
     fun onCaptureReady()
+    fun onV2DiscoveryStarted() = Unit
     /** Called only after explicit V2 discovery has completed successfully. */
     fun onV2DiscoveryReady(device: WoonaV2Discovery.Device) = Unit
     fun onV2LiveStarted(sessionId: Long, streamMask: Long) = Unit
@@ -57,6 +58,8 @@ interface BleSessionController {
     fun startScanning()
     fun stopScanning()
     fun connect(address: String)
+    /** Explicit preview intent; this must not create a persistent recording. */
+    fun connectForV2Preview(address: String) = connect(address)
     /** Explicit opt-in; never probe Legacy automatically (HELLO switches firmware to V2). */
     fun beginV2Discovery(): Boolean = false
     /** Only after explicit discovery, never during an ordinary Legacy capture. */
@@ -89,12 +92,13 @@ class BleSessionManager(
     private var v2SupportsLive = false
     private var v2WriteCharacteristic: BluetoothGattCharacteristic? = null
     @Volatile private var v2Requested = false
+    @Volatile private var v2ConnectionIntent = false
     private var v2Failed = false
-    private val v2ResponseTimeoutRunnable = Runnable {
-        val discovery = v2Discovery ?: return@Runnable
-        if (!v2Requested || v2Failed) return@Runnable
+    private val v2ResponseTimeoutRunnable = Runnable { synchronized(this) {
+        val discovery = v2Discovery ?: return@synchronized
+        if (!v2Requested || v2Failed) return@synchronized
         if (discovery.phase == WoonaV2Discovery.Phase.READY) {
-            val live = v2Live ?: return@Runnable
+            val live = v2Live ?: return@synchronized
             if (live.phase == WoonaV2LiveSession.Phase.WAIT_START ||
                 live.phase == WoonaV2LiveSession.Phase.WAIT_STOP
             ) dispatchV2LiveEvent(live.onResponseTimeout())
@@ -102,10 +106,10 @@ class BleSessionManager(
             emitDiagnostic("V2 response timeout in ${discovery.phase}; retrying if possible", DiagnosticLevel.WARNING)
             dispatchV2Event(discovery.onResponseTimeout())
         }
-    }
-    private val v2ChunkTimeoutRunnable = Runnable {
+    } }
+    private val v2ChunkTimeoutRunnable = Runnable { synchronized(this) {
         if (v2Requested && v2GattWrites.isBusy) failV2Discovery("FFF2 GATT write timed out")
-    }
+    } }
 
     private val discoveredAddresses = linkedSetOf<String>()
     private val stopScanRunnable = Runnable { stopScanning() }
@@ -575,7 +579,12 @@ class BleSessionManager(
             scanHandler.removeCallbacks(gattSetupTimeoutRunnable)
             startTransportSummaryLoop()
             if (!wasRecovering && captureActive) startNotificationWatchdog()
-            listener.onCaptureReady()
+            if (v2ConnectionIntent) {
+                listener.onV2DiscoveryStarted()
+                if (!beginV2Discovery()) failV2Discovery("V2 negotiation is unavailable on this connection")
+            } else {
+                listener.onCaptureReady()
+            }
         }
 
         override fun onCharacteristicWrite(
@@ -584,8 +593,8 @@ class BleSessionManager(
             status: Int,
         ) {
             if (!isCurrentGatt(gatt) || characteristic.uuid != v2WriteUuid) return
-            scanHandler.post {
-                if (!isCurrentGatt(gatt) || !v2Requested || v2Failed) return@post
+            synchronized(this@BleSessionManager) {
+                if (!isCurrentGatt(gatt) || !v2Requested || v2Failed) return@synchronized
                 scanHandler.removeCallbacks(v2ChunkTimeoutRunnable)
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     failV2Discovery("FFF2 GATT write failed (status=$status)")
@@ -609,7 +618,7 @@ class BleSessionManager(
             if (!isCurrentGatt(gatt) || characteristic.uuid != characteristicUuid) return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return
             val value = characteristic.value?.clone() ?: return
-            handleCharacteristicChanged(value)
+            handleCharacteristicChanged(gatt, value)
         }
 
         override fun onCharacteristicChanged(
@@ -618,7 +627,7 @@ class BleSessionManager(
             value: ByteArray,
         ) {
             if (!isCurrentGatt(gatt) || characteristic.uuid != characteristicUuid) return
-            handleCharacteristicChanged(value)
+            handleCharacteristicChanged(gatt, value)
         }
     }
 
@@ -630,6 +639,7 @@ class BleSessionManager(
         transportProfile = profile
     }
 
+    @Synchronized
     override fun beginV2Discovery(): Boolean {
         val gatt = bluetoothGatt ?: return false
         if (v2Requested || captureActive || recoveryInProgress || !notificationsReady ||
@@ -654,6 +664,7 @@ class BleSessionManager(
         return true
     }
 
+    @Synchronized
     override fun startV2Live(streamMask: Long): Boolean {
         val gatt = bluetoothGatt ?: return false
         val live = v2Live ?: return false
@@ -671,6 +682,7 @@ class BleSessionManager(
         }
     }
 
+    @Synchronized
     override fun stopV2Live(): Boolean {
         val gatt = bluetoothGatt ?: return false
         val live = v2Live ?: return false
@@ -754,7 +766,12 @@ class BleSessionManager(
         transition(BleSessionEvent.ScanStopped)
     }
 
-    override fun connect(address: String) {
+    override fun connect(address: String) = connectWithIntent(address, false)
+
+    override fun connectForV2Preview(address: String) = connectWithIntent(address, true)
+
+    @Synchronized
+    private fun connectWithIntent(address: String, preview: Boolean) {
         manualDisconnectRequested = false
         recoveryInProgress = false
         awaitingRecoveryNotification = false
@@ -768,6 +785,7 @@ class BleSessionManager(
         }
 
         forceCloseCurrentGatt()
+        v2ConnectionIntent = preview
         activeDeviceAddress = address
         openGatt(address)
     }
@@ -857,6 +875,7 @@ class BleSessionManager(
         listener.onStateChanged(sessionState)
     }
 
+    @Synchronized
     private fun clearGattReference(gatt: BluetoothGatt) {
         if (bluetoothGatt === gatt) {
             scanHandler.removeCallbacks(gattConnectionTimeoutRunnable)
@@ -940,7 +959,9 @@ class BleSessionManager(
         }
     }
 
-    private fun handleCharacteristicChanged(value: ByteArray) {
+    @Synchronized
+    private fun handleCharacteristicChanged(sourceGatt: BluetoothGatt, value: ByteArray) {
+        if (!isCurrentGatt(sourceGatt)) return
         val nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
         val previousNotificationElapsedRealtimeMs = lastNotificationElapsedRealtimeMs
         lastNotificationElapsedRealtimeMs = nowElapsedRealtimeMs
@@ -982,9 +1003,8 @@ class BleSessionManager(
         if (v2Requested) {
             // The firmware leaves Legacy mode as soon as it accepts HELLO. Do not
             // feed any V2 bytes to the Legacy PacketAssembler, even on failure.
-            val gatt = bluetoothGatt
-            if (gatt != null) scanHandler.post {
-                if (isCurrentGatt(gatt) && v2Requested && !v2Failed) {
+            val gatt = sourceGatt
+            if (isCurrentGatt(gatt) && v2Requested && !v2Failed) {
                     if (v2Discovery?.phase == WoonaV2Discovery.Phase.READY) {
                         val live = v2Live
                         val frames = v2LiveReceiver?.append(value.clone()).orEmpty()
@@ -1000,10 +1020,10 @@ class BleSessionManager(
                         if (events.isNotEmpty()) scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
                         events.forEach(::dispatchV2Event)
                     }
-                }
             }
             return
         }
+        if (v2ConnectionIntent) return // Legacy bytes queued before HELLO are not preview samples.
         listener.onPacketReceived(
             packetFragment = value.clone(),
             receivedAtWallClockMillis = System.currentTimeMillis(),
@@ -1011,6 +1031,7 @@ class BleSessionManager(
         )
     }
 
+    @Synchronized
     private fun dispatchV2Event(event: WoonaV2Discovery.Event) {
         if (v2Failed) return
         when (event) {
@@ -1033,6 +1054,7 @@ class BleSessionManager(
         }
     }
 
+    @Synchronized
     private fun dispatchV2LiveEvent(event: WoonaV2LiveSession.Event) {
         if (v2Failed) return
         when (event) {
@@ -1053,6 +1075,7 @@ class BleSessionManager(
         }
     }
 
+    @Synchronized
     private fun startNextV2Frame(gatt: BluetoothGatt) {
         if (v2Failed || !v2Requested || v2GattWrites.isBusy || !isCurrentGatt(gatt)) return
         if (v2PendingFrames.isEmpty()) {
@@ -1083,6 +1106,7 @@ class BleSessionManager(
 
     @Suppress("DEPRECATION")
     @SuppressLint("MissingPermission")
+    @Synchronized
     private fun writeV2Chunk(gatt: BluetoothGatt, chunk: ByteArray) {
         val characteristic = v2WriteCharacteristic
         if (characteristic == null || !hasConnectPermission() || !isCurrentGatt(gatt)) {
@@ -1109,6 +1133,7 @@ class BleSessionManager(
         }
     }
 
+    @Synchronized
     private fun failV2Discovery(reason: String) {
         if (v2Failed) return
         v2Failed = true
@@ -1116,11 +1141,14 @@ class BleSessionManager(
         v2GattWrites.reset()
         scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
         scanHandler.removeCallbacks(v2ChunkTimeoutRunnable)
-        emitDiagnostic("V2 discovery failed: $reason; disconnect before trying Legacy", DiagnosticLevel.WARNING)
-        listener.onError("V2 discovery failed: $reason")
+        emitDiagnostic("V2 discovery failed: $reason; connection retained; disconnect may stop active SD recording", DiagnosticLevel.WARNING)
+        listener.onError(appTextResolver.getString(R.string.v2_connection_failed) + ": " + reason + "\n" +
+            appTextResolver.getString(R.string.v2_sd_disconnect_warning))
     }
 
+    @Synchronized
     private fun resetV2OnDisconnect() {
+        v2ConnectionIntent = false
         scanHandler.removeCallbacks(v2ResponseTimeoutRunnable)
         scanHandler.removeCallbacks(v2ChunkTimeoutRunnable)
         v2GattWrites.reset()
@@ -1334,6 +1362,7 @@ class BleSessionManager(
         }
     }
 
+    @Synchronized
     private fun forceCloseCurrentGatt() {
         val gatt = bluetoothGatt ?: return
         clearGattReference(gatt)

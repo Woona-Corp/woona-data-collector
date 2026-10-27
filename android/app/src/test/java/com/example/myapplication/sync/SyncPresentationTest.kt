@@ -49,4 +49,10 @@ class SyncPresentationTest {
         assertTrue(state.networkPolicyAllowed)
     }
 
+    @Test fun serverStoragePausePreservesOriginalsAndDoesNotAskToDeletePhoneData() {
+        val text = nextTransferActionText("retry_after_storage_available", true)
+        assertTrue(text.contains("на сервере"))
+        assertTrue(text.contains("оригиналы сохранены"))
+    }
+
 }

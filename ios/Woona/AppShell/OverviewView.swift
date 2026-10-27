@@ -112,6 +112,10 @@ private let serverReasons: [String: (String, String)] = [
     "invalid_account_identifier": ("Недопустимый идентификатор аккаунта", "The account identifier is invalid"),
     "invalid_bearer_token": ("Токен устройства отсутствует или отклонён сервером. Переподключите сервер в настройках", "The device token is missing or rejected. Reconnect the server in Settings"),
     "missing_bearer_token": ("Токен устройства отсутствует или отклонён сервером. Переподключите сервер в настройках", "The device token is missing or rejected. Reconnect the server in Settings"),
+    "hash_mismatch": ("Контрольная сумма файла не совпала: целостность загрузки не подтверждена", "The file checksum does not match: upload integrity is not verified"),
+    "storage_space_low": ("На сервере недостаточно свободного места для загрузки. Локальные файлы и принятые сервером байты сохранены. Повторите отправку после освобождения места на сервере.", "The server has insufficient free space for this upload. Local files and accepted server bytes are preserved. Retry after server storage is available."),
+    "storage_full": ("Хранилище сервера заполнено. Передача остановлена; локальные файлы и подтверждённая позиция сохранены. Повторите после освобождения места на сервере.", "Server storage is full. Transfer stopped; local files and the confirmed offset are preserved. Retry after server storage is available."),
+    "capture_recovery_requires_review": ("Запись прервалась при закрытии приложения. Не удалось подтвердить привязку времени или файлов к сессии; автоматическая отправка приостановлена. Создайте полный архив для проверки исходных данных.", "The recording was interrupted when the app closed. File ownership or timing could not be verified; automatic upload is paused. Create a complete archive to review the original data."),
     "artifact_hash_mismatch": ("Контрольная сумма файла не совпала: целостность загрузки не подтверждена", "The file checksum does not match: upload integrity is not verified"),
     "artifact_not_available": ("Не все обязательные файлы полностью загружены на сервер", "Required files are not all fully uploaded to the server"),
     "artifacts_incomplete": ("Не все обязательные файлы полностью загружены на сервер", "Required files are not all fully uploaded to the server"),
@@ -246,6 +250,7 @@ func recordingCaptureText(status: String, code: String?, message: String?, langu
     case "camera_failed": reason = errorText(language, "сбой камеры; видео могло записаться не полностью", "camera failure; the video may be incomplete")
     case "queue_overflow": reason = errorText(language, "переполнена очередь обработки данных датчика", "the sensor data processing queue overflowed")
     case "storage_error", "storage_failed": reason = errorText(language, "не удалось сохранить файлы записи", "recording files could not be saved")
+    case "process_interrupted": reason = errorText(language, "приложение завершилось до сохранения сессии; время окончания не подтверждено", "the app closed before session finalization; the end time is not verified")
     case "no_sensor_data": reason = errorText(language, "не получено ни одного корректного пакета датчика", "no valid sensor packets were received")
     case nil: reason = message?.isEmpty == false ? message : nil
     default: reason = [code, message].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
@@ -370,6 +375,7 @@ func transferNextAction(_ value: String, ru: Bool) -> String {
     case "restart_file_upload": return ru ? "повторите передачу файла; сохраните оригинал" : "retry the file transfer; preserve the original"
     case "contact_support_preserve_local_data": return ru ? "сохраните локальные данные и передайте диагностику разработчику" : "preserve local data and send diagnostics to support"
     case "review_rejected_file": return ru ? "проверьте причину отклонения файла; не удаляйте оригинал" : "review why the file was rejected; preserve the original"
+    case "retry_after_storage_available": return ru ? "повторите после освобождения места на сервере; локальные оригиналы сохранены" : "retry after server storage is available; local originals are preserved"
     case "retry_later": return ru ? "повторите позже" : "retry later"
     default: return value
     }
