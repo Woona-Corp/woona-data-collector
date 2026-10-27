@@ -341,6 +341,29 @@ final class BleSessionManagerTests: XCTestCase {
         XCTAssertEqual(harness.states.suffix(1), [.failed])
     }
 
+    func testV2NotificationFailureKeepsThePhysicalLinkUntilExplicitDisconnect() async {
+        let client = FakeBleCentralClient(); let harness = BleHarness(client: client); let identifier = UUID()
+        client.emitDiscoveredDevice(.init(id: identifier, name: "V2 fixture")); await Task.yield()
+        await harness.manager.connect(to: identifier, purpose: .v2Preview)
+        client.emitConnected(identifier); await Task.yield()
+        client.emitServices(identifier, serviceUUIDs: [BleConstants.serviceUUID]); await Task.yield()
+        client.emitCharacteristics(identifier, serviceUUID: BleConstants.serviceUUID,
+                                   characteristicUUIDs: [BleConstants.notificationCharacteristicUUID, BleConstants.controlCharacteristicUUID])
+        await Task.yield()
+        client.emitNotificationState(identifier, characteristicUUID: BleConstants.notificationCharacteristicUUID, isNotifying: true)
+        await Task.yield()
+        XCTAssertEqual(harness.previewReadyCount, 1)
+        client.emitNotificationState(identifier, characteristicUUID: BleConstants.notificationCharacteristicUUID,
+                                     isNotifying: false, error: NSError(domain: "Synthetic CCC failure after V2 readiness", code: 8))
+        await Task.yield()
+        XCTAssertEqual(harness.manager.currentState(), .failed)
+        XCTAssertEqual(harness.errors.last?.message, "Failed to enable BLE notifications")
+        XCTAssertEqual(harness.manager.currentPeripheralIdentifier(), identifier)
+        XCTAssertTrue(client.disconnectedIdentifiers.isEmpty, "Notification errors do not authorize stopping an unknown SD recording")
+        harness.manager.disconnect()
+        XCTAssertEqual(client.disconnectedIdentifiers, [identifier])
+    }
+
     func testV2PreviewWaitsForControlAndCCCWithoutPreparingLegacyCapture() async {
         let client = FakeBleCentralClient(); let harness = BleHarness(client: client); let identifier = UUID()
         client.emitDiscoveredDevice(.init(id: identifier, name: "V2 fixture")); await Task.yield()

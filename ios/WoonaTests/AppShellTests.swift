@@ -5,6 +5,26 @@ import UIKit
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    @MainActor
+    func testCancelledQueuedV2ConnectCannotConnectOrOverwriteTheCancelledPreview() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let model = AppViewModel(store: store, uiTesting: true)
+        model.connectV2Preview(to: BleDevice(id: UUID(), name: "Synthetic queued preview"))
+        model.disconnectV2Preview()
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        while model.v2Preview.snapshot.stage != .stopped, ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertFalse(model.isV2PreviewActive)
+        XCTAssertFalse(model.isConnectionActive)
+        XCTAssertNil(model.v2Preview.snapshot.reason)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(try store.localInventory().recordings, 0)
+    }
+
     func testBuiltAppAdvertisesBackgroundProcessingWithTypedPlistArrays() {
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String], ["com.woona.apps.sync"])
         XCTAssertTrue((Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String])?.contains("processing") == true)
