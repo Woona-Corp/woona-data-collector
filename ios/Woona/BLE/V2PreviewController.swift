@@ -50,6 +50,7 @@ final class V2PreviewWorker: @unchecked Sendable {
     private var foreground = true
     private var connected = false
     private var originUs: UInt64?
+    private var mostRecentlyWrittenRequestID: UInt32 = 0
     private struct PendingBlock { let block: V2LiveData; let descriptor: V2Stream; let gap: Bool }
     private var blocks: [PendingBlock] = []
     private var channels: [String: V2PreviewChannel] = [:]
@@ -66,7 +67,7 @@ final class V2PreviewWorker: @unchecked Sendable {
             self.generation = generation; snapshot = V2PreviewSnapshot(); snapshot.stage = .connecting
             decoder = WoonaV2StreamDecoder(); discovery = WoonaV2Discovery(); live = nil
             blocks = []; channels = [:]; pendingBreaks = []; originUs = nil
-            connected = true; foreground = true
+            connected = true; foreground = true; mostRecentlyWrittenRequestID = 0
             publish()
         }
     }
@@ -206,13 +207,15 @@ final class V2PreviewWorker: @unchecked Sendable {
             let maySend = queue.sync { [self] in
                 guard connected, generation == identity, timerToken == writeToken,
                       requestID == (discoveryCommand ? discovery.pendingRequestID : live?.pendingRequestID ?? 0) else { return false }
-                if !foreground, !discoveryCommand, live?.phase == .waitStart {
+                if !foreground, !discoveryCommand, live?.phase == .waitStart,
+                   mostRecentlyWrittenRequestID != requestID {
                     // This command has not reached CoreBluetooth yet. Cancel it
                     // before writing; reset retains monotonically allocated IDs.
                     live?.reset(); cancelResponseTimer(); snapshot.stage = .stopped
                     snapshot.reason = "Preview start was cancelled before transmission because the app left the foreground."
                     publish(); return false
                 }
+                mostRecentlyWrittenRequestID = requestID
                 return true
             }
             guard maySend else { return }
