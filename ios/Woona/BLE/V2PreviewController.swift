@@ -102,7 +102,9 @@ final class V2PreviewWorker: @unchecked Sendable {
         queue.async { [self] in
             guard [.ready, .stopped].contains(snapshot.stage) else { return }
             let knownMask = snapshot.streams.reduce(UInt32(0)) { $0 | (UInt32(1) << ($1.id - 1)) }
-            snapshot.selectedMask = mask & knownMask; publish()
+            let nextMask = mask & knownMask
+            guard nextMask != 0 else { return }
+            snapshot.selectedMask = nextMask; publish()
         }
     }
 
