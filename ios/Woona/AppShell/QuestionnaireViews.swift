@@ -765,12 +765,13 @@ struct ReferenceAttachmentEditor: View {
     @State private var errors: [String: String] = [:]
     @StateObject private var saveState = QuestionnaireSaveState()
     let url: URL
+    let language: AppLanguage
     let onSave: (String, ReferenceMetadata) async throws -> Void
 
     var body: some View {
         NavigationStack {
             Form {
-                QuestionnaireSaveStatus(state: saveState, language: .russian)
+                QuestionnaireSaveStatus(state: saveState, language: language)
                 Text(url.lastPathComponent)
                 Picker("Тип данных *", selection: $type) {
                     Text("Выберите тип").tag("")
@@ -795,7 +796,7 @@ struct ReferenceAttachmentEditor: View {
                     if type.isEmpty { errors["type"] = "Выберите тип данных" }
                     if errors.isEmpty {
                         let candidate = metadata; let selectedType = type
-                        Task { if await saveState.save(language: .russian, operation: { try await onSave(selectedType, candidate) }) { dismiss() } }
+                        Task { if await saveState.save(language: language, operation: { try await onSave(selectedType, candidate) }) { dismiss() } }
                     }
                 }.disabled(saveState.isSaving) }
             }
