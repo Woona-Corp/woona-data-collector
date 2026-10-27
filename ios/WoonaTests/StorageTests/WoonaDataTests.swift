@@ -103,14 +103,38 @@ final class WoonaDataTests: XCTestCase {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [HangingRetirementProtocol.self]
             let client = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test", wifiOnly: false), token: "fixture", sessionConfiguration: configuration)
+            let started = ProcessInfo.processInfo.systemUptime
             do { _ = try await client.reconcileDeletions(into: store, timeout: 0.02); XCTFail("A hanging maintenance request must be bounded") }
             catch let error as URLError { XCTAssertEqual(error.code, .timedOut) }
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2,
+                              "Timeout returns without waiting for the uncooperative URLProtocol")
             let deadline = Date().addingTimeInterval(5)
             while HangingRetirementProtocol.stoppedCount == 0, Date() < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
             XCTAssertEqual(HangingRetirementProtocol.stoppedCount, 1)
             XCTAssertEqual(try store.profiles().count, 1)
             XCTAssertEqual(try store.retirementCleanupStatus().pendingCount, 0)
             XCTAssertEqual(try store.retirementCleanupStatus().deferredCount, 0)
+        }
+    }
+
+    @MainActor
+    func testRetirementCheckCancellationDoesNotWaitForTheHangingRequest() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            _ = try store.saveProfile(completeDog())
+            HangingRetirementProtocol.reset()
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [HangingRetirementProtocol.self]
+            let client = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test", wifiOnly: false), token: "fixture", sessionConfiguration: configuration)
+            let check = Task { try await client.reconcileDeletions(into: store) }
+            try await Task.sleep(nanoseconds: 20_000_000)
+            let cancelledAt = ProcessInfo.processInfo.systemUptime
+            check.cancel()
+            do { _ = try await check.value; XCTFail("Cancellation must return before a network callback") }
+            catch is CancellationError {}
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - cancelledAt, 2)
+            XCTAssertEqual(try store.profiles().count, 1)
+            XCTAssertEqual(try store.retirementCleanupStatus().pendingCount, 0)
         }
     }
 
