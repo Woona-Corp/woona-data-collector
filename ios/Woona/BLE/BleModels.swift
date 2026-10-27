@@ -9,6 +9,8 @@ struct BleDevice: Equatable, Identifiable, Sendable {
     }
 }
 
+enum BleConnectionPurpose: String, Sendable { case record, v2Preview }
+
 enum BleSessionState: Equatable, Sendable {
     case idle
     case scanning
@@ -79,5 +81,6 @@ enum BleCentralAuthorization: Equatable, Sendable {
 struct BleConstants {
     static let serviceUUID = UUID(uuidString: "0000fff0-0000-1000-8000-00805f9b34fb")!
     static let notificationCharacteristicUUID = UUID(uuidString: "0000fff1-0000-1000-8000-00805f9b34fb")!
+    static let controlCharacteristicUUID = UUID(uuidString: "0000fff2-0000-1000-8000-00805f9b34fb")!
     static let cccdDescriptorUUID = UUID(uuidString: "00002902-0000-1000-8000-00805f9b34fb")!
 }

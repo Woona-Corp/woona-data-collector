@@ -9,6 +9,7 @@ final class BleSessionManager {
     private let onDeviceFound: @MainActor (BleDevice) -> Void
     private let notificationSink: BleNotificationSink
     private let onDiagnosticMessage: @MainActor (String) -> Void
+    private let onPreviewReady: @MainActor () -> Void
     private let onCaptureReady: @MainActor () -> Void
     private let onStateChanged: @MainActor (BleSessionState) -> Void
     private let onError: @MainActor (String, Error?) -> Void
@@ -16,6 +17,10 @@ final class BleSessionManager {
     private var discoveredDevicesByID: [UUID: BleDevice] = [:]
     private var discoveredDeviceOrder: [UUID] = []
     private var activePeripheralIdentifier: UUID?
+    private var purpose = BleConnectionPurpose.record
+    private var connectionToken = UUID()
+    private var previewReady = false
+    private var disconnecting = false
     private var failureDisconnectIdentifiers: Set<UUID> = []
     private var pendingScanUseServiceFilter: Bool?
     private var scanTimeoutTask: Task<Void, Never>?
@@ -32,7 +37,9 @@ final class BleSessionManager {
         onDiagnosticMessage: @escaping @MainActor (String) -> Void,
         onCaptureReady: @escaping @MainActor () -> Void,
         onStateChanged: @escaping @MainActor (BleSessionState) -> Void,
-        onError: @escaping @MainActor (String, Error?) -> Void
+        onError: @escaping @MainActor (String, Error?) -> Void,
+        onPreviewReady: @escaping @MainActor () -> Void = {},
+        onPreviewBytes: @escaping @Sendable (Data) -> Void = { _ in }
     ) {
         self.centralClient = centralClient
         self.serviceUUID = serviceUUID
@@ -41,11 +48,13 @@ final class BleSessionManager {
         self.onDeviceFound = onDeviceFound
         self.onDiagnosticMessage = onDiagnosticMessage
         self.onCaptureReady = onCaptureReady
+        self.onPreviewReady = onPreviewReady
         self.onStateChanged = onStateChanged
         self.onError = onError
         self.notificationSink = BleNotificationSink(
             expectedCharacteristicUUID: characteristicUUID,
             onPacketReceived: onPacketReceived,
+            onPreviewBytes: onPreviewBytes,
             onDiagnosticMessage: { message in
                 Task { @MainActor in
                     onDiagnosticMessage(message)
@@ -105,6 +114,7 @@ final class BleSessionManager {
     @discardableResult
     func connect(
         to identifier: UUID,
+        purpose: BleConnectionPurpose = .record,
         prepareForCapture: () async -> Void = {}
     ) async -> Bool {
         guard validateBluetoothReady() else { return false }
@@ -121,9 +131,11 @@ final class BleSessionManager {
         stopScanning()
         failureDisconnectIdentifiers.remove(identifier)
         activePeripheralIdentifier = identifier
-        notificationSink.prepareForConnection(identifier: identifier)
+        self.purpose = purpose
+        connectionToken = UUID(); previewReady = false; disconnecting = false
+        notificationSink.prepareForConnection(identifier: identifier, purpose: purpose)
         transition(.connectRequested)
-        await prepareForCapture()
+        if purpose == .record { await prepareForCapture() }
 
         guard activePeripheralIdentifier == identifier else { return false }
 
@@ -141,9 +153,32 @@ final class BleSessionManager {
             return
         }
 
+        centralClient.cancelControlWrites(for: activePeripheralIdentifier)
+        previewReady = false
         centralClient.disconnect(from: activePeripheralIdentifier)
-        clearActivePeripheral(identifier: activePeripheralIdentifier)
-        transition(.disconnected)
+        if purpose == .v2Preview {
+            // Do not reconnect the same CBPeripheral until its terminal callback;
+            // old CCC/write callbacks must not initialize the next protocol run.
+            disconnecting = true
+            notificationSink.deactivate(identifier: activePeripheralIdentifier)
+        } else {
+            clearActivePeripheral(identifier: activePeripheralIdentifier)
+            transition(.disconnected)
+        }
+    }
+
+    func writePreviewFrame(_ data: Data, completion: @escaping @MainActor (Result<Void, Error>) -> Void) {
+        guard purpose == .v2Preview, previewReady, !disconnecting, let identifier = activePeripheralIdentifier else {
+            completion(.failure(BleControlWriteError.disconnected)); return
+        }
+        let token = connectionToken
+        centralClient.writeControlFrame(data, characteristicUUID: BleConstants.controlCharacteristicUUID, for: identifier) { [weak self] result in
+            Task { @MainActor in
+                guard let self, self.connectionToken == token,
+                      self.activePeripheralIdentifier == identifier, !self.disconnecting else { return }
+                completion(result)
+            }
+        }
     }
 
     func close() {
@@ -220,7 +255,10 @@ final class BleSessionManager {
         if let activePeripheralIdentifier {
             failureDisconnectIdentifiers.insert(activePeripheralIdentifier)
             centralClient.disconnect(from: activePeripheralIdentifier)
-            clearActivePeripheral(identifier: activePeripheralIdentifier)
+            if purpose == .v2Preview {
+                disconnecting = true; previewReady = false
+                notificationSink.deactivate(identifier: activePeripheralIdentifier)
+            } else { clearActivePeripheral(identifier: activePeripheralIdentifier) }
         }
         transition(.failure)
         onError(message, error)
@@ -229,6 +267,8 @@ final class BleSessionManager {
     private func clearActivePeripheral(identifier: UUID) {
         guard activePeripheralIdentifier == identifier else { return }
         activePeripheralIdentifier = nil
+        connectionToken = UUID(); previewReady = false; disconnecting = false
+        centralClient.cancelControlWrites(for: identifier)
         notificationSink.deactivate(identifier: identifier)
     }
 }
@@ -254,7 +294,7 @@ extension BleSessionManager: BleCentralClientDelegate {
 
     nonisolated func centralClient(_ client: BleCentralClient, didConnect identifier: UUID) {
         Task { @MainActor in
-            guard activePeripheralIdentifier == identifier else { return }
+            guard activePeripheralIdentifier == identifier, !disconnecting else { return }
             transition(.connected)
             centralClient.discoverServices([serviceUUID], for: identifier)
         }
@@ -271,12 +311,14 @@ extension BleSessionManager: BleCentralClientDelegate {
     nonisolated func centralClient(_ client: BleCentralClient, didDisconnect identifier: UUID, error: Error?) {
         Task { @MainActor in
             if failureDisconnectIdentifiers.remove(identifier) != nil {
+                clearActivePeripheral(identifier: identifier)
                 if let error {
                     onError("BLE disconnected with error", error)
                 }
                 return
             }
 
+            guard activePeripheralIdentifier == identifier else { return }
             clearActivePeripheral(identifier: identifier)
             transition(.disconnected)
             if let error {
@@ -302,7 +344,7 @@ extension BleSessionManager: BleCentralClientDelegate {
                 return
             }
 
-            centralClient.discoverCharacteristics([characteristicUUID], serviceUUID: serviceUUID, for: identifier)
+            centralClient.discoverCharacteristics(purpose == .v2Preview ? [characteristicUUID, BleConstants.controlCharacteristicUUID] : [characteristicUUID], serviceUUID: serviceUUID, for: identifier)
         }
     }
 
@@ -324,6 +366,11 @@ extension BleSessionManager: BleCentralClientDelegate {
                 return
             }
 
+            guard purpose != .v2Preview || characteristicUUIDs.contains(BleConstants.controlCharacteristicUUID) else {
+                fail("V2 preview requires the FFF2 control characteristic; reconnect in Record mode for a Legacy sensor")
+                return
+            }
+            notificationSink.expectNotificationRegistration(identifier: identifier)
             centralClient.setNotifyValue(true, characteristicUUID: characteristicUUID, for: identifier)
         }
     }
@@ -335,6 +382,7 @@ extension BleSessionManager: BleCentralClientDelegate {
         isNotifying: Bool,
         error: Error?
     ) {
+        guard notificationSink.acceptsNotificationState(identifier: identifier, characteristicUUID: characteristicUUID) else { return }
         let isReady = error == nil
             && isNotifying
             && notificationSink.activate(identifier: identifier, characteristicUUID: characteristicUUID)
@@ -348,7 +396,9 @@ extension BleSessionManager: BleCentralClientDelegate {
 
             onDiagnosticMessage("BLE notifications enabled for \(characteristicUUID.uuidString)")
             onDiagnosticMessage("CoreBluetooth does not expose the negotiated connection interval; BLE timing summaries infer it from notification callback gaps.")
-            onCaptureReady()
+            guard !disconnecting else { return }
+            if purpose == .v2Preview { previewReady = true; onPreviewReady() }
+            else { onCaptureReady() }
         }
     }
 
@@ -377,9 +427,12 @@ extension BleSessionManager: BleCentralClientDelegate {
 private final class BleNotificationSink: @unchecked Sendable {
     private let expectedCharacteristicUUID: UUID
     private let onPacketReceived: @Sendable (Data) -> Void
+    private let onPreviewBytes: @Sendable (Data) -> Void
     private let onDiagnosticMessage: (String) -> Void
     private let lock = NSLock()
 
+    private var purpose = BleConnectionPurpose.record
+    private var registrationExpected = false
     private var expectedIdentifier: UUID?
     private var activeIdentifier: UUID?
     private var activeCharacteristicUUID: UUID?
@@ -399,25 +452,40 @@ private final class BleNotificationSink: @unchecked Sendable {
     init(
         expectedCharacteristicUUID: UUID,
         onPacketReceived: @escaping @Sendable (Data) -> Void,
+        onPreviewBytes: @escaping @Sendable (Data) -> Void,
         onDiagnosticMessage: @escaping (String) -> Void
     ) {
         self.expectedCharacteristicUUID = expectedCharacteristicUUID
         self.onPacketReceived = onPacketReceived
+        self.onPreviewBytes = onPreviewBytes
         self.onDiagnosticMessage = onDiagnosticMessage
     }
 
-    func prepareForConnection(identifier: UUID) {
+    func prepareForConnection(identifier: UUID, purpose: BleConnectionPurpose) {
         lock.withLock {
             expectedIdentifier = identifier
+            self.purpose = purpose; registrationExpected = false
             activeIdentifier = nil
             activeCharacteristicUUID = nil
             resetTelemetryLocked(nowMillis: nil)
         }
     }
 
+    func expectNotificationRegistration(identifier: UUID) {
+        lock.withLock { if expectedIdentifier == identifier { registrationExpected = true } }
+    }
+
+    func acceptsNotificationState(identifier: UUID, characteristicUUID: UUID) -> Bool {
+        lock.withLock {
+            expectedIdentifier == identifier && expectedCharacteristicUUID == characteristicUUID &&
+                (purpose == .record || registrationExpected)
+        }
+    }
+
     func activate(identifier: UUID, characteristicUUID: UUID) -> Bool {
         lock.withLock {
-            guard expectedIdentifier == identifier, expectedCharacteristicUUID == characteristicUUID else {
+            guard expectedIdentifier == identifier, expectedCharacteristicUUID == characteristicUUID,
+                  purpose == .record || registrationExpected else {
                 return false
             }
             activeIdentifier = identifier
@@ -441,15 +509,15 @@ private final class BleNotificationSink: @unchecked Sendable {
 
     func receive(_ data: Data, identifier: UUID, characteristicUUID: UUID) {
         let nowMillis = Self.currentMillis()
-        let (shouldForward, diagnostics) = lock.withLock {
+        let (shouldForward, preview, diagnostics) = lock.withLock {
             guard activeIdentifier == identifier, activeCharacteristicUUID == characteristicUUID else {
-                return (false, [String]())
+                return (false, false, [String]())
             }
-            return (true, recordNotificationLocked(byteCount: data.count, nowMillis: nowMillis))
+            return (true, purpose == .v2Preview, recordNotificationLocked(byteCount: data.count, nowMillis: nowMillis))
         }
 
         guard shouldForward else { return }
-        onPacketReceived(data)
+        if preview { onPreviewBytes(data) } else { onPacketReceived(data) }
         for diagnostic in diagnostics {
             onDiagnosticMessage(diagnostic)
         }

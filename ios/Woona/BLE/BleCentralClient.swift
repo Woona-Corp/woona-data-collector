@@ -12,6 +12,17 @@ protocol BleCentralClient: AnyObject {
     func discoverServices(_ serviceUUIDs: [UUID], for identifier: UUID)
     func discoverCharacteristics(_ characteristicUUIDs: [UUID], serviceUUID: UUID, for identifier: UUID)
     func setNotifyValue(_ enabled: Bool, characteristicUUID: UUID, for identifier: UUID)
+    func writeControlFrame(_ data: Data, characteristicUUID: UUID, for identifier: UUID,
+                           completion: @escaping BleControlWriteQueue.Completion)
+    func cancelControlWrites(for identifier: UUID)
+}
+
+extension BleCentralClient {
+    func writeControlFrame(_ data: Data, characteristicUUID: UUID, for identifier: UUID,
+                           completion: @escaping BleControlWriteQueue.Completion) {
+        completion(.failure(BleControlWriteError.writeUnsupported))
+    }
+    func cancelControlWrites(for identifier: UUID) {}
 }
 
 enum BleCentralClientError: Error, Equatable, LocalizedError {

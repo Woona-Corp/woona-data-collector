@@ -87,7 +87,7 @@ struct AppRootView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .background {
                 appState.enterBackground()
-            }
+            } else if newPhase == .active { appState.enterForeground() }
         }
     }
 
