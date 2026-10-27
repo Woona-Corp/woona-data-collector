@@ -90,6 +90,19 @@ final class V2PreviewTests: XCTestCase {
         worker.disconnected()
     }
 
+    func testLastAvailableStreamCannotBeDeselectedAndStartKeepsItsMask() async throws {
+        let writes = PreviewWrites(); var snapshot = V2PreviewSnapshot()
+        let worker = V2PreviewWorker(update: { _, value in snapshot = value }, write: { _, wire, completion in writes.frames.append(wire); completion(.success(())) })
+        try await discover(worker, writes: writes); try await wait { snapshot.stage == .ready }
+        worker.select(mask: 1); try await wait { snapshot.selectedMask == 1 }
+        worker.select(mask: 0); worker.start(); try await wait { writes.count == 4 }
+        let decoder = WoonaV2StreamDecoder()
+        let start = try XCTUnwrap(decoder.append(writes.frames[3]).first)
+        XCTAssertEqual(start.type, WoonaV2Codec.startSession)
+        XCTAssertEqual(WoonaV2Codec.u32([UInt8](start.payload), 4), 1)
+        worker.disconnected()
+    }
+
     func testQueuedStartIsCancelledBeforeTransmissionWhenTheAppLeavesForeground() async throws {
         let writes = PreviewWrites(); var snapshot = V2PreviewSnapshot()
         let worker = V2PreviewWorker(update: { _, value in snapshot = value }, write: { _, wire, completion in writes.frames.append(wire); completion(.success(())) })
