@@ -184,8 +184,10 @@ final class WoonaDataTests: XCTestCase {
             var reject = true
             NetworkFaultProtocol.handler = { request in
                 if request.url!.path == "/v1/deletions" {
-                    // Maintenance is global; the selected workspace is unassigned.
-                    XCTAssertNil(request.value(forHTTPHeaderField: "X-Woona-Account"))
+                    // Global maintenance uses the selected workspace; profile
+                    // upload also reconciles through its own scoped client.
+                    let account = request.value(forHTTPHeaderField: "X-Woona-Account")
+                    XCTAssertTrue(account == nil || account == "scope-a")
                     return .init(body: Data(#"{"entities":[]}"#.utf8))
                 }
                 if request.httpMethod == "PUT" {
