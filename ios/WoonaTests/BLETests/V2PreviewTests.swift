@@ -117,11 +117,15 @@ final class V2PreviewTests: XCTestCase {
     }
 
     func testCoarseningKeepsEndpointsAndPropagatesSegmentBreaks() {
-        let input = (0..<7001).map { index in V2PreviewPoint(time: Double(index), value: Double(index), breakBefore: index == 101 || index == 4999) }
+        var input: [V2PreviewPoint] = []
+        for index in 0..<7001 {
+            let startsSegment = index == 101 || index == 4999
+            input.append(V2PreviewPoint(time: Double(index), value: Double(index), breakBefore: startsSegment))
+        }
         let output = V2PreviewWorker.coarsen(input)
         XCTAssertLessThanOrEqual(output.count, 3000)
         XCTAssertEqual(output.first?.time, 0); XCTAssertEqual(output.last?.time, 7000)
-        XCTAssertEqual(output.filter(\.breakBefore).count, 2)
+        XCTAssertEqual(output.filter { $0.breakBefore }.count, 2)
         XCTAssertTrue(output.contains { $0.time >= 101 && $0.time <= 103 && $0.breakBefore })
     }
 }
