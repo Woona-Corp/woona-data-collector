@@ -326,11 +326,25 @@ class AppShellNavigationTest {
     @Test
     fun busyServerSettingsKeepReadOnlyConnectionCheckAvailable() {
         setShellContent(serverSyncState = ServerSyncUiState(
-            status = ServerSyncStatus.READY, pending = 1, mutationsAllowed = false, mutationBlockReason = "capture"))
+            status = ServerSyncStatus.READY, pending = 1, mutationsAllowed = false, connectionEditorAllowed = false, mutationBlockReason = "capture"))
         navTab("Settings").performClick()
         composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
         composeRule.onNodeWithText("Check connection").performScrollTo().assertIsEnabled()
         composeRule.onNodeWithText("Reconnect").performScrollTo().assertIsNotEnabled()
+        composeRule.onNodeWithText("Retry uploads").performScrollTo().assertIsNotEnabled()
+        composeRule.onNodeWithText("Restore from server").performScrollTo().assertIsNotEnabled()
+    }
+
+    @Test
+    fun runningUploadKeepsDisconnectEditorAvailableButBlocksOtherMutations() {
+        setShellContent(serverSyncState = ServerSyncUiState(
+            status = ServerSyncStatus.UPLOADING, pending = 1, uploading = 1, workersRunning = 1,
+            mutationsAllowed = false, connectionEditorAllowed = true, networkPolicyAllowed = false,
+            mutationBlockReason = "upload"))
+        navTab("Settings").performClick()
+        composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
+        composeRule.onNodeWithText("Check connection").performScrollTo().assertIsEnabled()
+        composeRule.onNodeWithText("Reconnect").performScrollTo().assertIsEnabled()
         composeRule.onNodeWithText("Retry uploads").performScrollTo().assertIsNotEnabled()
         composeRule.onNodeWithText("Restore from server").performScrollTo().assertIsNotEnabled()
     }
