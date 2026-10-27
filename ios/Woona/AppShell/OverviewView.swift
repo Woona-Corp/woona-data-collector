@@ -252,6 +252,7 @@ func recordingCaptureText(status: String, code: String?, message: String?, langu
     case "storage_error", "storage_failed": reason = errorText(language, "не удалось сохранить файлы записи", "recording files could not be saved")
     case "process_interrupted": reason = errorText(language, "приложение завершилось до сохранения сессии; время окончания не подтверждено", "the app closed before session finalization; the end time is not verified")
     case "no_sensor_data": reason = errorText(language, "не получено ни одного корректного пакета датчика", "no valid sensor packets were received")
+    case "process_interrupted": reason = errorText(language, "предыдущий запуск приложения завершился до сохранения сессии; исходные файлы сохранены", "the previous app process ended before finalization; original files are preserved")
     case nil: reason = message?.isEmpty == false ? message : nil
     default: reason = [code, message].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
     }

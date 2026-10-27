@@ -32,9 +32,33 @@ struct AppRootView: View {
                     .toolbar(.hidden, for: .tabBar)
                     .tag(AppViewModel.AppTab.settings)
             }
+            .disabled(appState.isLocalRecoveryRunning)
+
+            if appState.isLocalRecoveryRunning {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text(appState.selectedLanguage == .russian ? "Восстанавливаем прерванную локальную работу…" : "Recovering interrupted local work…")
+                    Text(appState.selectedLanguage == .russian ? "Исходные файлы сохраняются. Дождитесь окончания проверки перед новой записью." : "Original files are preserved. Wait for this check before starting another capture.")
+                        .font(.footnote)
+                }
+                .padding(24).background(Color.woonaSurface, in: RoundedRectangle(cornerRadius: 12))
+                .padding(20)
+                .accessibilityIdentifier("startup.recovery")
+            }
 
             if let exportPhase = appState.exportPhase, appState.preparedExport == nil {
                 ExportProgressOverlay(phase: exportPhase)
+            }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let error = appState.localRecoveryError {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(appState.selectedLanguage == .russian ? "Локальное восстановление не завершено" : "Local recovery is incomplete").font(.headline)
+                    Text(error).font(.caption).textSelection(.enabled)
+                    Text(appState.selectedLanguage == .russian ? "Исходные файлы сохранены. Можно экспортировать все данные в Настройках." : "Original files are preserved. You can export all data in Settings.").font(.footnote)
+                    Button(appState.selectedLanguage == .russian ? "Повторить восстановление" : "Retry recovery") { appState.recoverLocalData() }
+                        .disabled(!appState.canExportCompleteArchive)
+                }.padding(12).background(Color.woonaSurface)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {

@@ -1,6 +1,7 @@
 import BackgroundTasks
 import Foundation
 import Network
+import UIKit
 
 @MainActor
 final class AppViewModel: ObservableObject {
@@ -56,6 +57,13 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var downloadingRecordingID: UUID?
     @Published private(set) var activeRecording: WoonaRecording?
     @Published private(set) var isCaptureReady = false
+    @Published private(set) var isLocalRecoveryRunning = false
+    @Published private(set) var localRecoveryError: String?
+    @Published private(set) var retirementCleanupStatus = RetirementCleanupStatus(pendingCount: 0, lastError: nil)
+    @Published private(set) var retirementCheckState = "not_checked"
+    @Published private(set) var retirementCheckError: String?
+    @Published private(set) var retirementCheckedAt: String?
+    private var retirementCheckGeneration: UUID?
     @Published private(set) var isRecording = false
     @Published private(set) var isCameraDegraded = false
     @Published var serverBaseURL = ""
@@ -161,10 +169,10 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    var canStartNewSession: Bool { activeRecording == nil && !captureStopInProgress }
-    var canSelectAnimal: Bool { !isBackgroundSyncRunning && activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
+    var canStartNewSession: Bool { !isLocalRecoveryRunning && localRecoveryError == nil && activeRecording == nil && !captureStopInProgress }
+    var canSelectAnimal: Bool { !isLocalRecoveryRunning && localRecoveryError == nil && !isBackgroundSyncRunning && activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
     var transferNetworkAllowsWork: Bool {
-        networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting
+        !isLocalRecoveryRunning && localRecoveryError == nil && networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting
     }
 
     // BG launch can precede the first NWPathMonitor callback. Waiting is bounded,
@@ -186,21 +194,23 @@ final class AppViewModel: ObservableObject {
         if !wasAllowed && transferNetworkAllowsWork && !isBackgroundSyncRunning { schedulePendingSync() }
     }
 
-    var canChangeAccount: Bool {
-        !isBackgroundSyncRunning && completeArchiveTask == nil && !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
+    private var hasExclusiveLocalDataAccess: Bool {
+        !isLocalRecoveryRunning && !isBackgroundSyncRunning && completeArchiveTask == nil && !isAccountOperationRunning && !isConnectionActive && !isReplayRunning && !isRecording &&
         !captureStopInProgress && activeRecording == nil && syncingRecordingIDs.isEmpty &&
         uploadingProfileCount == 0 && scheduledSyncCount == 0 && downloadingRecordingID == nil && removingLocalRecordingID == nil
     }
+    var canChangeAccount: Bool { hasExclusiveLocalDataAccess && localRecoveryError == nil }
+    var canExportCompleteArchive: Bool { hasExclusiveLocalDataAccess }
 
     // Disconnect can cancel a waiting upload. Requiring the entire queue to be
     // idle here would prevent removing credentials when connectivity is lost.
     var canDisconnectServer: Bool {
-        !serverToken.isEmpty && completeArchiveTask == nil && exportPhase == nil &&
+        !isLocalRecoveryRunning && !serverToken.isEmpty && completeArchiveTask == nil && exportPhase == nil &&
         !isAccountOperationRunning && activeRecording == nil && !captureStopInProgress && !isRecording
     }
 
     var canChangeNetworkPolicy: Bool {
-        !isBackgroundSyncRunning && completeArchiveTask == nil && !isAccountOperationRunning && !isRecording && activeRecording == nil &&
+        !isLocalRecoveryRunning && localRecoveryError == nil && !isBackgroundSyncRunning && completeArchiveTask == nil && !isAccountOperationRunning && !isRecording && activeRecording == nil &&
         !captureStopInProgress && !isReplayRunning && syncingRecordingIDs.isEmpty && uploadingProfileCount == 0 &&
         downloadingRecordingID == nil && removingLocalRecordingID == nil
     }
@@ -220,6 +230,8 @@ final class AppViewModel: ObservableObject {
     var serverMutationBlockedReason: String? {
         guard !canChangeAccount else { return nil }
         let ru = selectedLanguage == .russian
+        if isLocalRecoveryRunning { return ru ? "Восстанавливаем прерванную локальную работу. Исходные файлы сохраняются." : "Recovering interrupted local work. Original files are preserved." }
+        if localRecoveryError != nil { return ru ? "Локальное восстановление не завершено. Повторите его или экспортируйте все данные для проверки." : "Local recovery is incomplete. Retry it or export all data for review." }
         if completeArchiveTask != nil { return ru ? "Дождитесь завершения экспорта архива или отмените его." : "Wait for the archive export to finish or cancel it." }
         if isRecording || activeRecording != nil || captureStopInProgress { return ru ? "Завершите текущую сессию и сохранение файлов перед изменением сервера." : "Finish the current session and file finalization before changing server data." }
         if isConnectionActive || isReplayRunning { return ru ? "Отключите устройство или завершите воспроизведение перед изменением сервера." : "Disconnect the device or finish replay before changing server data." }
@@ -261,6 +273,8 @@ final class AppViewModel: ObservableObject {
     private var captureSessionZeroMonotonicNs: UInt64?
     private var captureSessionZeroUncertaintyNs: UInt64?
     private var captureStopInProgress = false
+    private var captureStopTask: Task<Void, Never>?
+    private lazy var captureFinalizationBackgroundTime = CaptureFinalizationBackgroundTime(enabled: backgroundSchedulingEnabled)
     private var hasPreparedActiveCapture = false
     @Published private var syncingRecordingIDs = Set<UUID>()
 
@@ -297,7 +311,7 @@ final class AppViewModel: ObservableObject {
         cameraRecorder.onRecordingFailure = { [weak self] message in
             Task { @MainActor in self?.handleCameraFailure(message) }
         }
-        if let store {
+        if uiTesting, let store {
             do {
                 let recovered = try store.recoverInterruptedUploads(excluding: WoonaServerClient.liveRecordingUploadIDs(root: store.rootDirectory))
                 if recovered > 0 { appendDiagnostic("Recovered \(recovered) interrupted upload states; local files and confirmed progress are preserved") }
@@ -307,6 +321,7 @@ final class AppViewModel: ObservableObject {
         if uiTesting, let profile = dogProfiles.first(where: { $0.numberOrName == "UI Dog 1" }) { selectDogProfile(profile) }
         if store == nil { errorMessage = "Unable to open local Woona database" }
         if !uiTesting {
+            recoverLocalData()
             let monitor = NWPathMonitor()
             networkMonitor = monitor
             monitor.pathUpdateHandler = { [weak self] path in
@@ -316,7 +331,34 @@ final class AppViewModel: ObservableObject {
                 }
             }
             monitor.start(queue: DispatchQueue(label: "woona.network-status"))
-            schedulePendingSync()
+        }
+    }
+
+    func recoverLocalData() {
+        guard hasExclusiveLocalDataAccess, let store else { return }
+        isLocalRecoveryRunning = true; localRecoveryError = nil
+        let root = store.rootDirectory
+        let activeUploads = WoonaServerClient.liveRecordingUploadIDs(root: root)
+        Task {
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    let backgroundStore = try WoonaStore(rootDirectory: root)
+                    let captures = try backgroundStore.recoverUnfinishedCaptures()
+                    _ = try backgroundStore.recoverInterruptedUploads(excluding: activeUploads)
+                    _ = try backgroundStore.applyDeferredServerDeletions()
+                    let cleanup = try backgroundStore.drainLocalDeletionOutbox()
+                    return (captures, cleanup)
+                }.value
+                retirementCleanupStatus = result.1
+                if result.0 > 0 { appendDiagnostic("Recovered \(result.0) interrupted captures. Source files are preserved; unknown timing and legacy working files require review before upload.") }
+                isLocalRecoveryRunning = false
+                reloadProfiles(selecting: selectedDogProfile?.id)
+                schedulePendingSync()
+            } catch {
+                isLocalRecoveryRunning = false
+                localRecoveryError = error.localizedDescription
+                showError(selectedLanguage == .russian ? "Локальное восстановление не завершено; исходные файлы сохранены" : "Local recovery is incomplete; original files are preserved", error: error)
+            }
         }
     }
 
@@ -398,6 +440,8 @@ final class AppViewModel: ObservableObject {
         catch { showError("Server token could not be removed; connection settings are unchanged", error: error); return false }
         serverToken = ""
         WoonaServerClient.cancelAllTransfers()
+        retirementCheckGeneration = nil
+        retirementCheckState = "not_checked"; retirementCheckError = nil; retirementCheckedAt = nil
         if backgroundSchedulingEnabled { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundSyncIdentifier) }
         connectionCheck = "not_checked"; connectionCheckedAt = nil; connectionCheckError = nil
         serverTransferStatuses = [:]; transferStatusErrors = [:]; transferCheckedAt = [:]
@@ -499,7 +543,24 @@ final class AppViewModel: ObservableObject {
     @discardableResult
     func resumePendingSync() async -> Bool {
         guard !Task.isCancelled, transferNetworkAllowsWork, !serverToken.isEmpty, let store else { return false }
+        let generation = UUID()
+        let configuration = ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID)
+        let token = serverToken
+        retirementCheckGeneration = generation
+        retirementCheckState = "checking"; retirementCheckError = nil
         do {
+            let client = try serverClient()
+            // The client's own cancellation/generation guard runs immediately
+            // before applying markers, so disconnect cannot apply a stale result.
+            try await client.reconcileDeletions(into: store, acceptResult: { [weak self] in
+                guard let self else { return false }
+                return self.retirementCheckGeneration == generation && self.serverToken == token &&
+                    configuration == ServerConfiguration(baseURL: self.serverBaseURL, wifiOnly: self.serverWifiOnly, accountID: self.selectedAccountID)
+            })
+            guard retirementCheckGeneration == generation, token == serverToken,
+                  configuration == ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID) else { return false }
+            retirementCheckState = "verified"; retirementCheckedAt = WoonaStore.iso8601(Date())
+            retirementCleanupStatus = try store.retirementCleanupStatus()
             var success = true
             for profile in try store.pendingProfiles() {
                 guard !Task.isCancelled else { return false }
@@ -512,6 +573,10 @@ final class AppViewModel: ObservableObject {
             reloadProfiles()
             return success && !Task.isCancelled
         } catch {
+            if retirementCheckGeneration == generation && retirementCheckState == "checking" {
+                retirementCheckState = serverToken.isEmpty ? "not_checked" : "failed"
+                retirementCheckError = serverToken.isEmpty ? nil : error.localizedDescription
+            }
             appendDiagnostic("Pending sync unavailable: \(error.localizedDescription)")
             return false
         }
@@ -745,10 +810,18 @@ final class AppViewModel: ObservableObject {
     func stopActiveCapture(status: String = "completed") {
         guard let recording = activeRecording, !captureStopInProgress else { return }
         captureStopInProgress = true
+        captureFinalizationBackgroundTime.begin { [weak self] in
+            guard let self else { return }
+            self.captureStopTask?.cancel()
+            self.errorMessage = self.selectedLanguage == .russian
+                ? "iOS завершает время сохранения в фоне. Исходные файлы сохранены; откройте приложение для восстановления прерванной сессии."
+                : "iOS ended the background finalization time. Original files are preserved; open the app to recover the interrupted session."
+        }
         packetIngressGate.stop()
         isRecording = false
         statusText = "Finalizing"
-        Task {
+        captureStopTask = Task {
+            defer { captureStopTask = nil; captureFinalizationBackgroundTime.end() }
             if recording.videoRequested {
                 do { cameraCaptureInfo = try await cameraRecorder.stopRecording() }
                 catch {
@@ -787,13 +860,8 @@ final class AppViewModel: ObservableObject {
     func finishReplaySession() {
         packetUpdateBatcher.flushNow()
         isReplayRunning = false
-        if let recording = activeRecording {
-            guard !captureStopInProgress else { return }
-            captureStopInProgress = true
-            Task {
-                await finishCaptureProcessing()
-                await finalizeActiveRecording(recording, requestedStatus: packetsReceived > 0 ? "completed" : "failed")
-            }
+        if activeRecording != nil {
+            stopActiveCapture(status: packetsReceived > 0 ? "completed" : "failed")
         } else {
             statusText = "Idle"
         }
@@ -987,7 +1055,7 @@ final class AppViewModel: ObservableObject {
             showError(selectedLanguage == .russian ? "Локальная база недоступна. Полный архив не создан; исходные файлы не изменены." : "The local database is unavailable. The complete archive was not created; original files are unchanged.", error: nil)
             return
         }
-        guard exportPhase == nil, canChangeAccount else {
+        guard exportPhase == nil, canExportCompleteArchive else {
             showError(selectedLanguage == .russian ? "Сначала завершите запись и операции с сервером, затем повторите экспорт." : "Finish recording and server operations, then retry export.", error: nil)
             return
         }
@@ -1331,6 +1399,7 @@ final class AppViewModel: ObservableObject {
 
     private func reloadRecentRecordings() {
         defer { invalidateSessionExportAvailability() }
+        if let cleanup = try? store?.retirementCleanupStatus() { retirementCleanupStatus = cleanup }
         if let overview = try? store?.syncOverview() {
             uploadPending = overview.pending; uploadRunning = overview.uploading; uploadSynced = overview.synced; uploadFailed = overview.failed; uploadLastError = overview.lastError
         }
@@ -1482,18 +1551,25 @@ final class AppViewModel: ObservableObject {
         do {
             let data = try JSONSerialization.data(withJSONObject: sync, options: [.sortedKeys, .withoutEscapingSlashes])
             let finalStatus = captureErrorCode == "storage_failed" || (requestedStatus == "completed" && packetsReceived == 0) ? "failed" : requestedStatus
-            try store.finalize(recording: recording, status: finalStatus, files: files, syncJSON: data)
+            let finalization = try await CaptureFinalizer.run(root: store.rootDirectory, recordingID: recording.id, status: finalStatus, files: files, syncJSON: data)
             activeRecording = nil
             hasPreparedActiveCapture = false
             isCaptureReady = false
             isRecording = false
-            statusText = finalStatus.capitalized
-            reloadRecentRecordings()
+            statusText = finalization.retired ? (selectedLanguage == .russian ? "Удалено по команде сервера" : "Retired by server") : finalStatus.capitalized
+            reloadProfiles(selecting: selectedDogProfile?.id)
+            if let cleanupError = finalization.cleanupError {
+                showError(selectedLanguage == .russian ? "Локальная финализация завершена; отложенная очистка требует повтора" : "Local finalization finished; deferred cleanup needs a retry", error: WoonaStoreError.invalidData(cleanupError))
+            }
             if let finalized = try store.recording(id: recording.id) {
                 // Durable capture completion releases the next session before network
                 // transfer starts. The upload queue owns its own busy/error states.
                 scheduleSync(finalized)
             }
+        } catch is CancellationError {
+            showError(selectedLanguage == .russian
+                ? "Сохранение прервано до подтверждения локальной базы. Исходные файлы сохранены; повторите завершение или откройте приложение для восстановления."
+                : "Finalization paused before local metadata was committed. Original files are preserved; retry finishing or reopen the app for recovery.", error: nil)
         } catch { showError("Failed to finalize recording", error: error) }
     }
 
@@ -2658,4 +2734,44 @@ func sessionExportKinds(packetFile: URL?, rawFile: URL?, logFile: URL?, archiveF
     if present(logFile) { kinds.insert(.diagnosticLog) }
     if archiveFiles.contains(where: { present($0) }) { kinds.insert(.all) }
     return kinds
+}
+
+/// Finite time to close writers and commit local capture metadata. This does
+/// not enable background camera recording or promise unlimited background work.
+@MainActor
+final class CaptureFinalizationBackgroundTime {
+    typealias Begin = (@escaping () -> Void) -> UIBackgroundTaskIdentifier
+    private let enabled: Bool
+    private let beginOperation: Begin
+    private let endOperation: (UIBackgroundTaskIdentifier) -> Void
+    private var identifier = UIBackgroundTaskIdentifier.invalid
+    private var generation: UUID?
+
+    init(enabled: Bool, begin: Begin? = nil, end: ((UIBackgroundTaskIdentifier) -> Void)? = nil) {
+        self.enabled = enabled
+        beginOperation = begin ?? { expiration in
+            UIApplication.shared.beginBackgroundTask(withName: "Woona capture finalization", expirationHandler: expiration)
+        }
+        endOperation = end ?? { UIApplication.shared.endBackgroundTask($0) }
+    }
+
+    func begin(onExpiration: @escaping () -> Void) {
+        guard enabled, generation == nil else { return }
+        let token = UUID()
+        generation = token
+        identifier = beginOperation { [weak self] in
+            Task { @MainActor in
+                guard let self, self.generation == token else { return }
+                self.end()
+                onExpiration()
+            }
+        }
+        if identifier == .invalid { generation = nil }
+    }
+
+    func end() {
+        let completed = identifier
+        identifier = .invalid; generation = nil
+        if completed != .invalid { endOperation(completed) }
+    }
 }

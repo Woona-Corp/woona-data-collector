@@ -1,5 +1,6 @@
 import XCTest
 import SQLite3
+import UIKit
 @testable import Woona
 
 @MainActor
@@ -324,8 +325,10 @@ final class AppShellTests: XCTestCase {
             let profile = try store.saveProfile(animal)
             try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
             var networkObserved = false
+            var captureStarted = false
             weak var observedModel: AppViewModel?
             let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { _ in
+                guard captureStarted else { throw WoonaStoreError.invalidData("Synthetic startup retirement probe; no capture exists yet") }
                 let owner = try XCTUnwrap(observedModel)
                 XCTAssertNil(owner.activeRecording, "Capture must already be durable before upload")
                 XCTAssertTrue(owner.canStartNewSession, "Network latency must not keep capture finalization busy")
@@ -343,13 +346,68 @@ final class AppShellTests: XCTestCase {
             var questionnaire = SessionQuestionnaire(); questionnaire.schemaVersion = 2
             questionnaire.sessionLabel = "Finalize ordering"; questionnaire.plannedActivities = ["Покой"]; questionnaire.videoRequested = false
             try model.startReplay(from: source, questionnaire: questionnaire)
+            captureStarted = true
             let recording = try XCTUnwrap(model.activeRecording)
-            try await waitUntil("upload to start after local finalization") { networkObserved }
+            try await waitUntil("upload to start after local finalization", timeout: 15) { networkObserved }
+            XCTAssertTrue(networkObserved, "status=\(model.statusText), error=\(model.errorMessage ?? "none"), active=\(model.activeRecording?.id.uuidString ?? "none")")
             try await waitUntil("owned upload housekeeping to finish") { model.canChangeAccount }
             XCTAssertTrue(["failed", "interrupted", "completed"].contains(try XCTUnwrap(store.recording(id: recording.id)).status))
             XCTAssertTrue(model.canStartNewSession)
         }
         try await exerciseFixture()
+    }
+
+    func testCaptureFinalizationRunsFileWorkOffMainActorAndLeavesMainActorResponsive() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        var animal = DogQuestionnaire(); animal.schemaVersion = 2; animal.animalId = "worker-fixture"; animal.numberOrName = "Synthetic worker animal"
+        let profile = try store.saveProfile(animal)
+        var answers = SessionQuestionnaire(); answers.schemaVersion = 2; answers.sessionLabel = "Off-main finalization"; answers.plannedActivities = ["Покой"]
+        let recording = try store.createRecording(profile: profile, source: "live", questionnaire: answers)
+        let source = root.appendingPathComponent("capture.bin")
+        try Data(repeating: 0x5a, count: 1024 * 1024).write(to: source)
+        let started = expectation(description: "worker started")
+        let release = DispatchSemaphore(value: 0)
+        let operation = Task {
+            try await CaptureFinalizer.run(root: root, recordingID: recording.id, status: "completed",
+                files: [("packet", source, "packets.bin", "application/octet-stream")], syncJSON: Data("{}".utf8), onWorkerStart: {
+                    XCTAssertFalse(Thread.isMainThread)
+                    started.fulfill()
+                    _ = release.wait(timeout: .now() + 10)
+                })
+        }
+        await fulfillment(of: [started], timeout: 5)
+        XCTAssertTrue(Thread.isMainThread, "The main actor must remain available while the worker is paused")
+        XCTAssertEqual(try store.recording(id: recording.id)?.status, "preparing")
+        release.signal()
+        _ = try await operation.value
+        XCTAssertEqual(try store.recording(id: recording.id)?.status, "completed")
+        let packet = try XCTUnwrap(store.artifacts(recordingID: recording.id).first { $0.type == "packet" })
+        XCTAssertEqual(try WoonaStore.sha256File(root.appendingPathComponent(packet.relativePath)), packet.sha256)
+    }
+
+    func testCaptureFinalizationBackgroundTimeEndsExactlyOnceAndIgnoresAnOldExpiration() async throws {
+        var expires: (() -> Void)?
+        var starts = 0, ended = 0, cancelled = 0
+        let lease = CaptureFinalizationBackgroundTime(enabled: true, begin: { callback in
+            starts += 1; expires = callback
+            return UIBackgroundTaskIdentifier(rawValue: starts)
+        }, end: { _ in ended += 1 })
+        lease.begin { cancelled += 1 }
+        lease.begin { cancelled += 1 }
+        XCTAssertEqual(starts, 1)
+        let staleExpiration = expires
+        lease.end(); lease.end()
+        XCTAssertEqual(ended, 1)
+        lease.begin { cancelled += 1 }
+        staleExpiration?()
+        await Task.yield()
+        XCTAssertEqual(cancelled, 0)
+        expires?()
+        try await waitUntil("finite background expiration") { cancelled == 1 }
+        lease.end()
+        XCTAssertEqual(ended, 2)
     }
 
     func testSessionExportAvailabilityUsesLocalFilesAfterRestartDownloadAndRemoval() async throws {

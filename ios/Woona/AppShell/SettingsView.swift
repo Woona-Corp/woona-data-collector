@@ -58,6 +58,24 @@ struct SettingsView: View {
 
                 CompleteArchiveCard()
 
+                AppCard(title: russian ? "Очистка по удалениям сервера" : "Server retirement cleanup") {
+                    Text(retirementCheckLabel).font(.footnote)
+                    if let date = appState.retirementCheckedAt { Text(recordingDisplayTime(date)).font(.caption) }
+                    if let error = appState.retirementCheckError { Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+                    Text(russian ? "Локальных удалений в очереди: \(appState.retirementCleanupStatus.pendingCount)" : "Pending local deletions: \(appState.retirementCleanupStatus.pendingCount)").font(.footnote)
+                    if appState.retirementCleanupStatus.deferredCount > 0 {
+                        Text(russian ? "Отложенных команд удаления: \(appState.retirementCleanupStatus.deferredCount). Повторим после безопасного завершения записи или обновления связанных профилей." : "Deferred retirements: \(appState.retirementCleanupStatus.deferredCount). They retry after capture stops safely or referenced profiles are refreshed.").font(.footnote)
+                    }
+                    if appState.retirementCleanupStatus.pendingCount > 0 {
+                        Text(russian ? "Серверные метаданные уже выведены из обращения. Локальная очистка будет повторена; ошибка файла не отменяет удаление на сервере." : "Server metadata is already retired. Local cleanup will retry; a file error does not undo server retirement.").font(.footnote)
+                        if let error = appState.retirementCleanupStatus.lastError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+                    }
+                    if appState.retirementCleanupStatus.pendingCount > 0 || appState.retirementCleanupStatus.deferredCount > 0 || appState.retirementCheckError != nil {
+                        Button(russian ? "Повторить проверку и очистку" : "Retry check and cleanup") { appState.recoverLocalData() }
+                            .disabled(!appState.canExportCompleteArchive)
+                    }
+                }
+
                 AppCard(title: appState.selectedLanguage == .russian ? "Серверное хранилище" : "Server storage") {
                     Text(russian ? "Очередь всех локальных аккаунтов. Каждая анкета и запись отправляется в свой аккаунт." : "Queue for all local accounts. Each profile and recording uploads to its own account.").font(.footnote)
                     Text(appState.uploadQueueExplanation).font(.footnote)
@@ -156,6 +174,15 @@ struct SettingsView: View {
         case "verified": return russian ? "Последняя проверка успешна" : "Last connection check succeeded"
         case "failed": return russian ? "Последняя проверка не прошла" : "Last connection check failed"
         default: return russian ? "Соединение не проверено" : "Connection not checked"
+        }
+    }
+
+    private var retirementCheckLabel: String {
+        switch appState.retirementCheckState {
+        case "checking": return russian ? "Проверяем команды удаления сервера…" : "Checking server retirements…"
+        case "verified": return russian ? "Последняя проверка команд удаления успешна" : "Last retirement check succeeded"
+        case "failed": return russian ? "Проверка команд удаления не завершена" : "Retirement check is incomplete"
+        default: return russian ? "Команды удаления сервера ещё не проверены" : "Server retirements have not been checked"
         }
     }
 
