@@ -277,6 +277,12 @@ final class KeychainTokenStore {
     }
 }
 
+struct ServerRestoreWarning: Equatable {
+    let kind: String
+    let id: UUID
+    let status: Int
+}
+
 @MainActor
 final class WoonaServerClient {
     private static let liveClients = NSHashTable<WoonaServerClient>.weakObjects()
@@ -290,6 +296,7 @@ final class WoonaServerClient {
     private let accountID: String?
     private let session: URLSession
     private var cancelled = false
+    private(set) var restoreWarnings: [ServerRestoreWarning] = []
     typealias DownloadTransport = @MainActor (URLRequest) async throws -> (URL, URLResponse)
     private let downloadTransport: DownloadTransport?
 
@@ -450,6 +457,19 @@ final class WoonaServerClient {
         return try await deletions().contains { $0.kind == kind && $0.id_sha256 == digest }
     }
 
+    // A missing detail can also be a transient/list race without a marker.
+    // Continue other restore items, but make that partial outcome visible. Only
+    // fresh exact deletion markers are ever passed to the store's purge path.
+    private func skipMissingRestoreEntity(after error: Error, kind: String, id: UUID) async throws -> Bool {
+        guard case ServerSyncError.requestFailed(let status, _) = error, [404, 410].contains(status) else { return false }
+        let confirmed = try await confirmedRetirement(after: error, kind: kind, id: id)
+        if !confirmed {
+            let warning = ServerRestoreWarning(kind: kind, id: id, status: status)
+            if !restoreWarnings.contains(warning) { restoreWarnings.append(warning) }
+        }
+        return true
+    }
+
     func restoreProfiles(into store: WoonaStore) async throws -> [DogProfile] {
         struct Dog: Decodable {
             let id: UUID
@@ -475,7 +495,7 @@ final class WoonaServerClient {
                     body: Optional<Data>.none,
                     as: Dog.self
                 ) } catch {
-                    if try await confirmedRetirement(after: error, kind: "dog", id: summary.id) { continue }
+                    if try await skipMissingRestoreEntity(after: error, kind: "dog", id: summary.id) { continue }
                     throw error
                 }
                 _ = try store.upsertRemoteProfile(
@@ -527,7 +547,7 @@ final class WoonaServerClient {
                     body: Optional<Data>.none,
                     as: Page.self
                 ) } catch {
-                    if try await confirmedRetirement(after: error, kind: "dog", id: dogID) { break }
+                    if try await skipMissingRestoreEntity(after: error, kind: "dog", id: dogID) { break }
                     throw error
                 }
                 for summary in page.items {
@@ -538,7 +558,7 @@ final class WoonaServerClient {
                         body: Optional<Data>.none,
                         as: ServerRecordingDetail.self
                     ) } catch {
-                        if try await confirmedRetirement(after: error, kind: "recording", id: summary.id) { continue }
+                        if try await skipMissingRestoreEntity(after: error, kind: "recording", id: summary.id) { continue }
                         throw error
                     }
                     if try store.restoreRemoteRecording(detail) { restored += 1 }

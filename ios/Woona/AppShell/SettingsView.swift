@@ -127,6 +127,18 @@ struct SettingsView: View {
                     Button(russian ? "Восстановить с сервера" : "Restore from server") { appState.refreshFromServer() }
                         .buttonStyle(.bordered)
                         .disabled(!isServerConfigured || !appState.canChangeAccount)
+                    if appState.serverRestoreState != "not_started" {
+                        Text(restoreLabel).font(.footnote)
+                            .accessibilityIdentifier("server.restoreStatus")
+                    }
+                    if !appState.serverRestoreWarnings.isEmpty {
+                        Text(russian ? "Восстановление частичное: \(appState.serverRestoreWarnings.count) объектов пропущено. Удаление не подтверждено; локальные данные сохранены." : "Restore is partial: \(appState.serverRestoreWarnings.count) entities were skipped. Deletion is unconfirmed; local data is preserved.")
+                            .font(.footnote).foregroundStyle(.orange)
+                        ForEach(Array(appState.serverRestoreWarnings.prefix(10).enumerated()), id: \.offset) { _, warning in
+                            Text("\(warning.kind) · \(warning.id.uuidString) · HTTP \(warning.status)")
+                                .font(.caption).textSelection(.enabled)
+                        }
+                    }
                     if isServerConfigured {
                         Button(russian ? "Отключить сервер" : "Disconnect server", role: .destructive) { isServerDisconnectPresented = true }
                             .buttonStyle(.bordered)
@@ -168,6 +180,15 @@ struct SettingsView: View {
             }
         }
     }
+    private var restoreLabel: String {
+        switch appState.serverRestoreState {
+        case "running": return russian ? "Восстанавливаем данные с сервера…" : "Restoring data from server…"
+        case "completed": return russian ? "Последнее восстановление завершено" : "Last restore completed"
+        case "partial": return russian ? "Последнее восстановление завершено частично" : "Last restore completed partially"
+        default: return russian ? "Последнее восстановление прервано; уже полученные данные сохранены" : "Last restore was interrupted; previously restored data is preserved"
+        }
+    }
+
     private var connectionLabel: String {
         switch appState.connectionCheck {
         case "checking": return russian ? "Проверяем сервер и доступ…" : "Checking server and access…"
