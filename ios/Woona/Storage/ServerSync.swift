@@ -404,26 +404,34 @@ final class WoonaServerClient {
         }
     }
 
-    func deletions() async throws -> [ServerDeletion] {
-        struct Result: Decodable { let entities: [ServerDeletion] }
-        let result = try await json(method: "GET", path: "/v1/deletions", body: Optional<Data>.none, as: Result.self)
+    func deletions(timeout: TimeInterval = 20) async throws -> [ServerDeletion] {
+        struct Response: Decodable { let entities: [ServerDeletion] }
+        let request = try makeRequest(method: "GET", path: "/v1/deletions")
+        let gate = BoundedMetadataRequest()
+        let (data, response) = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                gate.install(continuation)
+                let task = session.dataTask(with: request) { [weak gate] data, response, error in
+                    if let error { gate?.finish(.failure(error)) }
+                    else if let data, let response { gate?.finish(.success((data, response))) }
+                    else { gate?.finish(.failure(ServerSyncError.responseInvalid)) }
+                }
+                gate.start(task, timeout: timeout)
+            }
+        } onCancel: {
+            gate.finish(.failure(CancellationError()), cancelRequest: true)
+        }
+        // No database effects occur in the callback: a late response after a
+        // timeout, task cancellation or disconnect cannot apply retirement.
         try ensureActive()
-        return result.entities
+        try validate(response: response, data: data)
+        return try JSONDecoder().decode(Response.self, from: data).entities
     }
 
     @discardableResult
     func reconcileDeletions(into store: WoonaStore, timeout: TimeInterval = 20,
                             acceptResult: () -> Bool = { true }) async throws -> Int {
-        let markers = try await withThrowingTaskGroup(of: [ServerDeletion].self) { group in
-            group.addTask { try await self.deletions() }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(max(0.001, timeout) * 1_000_000_000))
-                throw URLError(.timedOut)
-            }
-            defer { group.cancelAll() }
-            guard let first = try await group.next() else { throw ServerSyncError.responseInvalid }
-            return first
-        }
+        let markers = try await deletions(timeout: timeout)
         try ensureActive()
         guard acceptResult() else { throw CancellationError() }
         return try store.applyServerDeletions(markers, accountID: accountID)
@@ -971,5 +979,55 @@ private final class NoTransferRedirects: NSObject, URLSessionTaskDelegate, @unch
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)
+    }
+}
+
+// Structured task-group exit waits for every child, including a URLProtocol
+// that never completes after cancellation. This one-shot gate bounds metadata
+// checks independently of transport cooperation and ignores every late result.
+private final class BoundedMetadataRequest: @unchecked Sendable {
+    typealias Response = (Data, URLResponse)
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Response, Error>?
+    private var result: Result<Response, Error>?
+    private var task: URLSessionDataTask?
+    private var deadline: DispatchWorkItem?
+
+    func install(_ continuation: CheckedContinuation<Response, Error>) {
+        lock.lock()
+        let settled = result
+        if settled == nil { self.continuation = continuation }
+        lock.unlock()
+        if let settled { continuation.resume(with: settled) }
+    }
+
+    func start(_ task: URLSessionDataTask, timeout: TimeInterval) {
+        let seconds = timeout.isFinite ? min(86_400, max(0.001, timeout)) : 20
+        let timer = DispatchWorkItem { [weak self] in
+            self?.finish(.failure(URLError(.timedOut)), cancelRequest: true)
+        }
+        lock.lock()
+        guard result == nil else { lock.unlock(); task.cancel(); return }
+        self.task = task
+        deadline = timer
+        lock.unlock()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds, execute: timer)
+        task.resume()
+    }
+
+    func finish(_ result: Result<Response, Error>, cancelRequest: Bool = false) {
+        lock.lock()
+        guard self.result == nil else { lock.unlock(); return }
+        self.result = result
+        let continuation = self.continuation
+        let task = self.task
+        let deadline = self.deadline
+        self.continuation = nil
+        self.task = nil
+        self.deadline = nil
+        lock.unlock()
+        deadline?.cancel()
+        if cancelRequest { task?.cancel() }
+        continuation?.resume(with: result)
     }
 }
