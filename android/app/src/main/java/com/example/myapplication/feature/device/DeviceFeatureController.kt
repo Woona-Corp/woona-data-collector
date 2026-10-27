@@ -42,6 +42,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 
 class DeviceFeatureController(
     private val bleSessionController: BleSessionController,
@@ -86,6 +87,7 @@ class DeviceFeatureController(
     private var lastAlarmQuality: ConnectionQuality? = null
     private var manualDisconnectPending = false
     @Volatile private var v2PreviewConnection = false
+    private val connectionUiGeneration = AtomicLong()
     private var pendingFinalizationStatus: RecordingStatus? = null
     private val finalizationRetryRunnable = Runnable {
         val status = pendingFinalizationStatus
@@ -112,6 +114,7 @@ class DeviceFeatureController(
 
     fun isCaptureActive(): Boolean = !recordingFinalized || recordingFinalizing
     fun isV2PreviewConnection(): Boolean = v2PreviewConnection
+    fun connectionUiGeneration(): Long = connectionUiGeneration.get()
 
     fun setOnRecordingChanged(listener: () -> Unit) {
         recordingChangedListener = listener
@@ -138,6 +141,7 @@ class DeviceFeatureController(
     }
 
     fun onConnectRequested(address: String) {
+        connectionUiGeneration.incrementAndGet()
         v2PreviewConnection = false
         manualDisconnectPending = false
         packetReplayController?.stop()
@@ -157,6 +161,7 @@ class DeviceFeatureController(
             uiStateHolder.showError(appTextResolver.getString(R.string.v2_finish_capture_first))
             return
         }
+        connectionUiGeneration.incrementAndGet()
         manualDisconnectPending = false
         packetReplayController?.stop()
         pendingTransportDiagnostics.clear()
@@ -240,6 +245,7 @@ class DeviceFeatureController(
     }
 
     fun onDisconnectRequested() {
+        connectionUiGeneration.incrementAndGet()
         manualDisconnectPending = true
         if (v2PreviewConnection) bleSessionController.stopV2Live()
         v2PreviewConnection = false
@@ -558,6 +564,7 @@ class DeviceFeatureController(
     }
 
     override fun close() {
+        connectionUiGeneration.incrementAndGet()
         manualDisconnectPending = true
         stopLinkMonitor()
         packetReplayController?.close()

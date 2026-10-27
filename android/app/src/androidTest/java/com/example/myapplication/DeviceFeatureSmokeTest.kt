@@ -26,6 +26,49 @@ import java.util.zip.ZipFile
 @RunWith(AndroidJUnit4::class)
 class DeviceFeatureSmokeTest {
     @Test
+    fun v2PreviewDoesNotCreateSessionOrChangePreviousFilesAndCannotReplaceActiveCapture() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(context.cacheDir, "preview-isolation-${UUID.randomUUID()}").apply { mkdirs() }
+        val database = com.example.myapplication.data.WoonaDatabase(context, root)
+        val packet = File(root, "previous-source.bin").apply { writeBytes(validPacket()) }
+        val capture = FakePacketCaptureController(packet)
+        val listener = object : BleSessionListener {
+            override fun onDeviceFound(device: BleDevice) = Unit
+            override fun onPacketReceived(packetFragment: ByteArray) = Unit
+            override fun onDiagnosticMessage(message: String) = Unit
+            override fun onCaptureReady() = Unit
+            override fun onStateChanged(state: BleSessionState) = Unit
+            override fun onError(message: String, throwable: Throwable?) = Unit
+        }
+        val ble = FakeBleSessionController(listener)
+        val controller = com.example.myapplication.feature.device.DeviceFeatureController(
+            ble, capture, FakeFileShareIntentFactory(), woonaDatabase = database)
+        try {
+            val profile = database.saveProfile(com.example.myapplication.data.DogQuestionnaire(
+                schemaVersion = 2, animalId = "preview-test", numberOrName = "Synthetic preview animal"))
+            val old = database.beginRecording(profile.id, com.example.myapplication.data.RecordingSource.REPLAY, null)
+            database.finishRecording(old.id, com.example.myapplication.data.RecordingStatus.COMPLETED)
+            val previous = database.recording(old.id)
+            val bytes = packet.readBytes()
+            controller.onV2PreviewConnectRequested("PREVIEW")
+            controller.onCaptureReady() // No writer reset on the diagnostic route.
+            controller.onTransportDiagnostic("Preview event")
+            controller.onDisconnectRequested()
+            assertEquals(1, database.recentRecordings(profile.id).size)
+            assertEquals(previous, database.recording(old.id))
+            assertArrayEquals(bytes, packet.readBytes())
+            org.junit.Assert.assertFalse(capture.resetCalled)
+            assertTrue(capture.recordedDiagnostics.isEmpty())
+            val active = database.beginRecording(profile.id, com.example.myapplication.data.RecordingSource.LIVE, null)
+            controller.beginRecordingSession(active)
+            controller.onV2PreviewConnectRequested("MUST-NOT-CONNECT")
+            assertEquals("PREVIEW", ble.connectedAddress)
+            org.junit.Assert.assertFalse(controller.isV2PreviewConnection())
+            assertTrue(controller.isCaptureActive())
+        } finally { controller.close(); database.close(); root.deleteRecursively() }
+    }
+
+    @Test
     fun sessionZipRefusesPreparingAndOngoingCaptureWithoutStoppingVideoOrChangingRecording() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val root = File(context.cacheDir, "export-guard-${UUID.randomUUID()}").apply { mkdirs() }

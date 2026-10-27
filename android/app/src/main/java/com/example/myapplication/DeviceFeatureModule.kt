@@ -186,12 +186,20 @@ fun createDeviceFeatureController(
             v2ReceivedPending = 0; v2GapsPending = 0; v2DroppedPending = 0
         }
     }
-    fun v2OnMain(action: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            if (deviceFeatureController?.isV2PreviewConnection() == true) action()
-        } else mainHandler.post {
-            if (deviceFeatureController?.isV2PreviewConnection() == true) action()
+    fun transportOnMain(action: () -> Unit) {
+        val generation = deviceFeatureController?.connectionUiGeneration()
+        mainHandler.post {
+            if (deviceFeatureController?.connectionUiGeneration() == generation) action()
         }
+    }
+    fun v2OnMain(action: () -> Unit) {
+        val generation = deviceFeatureController?.connectionUiGeneration()
+        fun applyCurrent() {
+            if (deviceFeatureController?.isV2PreviewConnection() == true &&
+                deviceFeatureController?.connectionUiGeneration() == generation) action()
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) applyCurrent()
+        else mainHandler.post { applyCurrent() }
     }
     val listener = object : BleSessionListener {
             override fun onDeviceFound(device: BleDevice) {
@@ -219,13 +227,13 @@ fun createDeviceFeatureController(
             }
 
             override fun onDiagnosticMessage(message: String) {
-                mainHandler.post {
+                transportOnMain {
                     deviceFeatureController?.onTransportDiagnostic(message)
                 }
             }
 
             override fun onCaptureReady() {
-                mainHandler.post {
+                transportOnMain {
                     deviceFeatureController?.onCaptureReady()
                 }
             }
@@ -274,7 +282,7 @@ fun createDeviceFeatureController(
             }
 
             override fun onStateChanged(state: BleSessionState) {
-                mainHandler.post {
+                transportOnMain {
                     if (state in setOf(BleSessionState.DISCONNECTED, BleSessionState.FAILED)) resetV2PreviewQueue()
                     deviceFeatureController?.onBleStateChanged(state)
                         ?: uiStateHolder.onSessionStateChanged(state)
@@ -282,7 +290,7 @@ fun createDeviceFeatureController(
             }
 
             override fun onError(message: String, throwable: Throwable?) {
-                mainHandler.post {
+                transportOnMain {
                     if (message.startsWith("V2 discovery failed:")) {
                         // Diagnostic V2 negotiation is not a Legacy capture failure.
                         uiStateHolder.onV2DiscoveryFailed(message)
