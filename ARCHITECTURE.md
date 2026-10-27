@@ -41,7 +41,7 @@ PostgreSQL хранит анкеты, версии, связи, состояни
 ## Локальная модель
 
 `filesDir/Woona/woona.sqlite` на Android и Application Support
-`Woona/woona.sqlite` на iOS используют совместимые модели (Android schema version 7; iOS version 5 с дополнительными столбцами аккаунта, версий анкет и контрольных файлов):
+`Woona/woona.sqlite` на iOS используют совместимые модели (Android schema version 8; iOS version 8 с аккаунтами, версиями анкет, контрольными файлами и durable retirement outbox):
 
 - `dogs`;
 - `dog_profile_versions`;
