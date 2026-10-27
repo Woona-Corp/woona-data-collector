@@ -2,6 +2,7 @@ package com.example.myapplication.protocol
 
 import org.junit.Assert.*
 import org.junit.Test
+import kotlin.random.Random
 
 class WoonaV2CodecTest {
     @Test fun helloRoundTripAcrossArbitraryBleBoundaries() {
@@ -51,5 +52,47 @@ class WoonaV2CodecTest {
         data[4] = 1; data[8] = 1; data[10] = 0xfa.toByte(); data[11] = 0
         val f = WoonaV2Codec.decodeRaw(WoonaV2Codec.encodeRaw(WoonaV2Codec.DATA, 2, 0, data))!!
         assertEquals(6, WoonaV2Codec.liveData(f)!!.samples.size)
+    }
+
+    @Test fun descriptorsRejectAliasedIdsInvalidLayoutsZeroRatesAndMaskDisagreement() {
+        val valid = V2Streams(0, 1, listOf(V2Stream(1, 1, 3, 1000)))
+        assertTrue(WoonaV2Codec.validStreams(valid))
+        for (bad in listOf(V2Stream(0, 1, 3, 1000), V2Stream(33, 1, 3, 1000),
+            V2Stream(1, 0, 3, 1000), V2Stream(1, 2, 3, 1000), V2Stream(1, 1, 0, 1000),
+            V2Stream(1, 1, 1, 1000), V2Stream(1, 1, 17, 1000), V2Stream(1, 1, 3, 0))) {
+            assertFalse(bad.toString(), WoonaV2Codec.validStreams(valid.copy(descriptors = listOf(bad))))
+        }
+        assertFalse(WoonaV2Codec.validStreams(valid.copy(descriptors = valid.descriptors + valid.descriptors)))
+        assertFalse(WoonaV2Codec.validStreams(valid.copy(streamMask = 3)))
+        assertFalse(WoonaV2Codec.validStreams(V2Streams(0, 0, emptyList())))
+        assertTrue(WoonaV2Codec.validStreams(V2Streams(0, 0x8000_0000L, listOf(V2Stream(32, 1, 16, 8000)))))
+        assertTrue(WoonaV2Codec.validStreams(V2Streams(0, 0x60, listOf(V2Stream(6, 1, 1, 1), V2Stream(7, 1, 1, 1)))))
+    }
+
+    @Test fun boundedFuzzAndMaximumFramesResynchronizeWithoutUnboundedAllocation() {
+        val random = Random(27012026)
+        repeat(1000) {
+            val bytes = random.nextBytes(random.nextInt(WoonaV2Codec.MAX_RAW + 1))
+            val encoded = WoonaV2Codec.cobsEncode(bytes)
+            assertTrue(encoded.size <= WoonaV2Codec.MAX_ENCODED)
+            assertArrayEquals(bytes, WoonaV2Codec.cobsDecode(encoded))
+            WoonaV2Codec.cobsDecode(random.nextBytes(random.nextInt(WoonaV2Codec.MAX_ENCODED + 1)))
+        }
+        val wire = WoonaV2Codec.encodeWire(WoonaV2Codec.DATA, 0xffff_ffffL, 0,
+            ByteArray(WoonaV2Codec.MAX_PAYLOAD) { 0x55 })
+        assertTrue(wire.size <= WoonaV2Codec.MAX_ENCODED + 1)
+        for (size in listOf(1, 2, 7, 20, 185)) {
+            val decoder = WoonaV2StreamDecoder()
+            val frames = wire.asList().chunked(size).flatMap { decoder.append(it.toByteArray()) }
+            assertEquals(1, frames.size)
+            assertEquals(WoonaV2Codec.MAX_PAYLOAD, frames.single().payload.size)
+            assertEquals(0xffff_ffffL, frames.single().sequence)
+        }
+        assertNull(WoonaV2Codec.cobsDecode(ByteArray(WoonaV2Codec.MAX_ENCODED + 1) { 1 }))
+        try { WoonaV2Codec.cobsEncode(ByteArray(WoonaV2Codec.MAX_RAW + 1)); fail("oversize raw") }
+        catch (_: IllegalArgumentException) { }
+        val decoder = WoonaV2StreamDecoder()
+        assertTrue(decoder.append(ByteArray(1_000_000) { 1 }).isEmpty())
+        assertEquals(1, decoder.append(byteArrayOf(0) + wire).size)
     }
 }

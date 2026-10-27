@@ -10,6 +10,7 @@ import java.nio.ByteOrder
  * last ATT Write Request has been acknowledged.
  */
 class WoonaV2LiveSession(private val streams: V2Streams) {
+    init { require(WoonaV2Codec.validStreams(streams)) { "Invalid V2 stream descriptors" } }
     enum class Phase { IDLE, WAIT_START, RUNNING, WAIT_STOP, STOPPED, FAILED }
 
     sealed interface Event {
@@ -37,10 +38,12 @@ class WoonaV2LiveSession(private val streams: V2Streams) {
     private var nextSequence = 4L // HELLO/STREAMS/STATUS have already used 1..3.
     private var nextRequestId = 4L
     private val lastStreamSequence = mutableMapOf<Int, Long>()
+    private var lastFrameSequence: Long? = null
+    private var pendingWireGap = false
 
     fun start(streamMask: Long): Event.Transmit {
         require(phase == Phase.IDLE || phase == Phase.STOPPED) { "Cannot start LIVE in $phase" }
-        require(streamMask > 0 && (streamMask and streams.streamMask) == streamMask) { "Unsupported stream mask" }
+        require(streamMask in 1..U32_MAX && (streamMask and streams.streamMask) == streamMask) { "Unsupported stream mask" }
         require(streams.descriptors.any { (streamMask and (1L shl (it.id - 1))) != 0L })
         val payload = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
             .put(1).put(0).put(0).put(0)
@@ -63,17 +66,28 @@ class WoonaV2LiveSession(private val streams: V2Streams) {
     /** Processes already CRC-checked V2 frames; unsolicited DATA has request_id = 0. */
     fun receive(frame: V2Frame): List<Event> {
         if (phase == Phase.IDLE || phase == Phase.FAILED) return emptyList()
+        if (frame.sequence !in 0..U32_MAX) return emptyList()
+        val previousFrame = lastFrameSequence
+        val frameDelta = previousFrame?.let { (frame.sequence - it) and U32_MAX }
+        // Half-range ordering permits a genuine uint32 wrap, not duplicates or
+        // backwards/replayed DATA. Count all wire frames, including control ACKs.
+        val freshFrame = frameDelta == null || frameDelta in 1 until 0x8000_0000L
+        if (freshFrame) {
+            lastFrameSequence = frame.sequence
+            if (frameDelta != null && frameDelta > 1) pendingWireGap = true
+        }
         // STOP_ACK can overtake already-queued DATA; retain late blocks for the same
         // session ID until the next START or disconnect, as specified by firmware.
         if (frame.type == WoonaV2Codec.DATA && frame.requestId == 0L &&
             (phase == Phase.RUNNING || phase == Phase.WAIT_STOP || phase == Phase.STOPPED)) {
+            if (!freshFrame) return emptyList()
             return onData(frame)?.let(::listOf) ?: emptyList()
         }
-        if (phase == Phase.STOPPED || frame.requestId != pendingRequestId) return emptyList()
-        if (frame.type == 0xFF && frame.payload.size == 4 &&
-            (frame.payload[1].toInt() and 0xff) == pendingCommandType) {
-            val status = frame.payload[0].toInt() and 0xff
-            return listOf(fail("V2 command 0x${pendingCommandType.toString(16)} rejected: status=$status"))
+        if (phase !in setOf(Phase.WAIT_START, Phase.WAIT_STOP) ||
+            pendingRequestId == 0L || frame.requestId != pendingRequestId) return emptyList()
+        val error = WoonaV2Codec.error(frame)
+        if (error != null && error.offendingType == pendingCommandType) {
+            return listOf(fail("V2 command 0x${pendingCommandType.toString(16)} rejected: status=${error.status} (${WoonaV2Codec.statusDescription(error.status)})"))
         }
         return when (phase) {
             Phase.WAIT_START -> startResponse(frame)?.let(::listOf) ?: emptyList()
@@ -96,9 +110,11 @@ class WoonaV2LiveSession(private val streams: V2Streams) {
         pendingCommandType = 0
         pendingWire = ByteArray(0)
         retries = 0
-        nextSequence = 4
-        nextRequestId = 4
+        // A reset does not prove BLE disconnected. Never reuse an ID that may
+        // still be in this connection's firmware replay cache.
         lastStreamSequence.clear()
+        lastFrameSequence = null
+        pendingWireGap = false
     }
 
     private fun startResponse(frame: V2Frame): Event? {
@@ -110,14 +126,14 @@ class WoonaV2LiveSession(private val streams: V2Streams) {
         val mask = p.getInt(8).toLong() and U32_MAX
         val duration = p.getInt(12).toLong() and U32_MAX
         val storageSequence = p.getLong(16)
-        if (status != 0) return fail("START_SESSION rejected: status=$status")
+        if (status != 0) return fail("START_SESSION rejected: status=$status (${WoonaV2Codec.statusDescription(status)})")
         if (mode != 1 || p.getShort(2).toInt() != 0 || id == 0L ||
             mask != activeMask || duration != 0L || storageSequence != 0L) {
             return fail("Malformed V2 LIVE START_SESSION_RESPONSE")
         }
         sessionId = id
         phase = Phase.RUNNING
-        pendingWire = ByteArray(0)
+        clearPending()
         return Event.Started(id, mask)
     }
 
@@ -127,12 +143,12 @@ class WoonaV2LiveSession(private val streams: V2Streams) {
         val status = frame.payload[0].toInt() and 0xff
         val modeAfter = frame.payload[1].toInt() and 0xff
         val id = p.getInt(4).toLong() and U32_MAX
-        if (status != 0) return fail("STOP_SESSION rejected: status=$status")
+        if (status != 0) return fail("STOP_SESSION rejected: status=$status (${WoonaV2Codec.statusDescription(status)})")
         if (modeAfter != 0 || p.getShort(2).toInt() != 0 || id != sessionId) {
             return fail("Malformed V2 LIVE STOP_SESSION_RESPONSE")
         }
         phase = Phase.STOPPED
-        pendingWire = ByteArray(0)
+        clearPending()
         return Event.Stopped(id)
     }
 
@@ -140,13 +156,17 @@ class WoonaV2LiveSession(private val streams: V2Streams) {
         val data = WoonaV2Codec.liveData(frame) ?: return null
         if (data.sessionId != sessionId || data.streamId !in 1..32 ||
             (activeMask and (1L shl (data.streamId - 1))) == 0L ||
-            data.count == 0 || data.rateHz == 0 || data.timestampUs < 0) return null
+            data.count == 0 || data.rateHz == 0) return null
         val descriptor = streams.descriptors.firstOrNull { it.id == data.streamId } ?: return null
-        if (descriptor.channels !in 1..16 || descriptor.format !in 1..2) return null
+        if (descriptor.channels !in 1..16 || descriptor.format !in 1..2 || data.rateHz > descriptor.nativeRateHz) return null
         val expectedSize = data.count.toLong() * descriptor.channels * 2L
         if (data.samples.size.toLong() != expectedSize) return null
-        val previous = lastStreamSequence.put(data.streamId, data.streamSequence)
-        val gap = previous != null && data.streamSequence != ((previous + 1) and U32_MAX)
+        val previous = lastStreamSequence[data.streamId]
+        val delta = previous?.let { (data.streamSequence - it) and U32_MAX }
+        if (delta == 0L || (delta != null && delta >= 0x8000_0000L)) return null
+        lastStreamSequence[data.streamId] = data.streamSequence
+        val gap = (delta != null && delta > 1) || pendingWireGap
+        pendingWireGap = false
         return Event.Samples(frame.sequence, data, descriptor, gap)
     }
 
@@ -161,8 +181,14 @@ class WoonaV2LiveSession(private val streams: V2Streams) {
 
     private fun fail(message: String): Event.Failure {
         phase = Phase.FAILED
-        pendingWire = ByteArray(0)
+        clearPending()
         return Event.Failure(message)
+    }
+
+    private fun clearPending() {
+        pendingRequestId = 0
+        pendingCommandType = 0
+        pendingWire = ByteArray(0)
     }
 
     private companion object { const val U32_MAX = 0xffff_ffffL }

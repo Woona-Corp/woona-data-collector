@@ -54,6 +54,20 @@ class WoonaV2ChartMapperTest {
         assertTrue(WoonaV2ChartMapper.map(samples(flags = 0)).isEmpty())
     }
 
+    @Test fun bothTemperaturesStaySignedRawCountsWithoutInventedCelsiusConversion() {
+        for ((stream, sensor) in listOf(6 to 7, 7 to 8)) {
+            val result = WoonaV2ChartMapper.map(samples(id = stream, channels = 1, rateHz = 1,
+                values = intArrayOf(-128, 3200), flags = 3))
+            val points = requireNotNull(result[ChartStreamKey(sensor, 1)])
+            assertEquals(listOf(-128f, 3200f), points.map { it.value })
+            assertEquals(listOf(1000L, 2000L), points.map { it.timeMillis })
+            assertTrue(points.first().startsNewSegment)
+            assertFalse(points.last().startsNewSegment)
+            assertTrue(WoonaV2ChartMapper.map(samples(id = stream, channels = 1, format = 2,
+                values = intArrayOf(65535, 3000))).isEmpty())
+        }
+    }
+
     @Test fun decimatesLargeBlocks() {
         val count = 400
         val result = WoonaV2ChartMapper.map(samples(id = 3, channels = 1, sampleCount = count,
