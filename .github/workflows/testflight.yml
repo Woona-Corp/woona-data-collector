@@ -5,6 +5,10 @@ on:
       target_email_sha256:
         required: true
         type: string
+      target_name_sha256:
+        required: false
+        type: string
+        default: ''
       version:
         required: true
         type: string
@@ -28,6 +32,7 @@ jobs:
           CHECK_VERSION: ${{ inputs.version }}
           CHECK_BUILD: ${{ inputs.build }}
           TARGET_EMAIL_SHA256: ${{ inputs.target_email_sha256 }}
+          TARGET_NAME_SHA256: ${{ inputs.target_name_sha256 }}
         run: |
           python3 ios/tools/check_testflight_status.py
       - uses: actions/upload-artifact@v7

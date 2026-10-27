@@ -1,29 +1,46 @@
 import hashlib
 import json
 import unittest
-from check_testflight_status import target_group_match, target_access
+from check_testflight_status import tester_identities, target_access
 
+TARGET = hashlib.sha256(b'tester@example.invalid').hexdigest()
+
+def person(id, email=None, first=None, last=None):
+    return {'id': id, 'attributes': {'email': email, 'firstName': first, 'lastName': last}}
+
+def group(id, internal, people, name_hash=''):
+    return {'id': id, 'is_internal': internal, '_identities': tester_identities({'data': people}, TARGET, name_hash)}
 
 class TesterAccessTest(unittest.TestCase):
-    def test_exact_normalized_email_match_does_not_return_private_fields(self):
-        digest = hashlib.sha256(b'tester@example.invalid').hexdigest()
-        self.assertTrue(target_group_match({'data': [{'attributes': {'email': ' TESTER@example.invalid '}}]}, digest))
-        report = target_access([{'id': 'internal', 'is_internal': True, 'target_match': True}], {'internal'})
-        self.assertEqual(report, {'matched': True, 'internal': True, 'external': False, 'assignedBuild': True})
-        self.assertNotIn('example.invalid', json.dumps(report))
+    def test_exact_normalized_email_and_same_id_join_without_email_in_internal_roster(self):
+        rows = [group('internal', True, [person('target')]),
+                group('external', False, [person('target', ' TESTER@example.invalid ')])]
+        result = target_access(rows, {'internal'})
+        self.assertTrue(all(result[k] for k in ['matched','internal','external','assignedBuild']))
+        self.assertNotIn('example.invalid', json.dumps(result))
 
-    def test_external_member_cannot_claim_assignment_to_internal_build(self):
-        report = target_access([{'id': 'internal', 'is_internal': True, 'target_match': False},
-                                {'id': 'external', 'is_internal': False, 'target_match': True}], {'internal'})
-        self.assertEqual(report, {'matched': True, 'internal': False, 'external': True, 'assignedBuild': False})
+    def test_unknown_other_testers_do_not_hide_a_proven_external_identity(self):
+        rows = [group('internal', True, [person('other')]),
+                group('external', False, [person('target', 'tester@example.invalid'), person('anonymous')])]
+        result = target_access(rows, {'internal'})
+        self.assertTrue(result['matched']);self.assertFalse(result['internal']);self.assertTrue(result['external']);self.assertFalse(result['assignedBuild'])
 
-    def test_absent_member_is_not_reported_as_assigned(self):
-        self.assertEqual(target_access([], {'internal'}),
-                         {'matched': False, 'internal': False, 'external': False, 'assignedBuild': False})
+    def test_multiple_target_ids_or_hidden_unidentified_target_remain_unknown(self):
+        for people in [[person('anonymous')], [person('one', 'tester@example.invalid'), person('two', 'tester@example.invalid')]]:
+            result = target_access([group('internal', True, people)], {'internal'})
+            self.assertIsNone(result['matched']);self.assertIsNone(result['internal'])
 
-    def test_hidden_email_or_incomplete_listing_cannot_prove_absence(self):
-        target = '0' * 64
-        for body in [{'data': [{'attributes': {'email': None}}]}, {'data': [], 'meta': {'paging': {'total': 1}}},
-                     {'data': [], 'links': {'next': 'not-fetched'}}]:
-            with self.assertRaises(RuntimeError):target_group_match(body, target)
-        with self.assertRaises(ValueError):target_group_match({'data': []}, 'invalid')
+    def test_unique_exact_name_digest_can_identify_an_email_hidden_target(self):
+        digest = hashlib.sha256(b'synthetic person').hexdigest()
+        result = target_access([group('internal', True, [person('target', first='Synthetic', last='Person')], digest)], {'internal'})
+        self.assertTrue(result['matched']);self.assertTrue(result['internal']);self.assertEqual(result['identityEvidence'], 'unique_exact_name_digest')
+        self.assertNotIn('Synthetic', json.dumps(result))
+
+    def test_complete_visible_roster_can_prove_absence(self):
+        result = target_access([group('internal', True, [person('other', 'other@example.invalid')])], {'internal'})
+        self.assertFalse(result['matched']);self.assertFalse(result['assignedBuild'])
+
+    def test_incomplete_listing_cannot_prove_absence(self):
+        for body in [{'data': [], 'meta': {'paging': {'total': 1}}}, {'data': [], 'links': {'next': 'not-fetched'}}]:
+            with self.assertRaises(RuntimeError):tester_identities(body, TARGET)
+        with self.assertRaises(ValueError):tester_identities({'data': []}, 'invalid')

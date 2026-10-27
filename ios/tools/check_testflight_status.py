@@ -49,35 +49,52 @@ def token(key_path, key_id, issuer, now=None):
     return signing.decode() + '.' + b64(jose_signature(signed))
 
 
-def target_group_match(testers, target_hash):
-    """Compare only in memory; never return tester names, addresses or objects."""
+def tester_identities(testers, target_hash, target_name_hash=''):
+    """Private in-memory identity signals; never include addresses or names."""
     if not re.fullmatch(r'[0-9a-f]{64}', target_hash):
         raise ValueError('An explicit SHA-256 target is required')
+    if target_name_hash and not re.fullmatch(r'[0-9a-f]{64}', target_name_hash):
+        raise ValueError('The optional name digest must be SHA-256')
     items = testers.get('data', [])
     total = testers.get('meta', {}).get('paging', {}).get('total', len(items))
     if testers.get('links', {}).get('next') or total > len(items):
         raise RuntimeError('Tester listing incomplete; identity cannot be verified')
-    matches = []
+    result = []
     for item in items:
-        email = item.get('attributes', {}).get('email')
-        if not isinstance(email, str) or not email.strip():
-            raise RuntimeError('Tester email is unavailable; identity cannot be verified')
-        matches.append(hashlib.sha256(email.strip().casefold().encode()).hexdigest() == target_hash)
-    return any(matches)
+        attrs = item.get('attributes', {})
+        email = (attrs.get('email') or '').strip().casefold()
+        first, last = (attrs.get('firstName') or '').strip(), (attrs.get('lastName') or '').strip()
+        full_name = (first + ' ' + last).casefold()
+        result.append({'id': item['id'], 'email_visible': bool(email),
+            'email_match': bool(email) and hashlib.sha256(email.encode()).hexdigest() == target_hash,
+            'name_match': bool(first and last and target_name_hash) and hashlib.sha256(full_name.encode()).hexdigest() == target_name_hash})
+    return result
 
 
 def target_access(groups, assigned_group_ids):
-    matched = [group for group in groups if group.get('target_match')]
-    return {'matched': bool(matched),
-            'internal': any(group['is_internal'] for group in matched),
+    identities = [item for group in groups for item in group['_identities']]
+    email_ids = {item['id'] for item in identities if item['email_match']}
+    name_ids = {item['id'] for item in identities if item['name_match']}
+    chosen = next(iter(email_ids)) if len(email_ids) == 1 else None
+    proof = 'email_digest' if chosen else 'unverified'
+    if not email_ids and len(name_ids) == 1:
+        chosen = next(iter(name_ids)); proof = 'unique_exact_name_digest'
+    if not chosen:
+        known_absent = not email_ids and not name_ids and all(item['email_visible'] for item in identities)
+        value = False if known_absent else None
+        return {'matched': value, 'internal': value, 'external': value, 'assignedBuild': value,
+                'identityEvidence': 'complete_visible_rosters_no_match' if known_absent else 'unverified_or_ambiguous'}
+    matched = [group for group in groups if any(item['id'] == chosen for item in group['_identities'])]
+    return {'matched': True, 'internal': any(group['is_internal'] for group in matched),
             'external': any(not group['is_internal'] for group in matched),
-            'assignedBuild': any(group['id'] in assigned_group_ids for group in matched)}
+            'assignedBuild': any(group['id'] in assigned_group_ids for group in matched), 'identityEvidence': proof}
 
 
 def main():
     version = os.environ['CHECK_VERSION']
     build_number = os.environ['CHECK_BUILD'].strip()
     target_hash = os.environ['TARGET_EMAIL_SHA256'].strip()
+    target_name_hash = os.environ.get('TARGET_NAME_SHA256', '').strip()
     if not re.fullmatch(r'[0-9a-f]{64}', target_hash):
         raise ValueError('An explicit SHA-256 target is required')
     if not build_number.isdecimal():
@@ -99,11 +116,11 @@ def main():
         available_groups = []
         for group in get('/v1/apps/' + apps[0]['id'] + '/betaGroups', {'limit': 200})['data']:
             attributes = group['attributes']
-            testers = get('/v1/betaGroups/' + group['id'] + '/betaTesters', {'limit': 200})
+            testers = get('/v1/betaGroups/' + group['id'] + '/betaTesters', {'limit': 200, 'fields[betaTesters]': 'email,firstName,lastName'})
             available_groups.append({'id': group['id'], 'name': attributes.get('name'),
                 'is_internal': attributes.get('isInternalGroup'),
                 'tester_count': testers.get('meta', {}).get('paging', {}).get('total', len(testers['data'])),
-                'target_match': target_group_match(testers, target_hash)})
+                '_identities': tester_identities(testers, target_hash, target_name_hash)})
         for attempt in range(45):
             result = get('/v1/builds', {'filter[app]': apps[0]['id'], 'filter[version]': build_number,
                 'filter[preReleaseVersion.version]': version, 'include': 'buildBetaDetail,betaGroups,preReleaseVersion'})
@@ -125,7 +142,7 @@ def main():
                     'internal_build_state': detail.get('internalBuildState'),
                     'external_build_state': detail.get('externalBuildState'),
                     'auto_notify_enabled': detail.get('autoNotifyEnabled'), 'groups': groups,
-                    'available_groups': [{k: v for k, v in group.items() if k != 'target_match'} for group in available_groups],
+                    'available_groups': [{k: v for k, v in group.items() if k != '_identities'} for group in available_groups],
                     'target_tester_access': target_access(available_groups, {ref['id'] for ref in group_refs}),
                     'physical_installation_verified': False}
                 print(json.dumps(report), flush=True)
