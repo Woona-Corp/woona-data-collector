@@ -43,6 +43,9 @@
 2. Do not commit `.env`, credentials, signing keys, `android/dist/`, local
    databases, recordings, or generated build outputs. Do not put a server
    bearer token in a release APK.
+   Backups are disabled by the owner's decision of 2026-10-27: do not recreate
+   server/full/off-host/laptop backup jobs, timers or cron entries during setup,
+   deployment or updates. See `shared/operations/backups/README.md`.
 3. Use `./android/tools/check.sh fast` for Android work; use `full` for the
    instrumentation areas above. For server/Compose work, run `docker compose
    config -q` and the relevant tests from `shared/`. iOS tests run only on
