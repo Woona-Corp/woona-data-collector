@@ -1153,7 +1153,7 @@ final class AppViewModel: ObservableObject {
     var canOpenSessionExport: Bool { ExportKind.allCases.contains { canExportSessionFile($0) } }
 
     func canExportSessionFile(_ kind: ExportKind) -> Bool {
-        guard exportPhase == nil, removingLocalRecordingID == nil,
+        guard !isV2PreviewActive, exportPhase == nil, removingLocalRecordingID == nil,
               availableSessionExportKinds.contains(kind) else { return false }
         if kind == .all { return activeRecording == nil && !captureStopInProgress }
         return activeRecording == nil || hasPreparedActiveCapture

@@ -113,6 +113,16 @@ final class V2PreviewTests: XCTestCase {
         XCTAssertLessThanOrEqual(snapshot.channels.count, 11)
         XCTAssertTrue(snapshot.channels.allSatisfy { $0.points.count <= 6000 })
         XCTAssertTrue(snapshot.channels.flatMap(\.points).allSatisfy { $0.time.isFinite && $0.value.isFinite })
+        let omittedBefore = snapshot.skippedUIBlocks
+        let plottedBefore = snapshot.channels.reduce(0) { $0 + $1.points.count }
+        var backwards = [UInt8](example.payload)
+        for byte in 0..<4 { backwards[12 + byte] = UInt8(truncatingIfNeeded: UInt32(200) >> (8 * byte)) }
+        let backwardsStamp = WoonaV2Codec.u64(backwards, 16) + 198 * 50_000
+        for byte in 0..<8 { backwards[16 + byte] = UInt8(truncatingIfNeeded: backwardsStamp >> (8 * byte)) }
+        worker.receive(try WoonaV2Codec.encodeWire(type: WoonaV2Codec.data, sequence: 305, requestID: 0, payload: Data(backwards)))
+        try await wait { snapshot.decodedBlocks == 201 }
+        XCTAssertEqual(snapshot.skippedUIBlocks, omittedBefore + 1, "A backwards clock is counted as decoded and explicitly omitted from the chart")
+        XCTAssertEqual(snapshot.channels.reduce(0) { $0 + $1.points.count }, plottedBefore)
         worker.disconnected()
     }
 
