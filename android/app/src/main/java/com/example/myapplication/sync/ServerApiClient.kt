@@ -487,7 +487,7 @@ class ServerApiClient(
             JSONObject().apply {
                 val sync = record.sync
                 put("schemaVersion", sync.schemaVersion)
-                put("monotonicClock", "android.elapsedRealtimeNanos")
+                put("monotonicClock", sync.monotonicClock)
                 put("sessionZeroAtUtc", sync.sessionZeroAtUtc)
                 put("sessionZeroWallClockMs", sync.sessionZeroWallClockMs)
                 put("sessionZeroMonotonicNs", sync.sessionZeroMonotonicNs)
@@ -587,6 +587,7 @@ class ServerApiClient(
             verifiedAtUtc = value.nullableString("serverVerifiedAtUtc"),
             sync = RecordingSyncClock(
                 schemaVersion = sync.getInt("schemaVersion"),
+                monotonicClock = sync.getString("monotonicClock"),
                 sessionZeroAtUtc = sync.getString("sessionZeroAtUtc"),
                 sessionZeroWallClockMs = sync.getLong("sessionZeroWallClockMs"),
                 sessionZeroMonotonicNs = sync.getLong("sessionZeroMonotonicNs"),

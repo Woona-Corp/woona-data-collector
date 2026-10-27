@@ -120,6 +120,10 @@ class MainActivity : ComponentActivity() {
     private var editingProfile by mutableStateOf<DogProfile?>(null)
     private var isSessionQuestionnaireVisible by mutableStateOf(false)
     private var editingRecording by mutableStateOf<com.example.myapplication.data.Recording?>(null)
+    private var startupReady by mutableStateOf(false)
+    private var startupRecoveryRunning by mutableStateOf(false)
+    private var startupRecoveryError by mutableStateOf<String?>(null)
+    private var startupSavedState: Bundle? = null
     private var accountBusy by mutableStateOf(false)
     private var heartQuestionnaireRecordingId by mutableStateOf<String?>(null)
     private var referenceRecordingId: String? = null
@@ -178,7 +182,7 @@ class MainActivity : ComponentActivity() {
             sessionPreparationError = if (selectedLanguage == AppLanguage.RUSSIAN) "Файл не выбран. Черновик сохранён в этом окне; повторите выбор или отмените." else "No file was selected. Your draft remains in this window; select a file again or cancel."
             return@registerForActivityResult
         }
-        if (accountBusy || selectedProfileId == null) {
+        if (!startupReady || accountBusy || selectedProfileId == null) {
             sessionPreparationError = if (selectedLanguage == AppLanguage.RUSSIAN) "Не удалось начать воспроизведение: дождитесь операции аккаунта и выберите животное. Черновик остаётся открытым." else "Cannot start replay: wait for the account operation and select an animal. Your draft remains open."
             return@registerForActivityResult
         }
@@ -248,44 +252,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        if (!CaptureServiceBridge.isRunning && !DeviceFeatureControllerHolder.hasActiveCapture()) {
-            woonaDatabase.interruptUnfinished()
-        }
-        refreshProfilesAndRecordings()
-        savedInstanceState?.let { state ->
-            editingProfile = state.getString(STATE_EDITING_PROFILE_ID)
-                ?.let { id -> dogProfiles.firstOrNull { it.id == id } }
-            isDogQuestionnaireVisible =
-                state.getBoolean(STATE_DOG_QUESTIONNAIRE_VISIBLE) || dogProfiles.isEmpty()
-            isSessionQuestionnaireVisible =
-                state.getBoolean(STATE_SESSION_QUESTIONNAIRE_VISIBLE)
-            isServerSettingsVisible = state.getBoolean(STATE_SERVER_SETTINGS_VISIBLE)
-            pendingLiveAddress = state.getString(STATE_PENDING_LIVE_ADDRESS)
-            pendingReplayQuestionnaire = state.getString(STATE_PENDING_REPLAY_QUESTIONNAIRE)
-                ?.let { json -> runCatching { sessionQuestionnaireFromJson(json) }.getOrNull() }
-            sessionPreparationError = state.getString(STATE_SESSION_PREPARATION_ERROR)
-            editingRecording = state.getString(STATE_EDITING_RECORDING_ID)?.let { woonaDatabase.recording(it) }?.let { current ->
-                current.copy(
-                    questionnaire = state.getString(STATE_EDITING_RECORDING_QUESTIONNAIRE)?.let { json ->
-                        runCatching { sessionQuestionnaireFromJson(json) }.getOrNull()
-                    } ?: current.questionnaire,
-                    // Keep the revision the operator actually opened. A newer DB
-                    // copy must produce a reviewable 409, never a silent rebase.
-                    questionnaireRevision = state.getInt(STATE_EDITING_RECORDING_REVISION, current.questionnaireRevision),
-                )
-            }
-            heartQuestionnaireRecordingId = state.getString(STATE_HEART_RECORDING_ID)
-                ?.takeIf { woonaDatabase.recording(it) != null }
-            referenceRecordingId = state.getString(STATE_REFERENCE_RECORDING_ID)
-                ?.takeIf { woonaDatabase.recording(it) != null }
-            referenceUri = state.getString(STATE_REFERENCE_URI)?.takeIf { referenceRecordingId != null }?.let(android.net.Uri::parse)
-        }
-        refreshServerState()
-        ServerSyncScheduler.refreshPendingNetworkPolicy(applicationContext) { failure ->
-            if (failure != null) runOnUiThread { deviceFeatureController.showErrorOnMainThread("Network policy reconciliation failed; original recordings and upload progress are preserved", failure) }
-        }
-        observeServerWork()
-        deviceFeatureController
         CaptureServiceBridge.onStopRequested = {
             DeviceFeatureControllerHolder.requestStop()
         }
@@ -295,6 +261,11 @@ class MainActivity : ComponentActivity() {
                 language = selectedLanguage,
                 textResolver = appTextResolver,
             ) {
+                if (!startupReady) {
+                    AppThemeEntryPoint.Render(themeMode = selectedThemeMode) {
+                        com.example.myapplication.storage.StartupRecoveryScreen(selectedLanguage, startupRecoveryRunning, startupRecoveryError) { beginStartupRecovery() }
+                    }
+                } else {
                 val uiState = deviceFeatureController.uiState
                 AppThemeEntryPoint.Render(themeMode = selectedThemeMode) {
                     val serverMutationBlock = serverMutationBlockReason(serverSyncState.uploading)
@@ -606,7 +577,69 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+                }
             }
+        }
+        startupSavedState = savedInstanceState
+        beginStartupRecovery()
+    }
+
+    private fun beginStartupRecovery() {
+        if (startupRecoveryRunning || startupReady) return
+        startupRecoveryRunning = true
+        startupRecoveryError = null
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    serverOperationLock.withLock {
+                        if (!CaptureServiceBridge.isRunning && !DeviceFeatureControllerHolder.hasActiveCapture()) {
+                            WoonaDatabase(applicationContext).use { it.interruptUnfinished() }
+                        }
+                    }
+                }
+                refreshProfilesAndRecordings()
+                restoreStartupUiState(startupSavedState)
+                startupSavedState = null
+                startupReady = true
+                refreshServerState()
+                observeServerWork()
+                ServerSyncScheduler.refreshPendingNetworkPolicy(applicationContext) { failure ->
+                    if (failure != null) runOnUiThread { deviceFeatureController.showErrorOnMainThread("Network policy reconciliation failed; original recordings and upload progress are preserved", failure) }
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) { startupReady = false; startupRecoveryError = error.message ?: error.javaClass.simpleName }
+            finally { startupRecoveryRunning = false }
+        }
+    }
+
+    private fun restoreStartupUiState(savedInstanceState: Bundle?) {
+        savedInstanceState?.let { state ->
+            editingProfile = state.getString(STATE_EDITING_PROFILE_ID)
+                ?.let { id -> dogProfiles.firstOrNull { it.id == id } }
+            isDogQuestionnaireVisible =
+                state.getBoolean(STATE_DOG_QUESTIONNAIRE_VISIBLE) || dogProfiles.isEmpty()
+            isSessionQuestionnaireVisible =
+                state.getBoolean(STATE_SESSION_QUESTIONNAIRE_VISIBLE)
+            isServerSettingsVisible = state.getBoolean(STATE_SERVER_SETTINGS_VISIBLE)
+            pendingLiveAddress = state.getString(STATE_PENDING_LIVE_ADDRESS)
+            pendingReplayQuestionnaire = state.getString(STATE_PENDING_REPLAY_QUESTIONNAIRE)
+                ?.let { json -> runCatching { sessionQuestionnaireFromJson(json) }.getOrNull() }
+            sessionPreparationError = state.getString(STATE_SESSION_PREPARATION_ERROR)
+            editingRecording = state.getString(STATE_EDITING_RECORDING_ID)?.let { woonaDatabase.recording(it) }?.let { current ->
+                current.copy(
+                    questionnaire = state.getString(STATE_EDITING_RECORDING_QUESTIONNAIRE)?.let { json ->
+                        runCatching { sessionQuestionnaireFromJson(json) }.getOrNull()
+                    } ?: current.questionnaire,
+                    // Keep the revision the operator actually opened. A newer DB
+                    // copy must produce a reviewable 409, never a silent rebase.
+                    questionnaireRevision = state.getInt(STATE_EDITING_RECORDING_REVISION, current.questionnaireRevision),
+                )
+            }
+            heartQuestionnaireRecordingId = state.getString(STATE_HEART_RECORDING_ID)
+                ?.takeIf { woonaDatabase.recording(it) != null }
+            referenceRecordingId = state.getString(STATE_REFERENCE_RECORDING_ID)
+                ?.takeIf { woonaDatabase.recording(it) != null }
+            referenceUri = state.getString(STATE_REFERENCE_URI)?.takeIf { referenceRecordingId != null }?.let(android.net.Uri::parse)
         }
     }
 
@@ -617,6 +650,11 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        if (!startupReady) {
+            startupSavedState?.let(outState::putAll)
+            super.onSaveInstanceState(outState)
+            return
+        }
         outState.putBoolean(STATE_DOG_QUESTIONNAIRE_VISIBLE, isDogQuestionnaireVisible)
         outState.putString(STATE_EDITING_PROFILE_ID, editingProfile?.id)
         outState.putBoolean(STATE_SESSION_QUESTIONNAIRE_VISIBLE, isSessionQuestionnaireVisible)
@@ -638,12 +676,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        refreshServerState()
+        if (startupReady) refreshServerState()
     }
 
     override fun onDestroy() {
         setChartFullscreenActive(false)
-        if (!deviceFeatureController.isCaptureActive()) {
+        if (startupReady && !deviceFeatureController.isCaptureActive()) {
             DeviceFeatureControllerHolder.releaseIfInactive(deviceFeatureController)
             CaptureServiceBridge.onStopRequested = null
             woonaDatabase.close()
@@ -653,6 +691,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleCapture() {
+        check(startupReady) { "Дождитесь восстановления локальных файлов / Wait for local file recovery" }
         when (deviceFeatureController.uiState.videoState) {
             VideoCaptureState.STARTING,
             VideoCaptureState.RECORDING,
@@ -711,7 +750,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startLiveRecording(address: String, questionnaire: SessionQuestionnaire) {
-        check(!accountBusy) { "Дождитесь применения аккаунта / Wait for the account operation" }
+        check(startupReady && !accountBusy) { "Дождитесь восстановления локальных данных и операции аккаунта / Wait for local recovery and account operation" }
         val profileId = requireNotNull(selectedProfileId) { "Выберите карточку животного / Select an animal profile" }
         val recording = woonaDatabase.beginRecording(
             profileId = profileId,
@@ -772,6 +811,7 @@ class MainActivity : ComponentActivity() {
 
     private fun handleRecordingChanged() {
         runOnUiThread {
+            if (!startupReady) return@runOnUiThread
             refreshProfilesAndRecordings()
             recentRecordings.firstOrNull {
                 it.status.value in setOf("completed", "failed", "interrupted") && it.questionnaire?.sessionKind == "heart" && it.questionnaire.heartQuestionnaire == null
@@ -790,6 +830,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshServerState() {
+        if (!startupReady) return
         val settings = serverSettingsStore.get()
         if (reportConfiguration != null && reportConfiguration != settings) {
             serverRecordingReports = emptyMap()
@@ -936,6 +977,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private suspend fun saveEditedQuestionnaire(displayed: Recording, questionnaire: SessionQuestionnaire, revision: Int? = null, heartOnly: Boolean = false) {
+        check(startupReady) { "Дождитесь восстановления локальных данных / Wait for local recovery" }
         check(!accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive()) { "Дождитесь завершения записи/операции аккаунта / Wait for capture/account operation" }
         val settings = serverSettingsStore.get()
         check(woonaDatabase.profile(displayed.profileId)?.accountId == settings.accountId) { "Аккаунт записи изменился / The recording account changed" }
@@ -959,11 +1001,11 @@ class MainActivity : ComponentActivity() {
                             read = { client.fetchRecording(displayed.id) },
                             persist = { woonaDatabase.acceptServerRecording(it) })
                     } catch (error: com.example.myapplication.sync.ServerHttpException) {
-                        if (error.status != 404 || displayed.serverSyncState in setOf("synced", "remote")) throw error
+                        if (error.status != 404 || current.requiresServerQuestionnaireEdit) throw error
                         woonaDatabase.saveSessionQuestionnaire(displayed.id, questionnaire)
                     }
                 } else {
-                    check(displayed.serverSyncState !in setOf("synced", "remote")) { "Для изменения серверной анкеты укажите адрес и токен / Configure server URL and token to edit the server questionnaire" }
+                    check(!current.requiresServerQuestionnaireEdit) { "Для изменения серверной анкеты укажите адрес и токен / Configure server URL and token to edit the server questionnaire" }
                     woonaDatabase.saveSessionQuestionnaire(displayed.id, questionnaire)
                 }
             } }
