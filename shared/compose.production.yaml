@@ -11,6 +11,7 @@ services:
   api:
     restart: unless-stopped
     environment:
+      WOONA_ENVIRONMENT: production
       WOONA_ALLOW_LEGACY_MIGRATION: "false"
     logging:
       options:

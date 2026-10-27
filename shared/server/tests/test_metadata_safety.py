@@ -92,7 +92,7 @@ class MetadataSafetyTest(unittest.TestCase):
                 self.fail('Duplicate content must not mutate or supersede any row: ' + sql)
             return result
         connection.execute.side_effect = execute
-        with patch('server.app.assert_dog_account'), patch('server.app.ensure_not_retired'):
+        with patch('server.app.assert_dog_account'), patch('server.app.ensure_not_retired'), patch('server.app.identity_lock'):
             with self.assertRaises(HTTPException) as caught:
                 apply_profile(connection, payload.dog, payload.profile_version, uuid.uuid4())
         self.assertEqual(caught.exception.status_code, 409)
