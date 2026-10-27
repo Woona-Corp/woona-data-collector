@@ -724,7 +724,7 @@ struct OverviewView: View {
             }
             .sheet(isPresented: $isReferenceEditorPresented) {
                 if let url = referenceURL, let recording = referenceRecording {
-                    ReferenceAttachmentEditor(url: url) { type, metadata in
+                    ReferenceAttachmentEditor(url: url, language: appState.selectedLanguage) { type, metadata in
                         try await appState.attachReference(recordingID: recording.id, type: type, url: url, metadata: metadata)
                     }
                 }
