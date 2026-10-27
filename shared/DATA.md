@@ -29,3 +29,13 @@ capture sync artifact.
 Retired identities are stored only as SHA-256 of lowercase UUID strings.
 Authenticated `/v1/deletions` propagates deletion to clients and prevents upload
 of the retired dog, profile, recording or artifact.
+
+For reviewed recovery from a loose native export, `server.directory_import`
+requires the original final manifest and all of its exact-size files. An operator
+review binds the original manifest/sync SHA-256, recording UUID, source profile
+UUID, canonical dog UUID and reason. A different source profile may map only to
+an existing canonical external animal ID; it cannot merge two existing animals.
+Only an explicitly reviewed session-label change between the two original sync
+snapshots is accepted. Clock or animal-answer differences remain blocked. Both
+original snapshots, file hashes and the review are retained in provenance; no
+ZIP checksum, capture end timestamp or hardware calibration is invented.

@@ -205,6 +205,21 @@ def preflight(connection, plan):
     dog = connection.execute(text('SELECT id,revision,account_id FROM dogs WHERE id=:id FOR SHARE'), {'id': dog_id}).mappings().first()
     if dog is None:
         raise ValueError('Reviewed animal UUID does not exist; this tool never creates animals')
+    source_profile_id = uuid.UUID(plan['manifest']['profile']['id'])
+    if source_profile_id != dog_id:
+        review = plan.get('identityReview') or {}
+        if (plan.get('sourceKind') != 'native_directory'
+                or review.get('sourceProfileId') != str(source_profile_id)
+                or review.get('dogId') != str(dog_id)
+                or review.get('recordingId') != str(recording_id)
+                or review.get('expectedManifestSha256') != plan.get('manifestSha256')
+                or not str(review.get('reason', '')).strip()):
+            raise ValueError('Different source profile requires an explicit hash-bound identity review')
+        if connection.execute(text('SELECT 1 FROM dogs WHERE id=:id'), {'id': source_profile_id}).first():
+            raise ValueError('Source profile belongs to another existing animal; do not merge animals')
+        if connection.execute(text("SELECT 1 FROM retired_entities WHERE kind='dog' AND id_sha256=:hash"),
+                {'hash': hashlib.sha256(str(source_profile_id).encode()).hexdigest()}).first():
+            raise ValueError('Source animal was deliberately retired')
     retired = connection.execute(text("SELECT count(*) FROM retired_entities WHERE (kind='recording' AND id_sha256=:recording) OR (kind='dog' AND id_sha256=:dog)"), {'recording': hashlib.sha256(str(recording_id).encode()).hexdigest(), 'dog': hashlib.sha256(str(dog_id).encode()).hexdigest()}).scalar_one()
     if retired:
         raise ValueError('Recording was deliberately retired; recovery needs a separate review')
@@ -220,10 +235,15 @@ def preflight(connection, plan):
     owner = connection.execute(text("SELECT dog_id FROM dog_external_ids WHERE namespace='woona' AND external_id=:id"), {'id': external_id}).scalar_one_or_none()
     if owner is not None and owner != dog_id:
         raise ValueError('Original animal ID is reserved by another animal; mapping requires operator review')
+    if source_profile_id != dog_id and owner != dog_id:
+        raise ValueError('Reviewed mapping requires the existing canonical external animal ID')
     return {'state': 'ready', 'dogRevision': dog['revision']}
 
 
 def apply_plan(engine, storage_root: Path, plan):
+    if plan.get('sourceKind') == 'native_directory':
+        from server.directory_import import verify_directory_plan
+        verify_directory_plan(plan)
     validate_questionnaires(plan)
     storage_root = storage_root.resolve()
     for artifact in plan['artifacts']:
@@ -265,6 +285,10 @@ def apply_plan(engine, storage_root: Path, plan):
         provenance = {'status': 'unverified', 'reason': 'hardware_calibration_not_measured',
             'original_capture_sync': sync,
             'archive_import': {'schema_version': 1, 'source_id': plan['sourceId'], 'archive_sha256': plan['archiveSha256'],
+                'source_kind': plan.get('sourceKind', 'native_archive'),
+                'source_inventory_sha256': plan.get('sourceInventorySha256'),
+                'source_inventory': plan.get('sourceInventory'),
+                'identity_review': plan.get('identityReview'), 'metadata_review': plan.get('metadataReview'),
                 'manifest_sha256': plan['manifestSha256'], 'source_profile_id': profile['id'],
                 'completion_fields_finalized_after_capture': plan.get('completionFieldsFinalizedAfterCapture', []),
                 'source_recording_id': record['id'], 'source_manifest': plan['manifest'],
