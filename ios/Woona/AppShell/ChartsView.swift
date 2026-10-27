@@ -9,6 +9,9 @@ struct ChartsView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 10) {
+                if appState.isV2PreviewActive {
+                    ScrollView { V2PreviewView(controller: appState.v2Preview, showCharts: true) }
+                } else {
                 if let error = appState.errorMessage {
                     Text(error).foregroundStyle(.red).textSelection(.enabled)
                 }
@@ -17,6 +20,7 @@ struct ChartsView: View {
                 ChartControls()
                 DeviceChartView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
             .padding(12)
             .background(Color.woonaBackground)
@@ -42,8 +46,10 @@ struct ChartsView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
+                    if !appState.isV2PreviewActive {
                     Button(appState.selectedLanguage == .russian ? "Полный экран" : "Fullscreen") { isFullscreen = true }
                         .accessibilityIdentifier("chart.fullscreen.open")
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(appState.text(.export)) {

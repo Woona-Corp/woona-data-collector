@@ -625,7 +625,10 @@ struct OverviewView: View {
 
                 }
 
-                if section == .session {
+                if section == .session, appState.isV2PreviewActive {
+                    V2PreviewView(controller: appState.v2Preview)
+                }
+                if section == .session && !appState.isV2PreviewActive {
                     AppCard(title: russian ? "Подготовка сессии" : "Session preparation") {
                         Text((russian ? "Животное: " : "Animal: ") + (appState.selectedDogProfile?.numberOrName ?? (russian ? "не выбрано" : "not selected")))
                         Text(russian ? "Хранение: телефон. Файлы остаются здесь до подтверждения серверной загрузки." : "Storage: phone. Files stay here until the server verifies their upload.")
@@ -633,11 +636,11 @@ struct OverviewView: View {
                         if appState.isConnectionActive || appState.isReplayRunning {
                             Button(russian ? "ОТКЛЮЧИТЬ" : "DISCONNECT") { appState.disconnect() }.buttonStyle(.bordered)
                         } else {
-                            Button(russian ? "Новое соединение" : "New connection") { pendingDevice = nil; pendingReplaySelection = false; pendingReplayURL = nil; isBLESelectionPresented = true }
+                            Button(russian ? "Новое соединение" : "New connection") { appState.bleConnectionPurpose = .record; pendingDevice = nil; pendingReplaySelection = false; pendingReplayURL = nil; isBLESelectionPresented = true }
                                 .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary).accessibilityIdentifier("devices.newConnection")
-                                .disabled(appState.selectedDogProfile == nil || !appState.canStartNewSession)
+                                .disabled(!appState.canOpenBLEPicker)
                             if appState.selectedDogProfile == nil {
-                                Text(russian ? "Сначала выберите или создайте анкету во вкладке «Животные»." : "First select or create an animal in Animals.").font(.footnote)
+                                Text(russian ? "Для записи сначала выберите или создайте анкету во вкладке «Животные». Предпросмотр V2 доступен без анкеты." : "For recording, first select or create an animal in Animals. V2 preview does not require a profile.").font(.footnote)
                             }
                         }
                     }
@@ -797,25 +800,39 @@ struct OverviewView: View {
 
     private var discoveryCard: some View {
                 AppCard(title: russian ? "BLE-устройства" : "BLE devices") {
+                    Picker(russian ? "Режим подключения" : "Connection purpose", selection: $appState.bleConnectionPurpose) {
+                        Text(russian ? "Запись" : "Record").tag(BleConnectionPurpose.record)
+                        Text(russian ? "Предпросмотр V2" : "V2 preview").tag(BleConnectionPurpose.v2Preview)
+                    }.pickerStyle(.segmented).disabled(appState.isConnectionActive)
+                        .accessibilityIdentifier("devices.purpose")
+                    if appState.bleConnectionPurpose == .v2Preview {
+                        Text(v2PreviewDisclaimer(russian: russian)).font(.footnote)
+                        Text(v2PreviewFirmwareWarning(russian: russian)).font(.footnote).foregroundStyle(.orange)
+                    }
                     Text(russian ? "Запустите сканирование, выберите найденное устройство или воспроизведите сохраненный дамп." : "Start a scan, pick a discovered device, or replay a captured dump.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Button(appState.isScanning ? (russian ? "ИДЕТ СКАНИРОВАНИЕ..." : "SCANNING...") : (russian ? "НАЧАТЬ ПОИСК" : "START SCAN")) { appState.startScanning() }
                         .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary)
                         .frame(maxWidth: .infinity)
-                        .disabled(appState.isScanning || appState.selectedDogProfile == nil)
+                        .disabled(appState.isScanning || (appState.bleConnectionPurpose == .record && appState.selectedDogProfile == nil))
                         .accessibilityIdentifier("devices.scan")
+                    if appState.bleConnectionPurpose == .record {
                     Button(russian ? "Воспроизвести локальный файл (отладка)" : "Replay local file (debug)") { pendingReplaySelection = true; isBLESelectionPresented = false }
                         .buttonStyle(.bordered)
                         .frame(maxWidth: .infinity)
                         .disabled(appState.selectedDogProfile == nil || !appState.canStartNewSession)
                         .accessibilityIdentifier("devices.replay")
+                    }
                     if appState.foundDevices.isEmpty {
                         Text(appState.isScanning ? (russian ? "Идет поиск ближайших BLE-устройств..." : "Scanning for nearby BLE devices...") : (russian ? "Устройства еще не найдены." : "No discovered devices yet."))
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(appState.foundDevices) { device in
                             Button {
-                                pendingDevice = device
+                                if appState.bleConnectionPurpose == .v2Preview {
+                                    pendingDevice = nil
+                                    appState.connectV2Preview(to: device)
+                                } else { pendingDevice = device }
                                 pendingReplayURL = nil
                                 isBLESelectionPresented = false
                             } label: {

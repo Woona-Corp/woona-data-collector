@@ -341,6 +341,45 @@ final class BleSessionManagerTests: XCTestCase {
         XCTAssertEqual(harness.states.suffix(1), [.failed])
     }
 
+    func testV2PreviewWaitsForControlAndCCCWithoutPreparingLegacyCapture() async {
+        let client = FakeBleCentralClient(); let harness = BleHarness(client: client); let identifier = UUID()
+        client.emitDiscoveredDevice(.init(id: identifier, name: "V2 fixture")); await Task.yield()
+        var prepared = false
+        await harness.manager.connect(to: identifier, purpose: .v2Preview) { prepared = true }
+        XCTAssertFalse(prepared, "Preview must not prepare a recording or video")
+        client.emitConnected(identifier); await Task.yield()
+        // A stale CCC callback before this discovery must not enable preview.
+        client.emitNotificationState(identifier, characteristicUUID: BleConstants.notificationCharacteristicUUID, isNotifying: true)
+        await Task.yield()
+        XCTAssertEqual(harness.previewReadyCount, 0)
+    }
+
+    func testV2PreviewRoutesBytesSeparatelyAndWaitsForRealDisconnectBeforeReconnect() async {
+        let client = FakeBleCentralClient(); let harness = BleHarness(client: client); let identifier = UUID()
+        client.emitDiscoveredDevice(.init(id: identifier, name: "V2 fixture")); await Task.yield()
+        await harness.manager.connect(to: identifier, purpose: .v2Preview)
+        client.emitConnected(identifier); await Task.yield()
+        client.emitServices(identifier, serviceUUIDs: [BleConstants.serviceUUID]); await Task.yield()
+        XCTAssertEqual(client.discoveredCharacteristics.last?.characteristicUUIDs, [BleConstants.notificationCharacteristicUUID, BleConstants.controlCharacteristicUUID])
+        client.emitCharacteristics(identifier, serviceUUID: BleConstants.serviceUUID,
+                                   characteristicUUIDs: [BleConstants.notificationCharacteristicUUID, BleConstants.controlCharacteristicUUID])
+        await Task.yield()
+        client.emitNotificationState(identifier, characteristicUUID: BleConstants.notificationCharacteristicUUID, isNotifying: true)
+        // Notification bytes may arrive before MainActor processes readiness.
+        client.emitNotificationData(Data([1, 2, 0]), identifier: identifier, characteristicUUID: BleConstants.notificationCharacteristicUUID)
+        await Task.yield()
+        XCTAssertEqual(harness.previewReadyCount, 1); XCTAssertEqual(harness.captureReadyCount, 0)
+        XCTAssertEqual(harness.previewFragments, [Data([1, 2, 0])]); XCTAssertTrue(harness.packetFragments.isEmpty)
+        harness.manager.disconnect()
+        XCTAssertEqual(harness.manager.currentPeripheralIdentifier(), identifier)
+        let reconnect = await harness.manager.connect(to: identifier, purpose: .record)
+        XCTAssertFalse(reconnect)
+        client.emitDisconnected(identifier); await Task.yield()
+        XCTAssertNil(harness.manager.currentPeripheralIdentifier())
+        let accepted = await harness.manager.connect(to: identifier, purpose: .record)
+        XCTAssertTrue(accepted)
+    }
+
     func testCoreBluetoothShortUUIDsExpandToBluetoothBaseUUID() {
         XCTAssertEqual(
             CBUUID(string: "FFF0").foundationUUID,
@@ -357,6 +396,9 @@ final class BleSessionManagerTests: XCTestCase {
 private final class BleHarness {
     private(set) var manager: BleSessionManager!
     private let packetFragmentRecorder = LockedValues<Data>()
+    private let previewFragmentRecorder = LockedValues<Data>()
+    var previewFragments: [Data] { previewFragmentRecorder.values }
+    var previewReadyCount = 0
     var devices: [BleDevice] = []
     var packetFragments: [Data] { packetFragmentRecorder.values }
     var diagnostics: [String] = []
@@ -373,7 +415,9 @@ private final class BleHarness {
             onDiagnosticMessage: { [weak self] message in self?.diagnostics.append(message) },
             onCaptureReady: { [weak self] in self?.captureReadyCount += 1 },
             onStateChanged: { [weak self] state in self?.states.append(state) },
-            onError: { [weak self] message, error in self?.errors.append((message, error)) }
+            onError: { [weak self] message, error in self?.errors.append((message, error)) },
+            onPreviewReady: { [weak self] in self?.previewReadyCount += 1 },
+            onPreviewBytes: { [previewFragmentRecorder] data in previewFragmentRecorder.append(data) }
         )
     }
 }

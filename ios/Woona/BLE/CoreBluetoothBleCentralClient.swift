@@ -13,6 +13,7 @@ final class CoreBluetoothBleCentralClient: NSObject, BleCentralClient {
     private var peripheralsByIdentifier: [UUID: CBPeripheral] = [:]
     private var serviceByPeripheralAndUUID: [PeripheralServiceKey: CBService] = [:]
     private var characteristicByPeripheralAndUUID: [PeripheralCharacteristicKey: CBCharacteristic] = [:]
+    private var controlConnections: [UUID: ControlConnection] = [:]
 
     var powerState: BleCentralPowerState {
         centralManager.state.blePowerState
@@ -55,6 +56,7 @@ final class CoreBluetoothBleCentralClient: NSObject, BleCentralClient {
                 delegate?.centralClient(self, didDisconnect: identifier, error: BleCentralClientError.peripheralReferenceMissing(identifier))
                 return
             }
+            controlConnections.removeValue(forKey: identifier)?.queue.reset()
             centralManager.cancelPeripheralConnection(peripheral)
         }
     }
@@ -135,11 +137,57 @@ final class CoreBluetoothBleCentralClient: NSObject, BleCentralClient {
         }
     }
 
+    func writeControlFrame(_ data: Data, characteristicUUID: UUID, for identifier: UUID,
+                           completion: @escaping BleControlWriteQueue.Completion) {
+        centralQueue.async { [weak self] in
+            guard let self, let peripheral = self.peripheralsByIdentifier[identifier], peripheral.state == .connected else {
+                completion(.failure(BleControlWriteError.disconnected)); return
+            }
+            guard let characteristic = self.characteristicByPeripheralAndUUID[
+                PeripheralCharacteristicKey(peripheralID: identifier, characteristicUUID: characteristicUUID)
+            ] else { completion(.failure(BleControlWriteError.characteristicUnavailable)); return }
+            guard characteristic.properties.contains(.write) else {
+                completion(.failure(BleControlWriteError.writeUnsupported)); return
+            }
+            let connection: ControlConnection
+            if let existing = self.controlConnections[identifier], existing.characteristic === characteristic {
+                connection = existing
+            } else {
+                self.controlConnections.removeValue(forKey: identifier)?.queue.reset()
+                connection = ControlConnection(peripheral: peripheral, characteristic: characteristic)
+                self.controlConnections[identifier] = connection
+            }
+            do {
+                try connection.queue.enqueue(data, maximumChunkBytes: peripheral.maximumWriteValueLength(for: .withResponse), completion: completion)
+                self.drainControlWrite(connection)
+            } catch { completion(.failure(error)) }
+        }
+    }
+
+    func cancelControlWrites(for identifier: UUID) {
+        centralQueue.async { [weak self] in self?.controlConnections.removeValue(forKey: identifier)?.queue.reset() }
+    }
+
+    private func drainControlWrite(_ connection: ControlConnection) {
+        guard connection.peripheral.state == .connected else {
+            connection.queue.reset(); return
+        }
+        if let fragment = connection.queue.nextFragment() {
+            connection.peripheral.writeValue(fragment, for: connection.characteristic, type: .withResponse)
+        }
+    }
+
+    private func isCurrent(_ characteristic: CBCharacteristic, peripheral: CBPeripheral) -> Bool {
+        guard let uuid = characteristic.uuid.foundationUUID else { return false }
+        return characteristicByPeripheralAndUUID[PeripheralCharacteristicKey(peripheralID: peripheral.identifier, characteristicUUID: uuid)] === characteristic
+    }
+
     private func remember(_ peripheral: CBPeripheral) {
         peripheralsByIdentifier[peripheral.identifier] = peripheral
     }
 
     private func clearDiscoveryCaches(for identifier: UUID) {
+        controlConnections.removeValue(forKey: identifier)?.queue.reset()
         serviceByPeripheralAndUUID = serviceByPeripheralAndUUID.filter { $0.key.peripheralID != identifier }
         characteristicByPeripheralAndUUID = characteristicByPeripheralAndUUID.filter { $0.key.peripheralID != identifier }
     }
@@ -147,6 +195,10 @@ final class CoreBluetoothBleCentralClient: NSObject, BleCentralClient {
 
 extension CoreBluetoothBleCentralClient: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        if central.state != .poweredOn {
+            for connection in controlConnections.values { connection.queue.reset() }
+            controlConnections.removeAll()
+        }
         delegate?.centralClientDidUpdateState(self)
     }
 
@@ -183,6 +235,12 @@ extension CoreBluetoothBleCentralClient: CBCentralManagerDelegate {
 }
 
 extension CoreBluetoothBleCentralClient: CBPeripheralDelegate {
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard let connection = controlConnections[peripheral.identifier],
+              connection.characteristic === characteristic else { return }
+        connection.queue.acknowledge(error: error)
+        drainControlWrite(connection)
+    }
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         let serviceUUIDs = peripheral.services?.compactMap { service -> UUID? in
             guard let uuid = service.uuid.foundationUUID else { return nil }
@@ -218,6 +276,7 @@ extension CoreBluetoothBleCentralClient: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard isCurrent(characteristic, peripheral: peripheral) else { return }
         delegate?.centralClient(
             self,
             didUpdateNotificationStateFor: peripheral.identifier,
@@ -228,6 +287,7 @@ extension CoreBluetoothBleCentralClient: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard isCurrent(characteristic, peripheral: peripheral) else { return }
         if let error {
             delegate?.centralClient(
                 self,
@@ -251,6 +311,15 @@ extension CoreBluetoothBleCentralClient: CBPeripheralDelegate {
 private struct PeripheralServiceKey: Hashable {
     let peripheralID: UUID
     let serviceUUID: UUID
+}
+
+private final class ControlConnection {
+    let peripheral: CBPeripheral
+    let characteristic: CBCharacteristic
+    let queue = BleControlWriteQueue()
+    init(peripheral: CBPeripheral, characteristic: CBCharacteristic) {
+        self.peripheral = peripheral; self.characteristic = characteristic
+    }
 }
 
 private struct PeripheralCharacteristicKey: Hashable {

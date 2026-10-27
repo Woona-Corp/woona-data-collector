@@ -169,8 +169,14 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    var canStartNewSession: Bool { !isLocalRecoveryRunning && localRecoveryError == nil && activeRecording == nil && !captureStopInProgress }
-    var canSelectAnimal: Bool { !isLocalRecoveryRunning && localRecoveryError == nil && !isBackgroundSyncRunning && activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
+    @Published private(set) var isV2PreviewActive = false
+    @Published var bleConnectionPurpose = BleConnectionPurpose.record
+    let v2Preview = V2PreviewController()
+    private var hasOpenBLETransport: Bool { hasInitializedBleSessionManager && bleSessionManager.currentPeripheralIdentifier() != nil }
+    var canOpenBLEPicker: Bool { !hasOpenBLETransport && !isLocalRecoveryRunning && localRecoveryError == nil && activeRecording == nil && !captureStopInProgress && !isConnectionActive && !isV2PreviewActive && !isReplayRunning && !isAccountOperationRunning }
+
+    var canStartNewSession: Bool { !hasOpenBLETransport && !isV2PreviewActive && !isLocalRecoveryRunning && localRecoveryError == nil && activeRecording == nil && !captureStopInProgress }
+    var canSelectAnimal: Bool { !isV2PreviewActive && !isLocalRecoveryRunning && localRecoveryError == nil && !isBackgroundSyncRunning && activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
     var transferNetworkAllowsWork: Bool {
         !isLocalRecoveryRunning && localRecoveryError == nil && networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting
     }
@@ -701,6 +707,28 @@ final class AppViewModel: ObservableObject {
         bleSessionManager.stopScanning()
     }
 
+    func connectV2Preview(to device: BleDevice) {
+        guard canOpenBLEPicker else { return }
+        isV2PreviewActive = true
+        isCaptureReady = false
+        v2Preview.prepare()
+        Task {
+            let accepted = await bleSessionManager.connect(to: device.id, purpose: .v2Preview)
+            if !accepted { v2Preview.disconnected(reason: "V2 Bluetooth connection could not start. No session was created.") }
+        }
+    }
+
+    // Called only after the UI's explicit firmware/SD disconnect confirmation.
+    func disconnectV2Preview() {
+        guard isV2PreviewActive else { return }
+        v2Preview.disconnected()
+        isV2PreviewActive = false
+        bleConnectionPurpose = .record
+        bleSessionManager.disconnect()
+    }
+
+    func enterForeground() { if isV2PreviewActive { v2Preview.setForeground(true) } }
+
     func connect(to device: BleDevice) {
         Task {
             var didPrepareCapture = false
@@ -719,7 +747,7 @@ final class AppViewModel: ObservableObject {
 
     func connect(to device: BleDevice, questionnaire: SessionQuestionnaire) throws {
         guard !isAccountOperationRunning else { throw WoonaStoreError.invalidData("Дождитесь завершения операции аккаунта / Wait for the account operation") }
-        guard canStartNewSession else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
+        guard canStartNewSession && !isConnectionActive else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
         guard let profile = selectedDogProfile, let store else {
             throw WoonaStoreError.invalidData("Выберите или создайте карточку животного / Select or create an animal profile")
         }
@@ -738,6 +766,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func disconnect() {
+        // Preview disconnect requires the separate firmware/SD confirmation.
+        guard !isV2PreviewActive else { return }
         if activeRecording != nil {
             stopActiveCapture(status: isRecording ? "completed" : "interrupted")
             return
@@ -772,7 +802,7 @@ final class AppViewModel: ObservableObject {
 
     func startReplay(from fileURL: URL, questionnaire: SessionQuestionnaire) throws {
         guard !isAccountOperationRunning else { throw WoonaStoreError.invalidData("Дождитесь завершения операции аккаунта / Wait for the account operation") }
-        guard canStartNewSession else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
+        guard canStartNewSession && !isConnectionActive else { throw WoonaStoreError.invalidData("Запись уже выполняется или останавливается / A capture is active or stopping") }
         guard let profile = selectedDogProfile, let store else {
             throw WoonaStoreError.invalidData("Выберите или создайте карточку животного / Select or create an animal profile")
         }
@@ -877,6 +907,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func enterBackground() {
+        if isV2PreviewActive { v2Preview.setForeground(false); return }
         if activeRecording != nil {
             stopActiveCapture(status: "interrupted")
             return
@@ -1653,6 +1684,11 @@ final class AppViewModel: ObservableObject {
         let submitter = packetFragmentSubmitter
         let processor = packetProcessor
         let ingressGate = packetIngressGate
+        let previewWorker = v2Preview.worker
+        v2Preview.send = { [weak self] wire, completion in
+            guard let self, self.isV2PreviewActive else { completion(.failure(BleControlWriteError.disconnected)); return }
+            self.bleSessionManager.writePreviewFrame(wire, completion: completion)
+        }
         return BleSessionManager(
             onDeviceFound: { [weak self] device in
                 self?.addFoundDevice(device)
@@ -1662,7 +1698,9 @@ final class AppViewModel: ObservableObject {
                 submitter.enqueue(data, receivedAtMonotonicNs: timestamp)
             },
             onDiagnosticMessage: { [weak self] message in
-                self?.appendBleDiagnostic(message, packetProcessor: processor)
+                guard let self else { return }
+                if self.isV2PreviewActive { self.appendDiagnostic(message) }
+                else { self.appendBleDiagnostic(message, packetProcessor: processor) }
             },
             onCaptureReady: { [weak self] in
                 guard let self else { return }
@@ -1686,8 +1724,13 @@ final class AppViewModel: ObservableObject {
                     self.captureErrorCode = "gatt_error"
                     self.captureErrorMessage = [message, error?.localizedDescription].compactMap { $0 }.joined(separator: ": ")
                 }
+                if self?.isV2PreviewActive == true {
+                    self?.v2Preview.disconnected(reason: [message, error?.localizedDescription].compactMap { $0 }.joined(separator: ": "))
+                }
                 self?.showError(message, error: error)
-            }
+            },
+            onPreviewReady: { [weak self] in self?.v2Preview.ready() },
+            onPreviewBytes: { bytes in previewWorker.receive(bytes) }
         )
     }
 
@@ -1756,6 +1799,14 @@ final class AppViewModel: ObservableObject {
 
     private func applyBleState(_ state: BleSessionState) {
         guard !isReplayRunning else { return }
+        if isV2PreviewActive {
+            isScanning = state == .scanning
+            isConnected = state == .connected
+            isConnectionActive = state == .connecting || state == .connected
+            statusText = "V2 preview"
+            if state == .disconnected || state == .failed { v2Preview.disconnected(reason: state == .failed ? "V2 Bluetooth connection failed" : "Bluetooth disconnected. Preview was not saved.") }
+            return
+        }
         switch state {
         case .idle:
             isScanning = false
