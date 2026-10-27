@@ -54,3 +54,26 @@ object WoonaV2ChartMapper {
         return result
     }
 }
+
+/** UI timing guard; accepted wire blocks are still counted before this stage. */
+class V2PreviewTimeline {
+    private val lastEndUs = LongArray(8) { -1 }
+    private val pendingBreak = BooleanArray(8)
+    fun reset() { lastEndUs.fill(-1); pendingBreak.fill(false) }
+    fun map(event: WoonaV2LiveSession.Event.Samples): Map<ChartStreamKey, List<ChartPoint>> {
+        val id = event.block.streamId
+        if (id !in 1..7) return emptyMap()
+        val block = event.block
+        if (lastEndUs[id] >= 0 && block.timestampUs <= lastEndUs[id]) {
+            pendingBreak[id] = true
+            return emptyMap()
+        }
+        val mapped = WoonaV2ChartMapper.map(event.copy(sequenceGap = event.sequenceGap || pendingBreak[id]))
+        if (mapped.isEmpty()) { pendingBreak[id] = true; return mapped }
+        val duration = (block.count - 1).toLong() * 1_000_000L / block.rateHz
+        if (duration > Long.MAX_VALUE - block.timestampUs) { pendingBreak[id] = true; return emptyMap() }
+        lastEndUs[id] = block.timestampUs + duration
+        pendingBreak[id] = false
+        return mapped
+    }
+}

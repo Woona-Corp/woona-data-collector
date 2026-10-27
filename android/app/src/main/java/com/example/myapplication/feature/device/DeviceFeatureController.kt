@@ -89,7 +89,6 @@ class DeviceFeatureController(
     @Volatile private var v2PreviewConnection = false
     @Volatile private var v2PreviewForeground = true
     private val connectionUiGeneration = AtomicLong()
-    private val captureIdentityGeneration = AtomicLong()
     private var pendingFinalizationStatus: RecordingStatus? = null
     private val finalizationRetryRunnable = Runnable {
         val status = pendingFinalizationStatus
@@ -120,7 +119,7 @@ class DeviceFeatureController(
     fun isV2PreviewForeground(): Boolean = v2PreviewConnection && v2PreviewForeground
     fun shouldRetainConnection(): Boolean = isCaptureActive() || v2PreviewConnection
     fun connectionUiGeneration(): Long = connectionUiGeneration.get()
-    fun captureIdentityGeneration(): Long = captureIdentityGeneration.get()
+    fun captureIdentity(): String? = currentRecordingId
 
     fun setOnRecordingChanged(listener: () -> Unit) {
         recordingChangedListener = listener
@@ -147,7 +146,6 @@ class DeviceFeatureController(
     }
 
     fun onConnectRequested(address: String) {
-        connectionUiGeneration.incrementAndGet()
         v2PreviewConnection = false
         manualDisconnectPending = false
         packetReplayController?.stop()
@@ -159,7 +157,7 @@ class DeviceFeatureController(
         deleteSnapshotFiles(staleSnapshot)
         packetCaptureController.stopCapture()
         bleSessionController.stopScanning()
-        bleSessionController.connect(address)
+        bleSessionController.connect(address) { connectionUiGeneration.incrementAndGet() }
     }
 
     fun onV2PreviewConnectRequested(address: String) {
@@ -167,7 +165,6 @@ class DeviceFeatureController(
             uiStateHolder.showError(appTextResolver.getString(R.string.v2_finish_capture_first))
             return
         }
-        connectionUiGeneration.incrementAndGet()
         manualDisconnectPending = false
         packetReplayController?.stop()
         pendingTransportDiagnostics.clear()
@@ -177,7 +174,7 @@ class DeviceFeatureController(
         v2PreviewForeground = true
         uiStateHolder.onV2PreviewConnecting()
         bleSessionController.stopScanning()
-        bleSessionController.connectForV2Preview(address)
+        bleSessionController.connectForV2Preview(address) { connectionUiGeneration.incrementAndGet() }
     }
 
     /** V2 is opt-in because HELLO permanently ends Legacy streaming for this BLE connection. */
@@ -219,7 +216,6 @@ class DeviceFeatureController(
         pendingFinalizationStatus = null
         finalizeRecording(RecordingStatus.INTERRUPTED)
         val staleSnapshot = synchronized(this) {
-            captureIdentityGeneration.incrementAndGet()
             currentRecordingId = recording.id
             currentRecording = recording
             recordingFinalized = false
@@ -558,15 +554,15 @@ class DeviceFeatureController(
         }
     }
 
-    fun canSharePacketFile(): Boolean = packetCaptureController.currentPacketFile()?.exists() == true
+    fun canSharePacketFile(): Boolean = !v2PreviewConnection && packetCaptureController.currentPacketFile()?.exists() == true
 
-    fun canShareRawFile(): Boolean = packetCaptureController.currentRawFile()?.exists() == true
+    fun canShareRawFile(): Boolean = !v2PreviewConnection && packetCaptureController.currentRawFile()?.exists() == true
 
-    fun canShareLogFile(): Boolean = packetCaptureController.currentLogFile()?.exists() == true
+    fun canShareLogFile(): Boolean = !v2PreviewConnection && packetCaptureController.currentLogFile()?.exists() == true
 
-    fun canShareCsvFile(): Boolean = packetCaptureController.currentPacketFile()?.exists() == true
+    fun canShareCsvFile(): Boolean = !v2PreviewConnection && packetCaptureController.currentPacketFile()?.exists() == true
 
-    private fun canCreateSessionArchiveNow(): Boolean = !isCaptureActive() && videoRecorder?.isActive() != true &&
+    private fun canCreateSessionArchiveNow(): Boolean = !v2PreviewConnection && !isCaptureActive() && videoRecorder?.isActive() != true &&
         uiState.videoState !in setOf(VideoCaptureState.STARTING, VideoCaptureState.RECORDING, VideoCaptureState.STOPPING)
 
     fun canShareAllFiles(): Boolean = canCreateSessionArchiveNow() && (
@@ -871,6 +867,7 @@ class DeviceFeatureController(
     }
 
     private fun ensureExportSnapshot(): SessionExportSnapshot? {
+        if (v2PreviewConnection) return null
         val buildPlan = synchronized(exportLock) {
             val currentPacketFile = packetCaptureController.currentPacketFile()?.takeIf(File::exists)
             val currentTimelineFile = packetCaptureController.currentPacketTimelineFile()?.takeIf(File::exists)
@@ -1156,8 +1153,8 @@ class DeviceFeatureController(
 
     @Synchronized
     fun onCaptureServiceFailure(code: String, message: String, error: RuntimeException,
-                                expectedCaptureGeneration: Long = captureIdentityGeneration.get()) {
-        if (expectedCaptureGeneration != captureIdentityGeneration.get() || v2PreviewConnection || !isCaptureActive()) return
+                                expectedRecordingId: String? = currentRecordingId) {
+        if (expectedRecordingId != currentRecordingId || v2PreviewConnection || !isLiveCapture()) return
         val details = "$code: $message: $error"
         if (code == "camera_foreground_unavailable") {
             handleVideoFailure(details)

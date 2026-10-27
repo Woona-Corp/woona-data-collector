@@ -59,8 +59,11 @@ interface BleSessionController {
     fun startScanning()
     fun stopScanning()
     fun connect(address: String)
+    /** Advance UI ownership while the transport excludes old GATT callbacks. */
+    fun connect(address: String, onConnectionStarting: () -> Unit) { onConnectionStarting(); connect(address) }
     /** Explicit preview intent; this must not create a persistent recording. */
     fun connectForV2Preview(address: String) = connect(address)
+    fun connectForV2Preview(address: String, onConnectionStarting: () -> Unit) { onConnectionStarting(); connectForV2Preview(address) }
     /** Explicit opt-in; never probe Legacy automatically (HELLO switches firmware to V2). */
     fun beginV2Discovery(): Boolean = false
     /** Only after explicit discovery, never during an ordinary Legacy capture. */
@@ -811,11 +814,15 @@ class BleSessionManager(
     }
 
     override fun connect(address: String) = connectWithIntent(address, false)
+    override fun connect(address: String, onConnectionStarting: () -> Unit) = connectWithIntent(address, false, onConnectionStarting)
 
     override fun connectForV2Preview(address: String) = connectWithIntent(address, true)
+    override fun connectForV2Preview(address: String, onConnectionStarting: () -> Unit) = connectWithIntent(address, true, onConnectionStarting)
 
     @Synchronized
-    private fun connectWithIntent(address: String, preview: Boolean) {
+    private fun connectWithIntent(address: String, preview: Boolean, onConnectionStarting: () -> Unit = {}) {
+        forceCloseCurrentGatt()
+        onConnectionStarting()
         manualDisconnectRequested = false
         recoveryInProgress = false
         awaitingRecoveryNotification = false
@@ -828,7 +835,6 @@ class BleSessionManager(
             return
         }
 
-        forceCloseCurrentGatt()
         v2ConnectionIntent = preview
         activeDeviceAddress = address
         openGatt(address)

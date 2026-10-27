@@ -45,6 +45,11 @@ class DeviceFeatureSmokeTest {
                     ble.listener.onError("Old connection failed", null)
                 }.apply { start(); join(2_000); assertTrue(!isAlive) }
                 controller.onDisconnectRequested()
+                ble.beforeConnectionStarting = {
+                    // Simulate the old binder callback owning the GATT lock
+                    // while the UI is asking for a new preview connection.
+                    Thread { ble.listener.onError("Old callback during reconnect", null) }.apply { start(); join(2_000); assertTrue(!isAlive) }
+                }
                 controller.onV2PreviewConnectRequested("NEW")
             }
             instrumentation.waitForIdleSync()
@@ -83,6 +88,9 @@ class DeviceFeatureSmokeTest {
             controller.onV2PreviewConnectRequested("PREVIEW")
             controller.onCaptureReady() // No writer reset on the diagnostic route.
             controller.onTransportDiagnostic("Preview event")
+            org.junit.Assert.assertFalse(controller.canSharePacketFile())
+            org.junit.Assert.assertFalse(controller.canShareAllFiles())
+            org.junit.Assert.assertNull(controller.createPacketShareIntent(context))
             controller.onDisconnectRequested()
             assertEquals(1, database.recentRecordings(profile.id).size)
             assertEquals(previous, database.recording(old.id))
@@ -95,14 +103,14 @@ class DeviceFeatureSmokeTest {
             assertEquals("PREVIEW", ble.connectedAddress)
             org.junit.Assert.assertFalse(controller.isV2PreviewConnection())
             assertTrue(controller.isCaptureActive())
-            val oldCaptureGeneration = controller.captureIdentityGeneration()
+            val oldCaptureIdentity = controller.captureIdentity()
             controller.onCaptureServiceFailure("capture_foreground_start_denied", "Synthetic OS refusal", SecurityException("denied"))
             assertEquals(com.example.myapplication.data.RecordingStatus.FAILED, database.recording(active.id)?.status)
             assertEquals("capture_foreground_start_denied", database.recording(active.id)?.captureErrorCode)
             assertArrayEquals(bytes, packet.readBytes())
             val next = database.beginRecording(profile.id, com.example.myapplication.data.RecordingSource.LIVE, null)
             controller.beginRecordingSession(next)
-            controller.onCaptureServiceFailure("capture_foreground_start_denied", "Late error from previous capture", SecurityException("old"), oldCaptureGeneration)
+            controller.onCaptureServiceFailure("capture_foreground_start_denied", "Late error from previous capture", SecurityException("old"), oldCaptureIdentity)
             assertTrue(controller.isCaptureActive())
             assertEquals(com.example.myapplication.data.RecordingStatus.PREPARING, database.recording(next.id)?.status)
             org.junit.Assert.assertNull(database.recording(next.id)?.captureErrorCode)
@@ -378,6 +386,12 @@ private class FakeBleSessionController(
     var stopScanningCalls = 0
     var connectedAddress: String? = null
     var closeCalled = false
+    var beforeConnectionStarting: (() -> Unit)? = null
+    override fun connectForV2Preview(address: String, onConnectionStarting: () -> Unit) {
+        beforeConnectionStarting?.invoke()
+        onConnectionStarting()
+        connect(address)
+    }
     private var transportProfile = BleTransportProfile.COMPATIBILITY
 
     override fun currentState(): BleSessionState = BleSessionState.IDLE

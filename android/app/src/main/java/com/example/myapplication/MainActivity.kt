@@ -243,7 +243,7 @@ class MainActivity : ComponentActivity() {
                 onRecordingChanged = ::handleRecordingChanged,
                 onCaptureLifecycleChanged = { active ->
                     if (active) {
-                        CaptureForegroundService.start(this@MainActivity, deviceFeatureController.isVideoRequested(), deviceFeatureController.captureIdentityGeneration())
+                        CaptureForegroundService.start(this@MainActivity, deviceFeatureController.isVideoRequested(), deviceFeatureController.captureIdentity())
                     } else {
                         CaptureForegroundService.stop(applicationContext)
                     }
@@ -266,7 +266,7 @@ class MainActivity : ComponentActivity() {
         CaptureServiceBridge.onForegroundReady = { cameraEnabled, generation ->
             weakActivity.get()?.let { activity -> activity.runOnUiThread {
                 if (activity.pendingForegroundCaptureStart && cameraEnabled && activity.startupReady &&
-                    activity.deviceFeatureController.captureIdentityGeneration() == generation &&
+                    activity.deviceFeatureController.captureIdentity() == generation &&
                     activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) &&
                     activity.deviceFeatureController.isCaptureActive()) {
                     activity.pendingForegroundCaptureStart = false
@@ -276,7 +276,7 @@ class MainActivity : ComponentActivity() {
         }
         CaptureServiceBridge.onStartFailed = { code, error, generation ->
             weakActivity.get()?.let { activity -> activity.runOnUiThread {
-                if (activity.startupReady && !activity.isDestroyed && activity.deviceFeatureController.captureIdentityGeneration() == generation) {
+                if (activity.startupReady && !activity.isDestroyed && activity.deviceFeatureController.captureIdentity() == generation) {
                     activity.pendingForegroundCaptureStart = false
                     val message = activity.appTextResolver.getString(if (code == "camera_foreground_unavailable")
                         R.string.camera_foreground_unavailable else R.string.capture_foreground_start_denied)
@@ -749,7 +749,7 @@ class MainActivity : ComponentActivity() {
 
     private fun ensureCaptureService(): Boolean {
         if (!startupReady || !deviceFeatureController.isLiveCapture() || deviceFeatureController.isV2PreviewConnection()) return false
-        return CaptureForegroundService.start(this, deviceFeatureController.isVideoRequested(), deviceFeatureController.captureIdentityGeneration())
+        return CaptureForegroundService.start(this, deviceFeatureController.isVideoRequested(), deviceFeatureController.captureIdentity())
     }
 
     private fun startSynchronizedCaptureWhenServiceReady() {

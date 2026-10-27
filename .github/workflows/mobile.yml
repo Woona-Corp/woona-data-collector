@@ -217,5 +217,9 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "Woona Android ${GITHUB_REF_NAME#android-v}"
+            release_args=()
+            if [[ "${GITHUB_REF_NAME#android-v}" == *-* ]]; then
+              release_args=(--prerelease --latest=false)
+            fi
+            gh release create "${release_args[@]}" "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "Woona Android ${GITHUB_REF_NAME#android-v}"
           fi

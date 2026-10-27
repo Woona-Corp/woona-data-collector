@@ -40,6 +40,7 @@ import com.example.myapplication.storage.PolarCsvFileStore
 import com.example.myapplication.localization.AppLanguage
 import com.example.myapplication.localization.AppTextResolver
 import com.example.myapplication.protocol.ConnectionQuality
+import com.example.myapplication.feature.device.V2PreviewTimeline
 import com.example.myapplication.protocol.WoonaV2Discovery
 import com.example.myapplication.protocol.WoonaV2LiveSession
 import com.example.myapplication.video.AndroidVideoRecorder
@@ -145,6 +146,7 @@ fun createDeviceFeatureController(
         }
     }
     // UI-only bounded buffer. It must not become the durable V2 acquisition path.
+    val v2Timeline = V2PreviewTimeline()
     val v2PreviewLock = Any()
     val v2PreviewEvents = ArrayDeque<WoonaV2LiveSession.Event.Samples>()
     var v2PreviewScheduled = false
@@ -165,7 +167,7 @@ fun createDeviceFeatureController(
             val charts = linkedMapOf<ChartStreamKey, MutableList<ChartPoint>>()
             var unplottable = 0
             batch.forEach { event ->
-                val mapped = WoonaV2ChartMapper.map(event)
+                val mapped = v2Timeline.map(event)
                 if (mapped.isEmpty()) unplottable++
                 mapped.forEach { (key, points) ->
                     charts.getOrPut(key) { mutableListOf() }.addAll(points)
@@ -253,6 +255,7 @@ fun createDeviceFeatureController(
             override fun onV2DiscoveryStarted() {
                 resetV2PreviewQueue()
                 v2OnMain {
+                    v2Timeline.reset()
                     uiStateHolder.onV2DiscoveryRequested()
                 }
             }
@@ -260,6 +263,7 @@ fun createDeviceFeatureController(
             override fun onV2LiveStarted(sessionId: Long, streamMask: Long) {
                 resetV2PreviewQueue()
                 v2OnMain {
+                    v2Timeline.reset()
                     deviceFeatureController?.onV2LiveStarted()
                 }
             }

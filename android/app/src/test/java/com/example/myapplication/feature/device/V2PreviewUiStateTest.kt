@@ -5,6 +5,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class V2PreviewUiStateTest {
+    @Test fun clockBackstepSkipsOnlyPlottingAndTheNextValidBlockStartsANewSegment() {
+        val timeline = V2PreviewTimeline()
+        val descriptor = com.example.myapplication.protocol.V2Stream(1, 1, 3, 1000)
+        fun event(time: Long) = com.example.myapplication.protocol.WoonaV2LiveSession.Event.Samples(
+            1, com.example.myapplication.protocol.V2LiveData(77, 1, 1, 2, 1000, 0, time, ByteArray(12)), descriptor, false)
+        assertFalse(timeline.map(event(10_000)).isEmpty())
+        assertTrue(timeline.map(event(9_000)).isEmpty())
+        assertTrue(timeline.map(event(11_000)).isEmpty()) // Overlaps the previous block's end.
+        val next = timeline.map(event(12_000))
+        assertTrue(next.values.all { it.first().startsNewSegment })
+        timeline.reset()
+        assertFalse(timeline.map(event(1_000)).isEmpty())
+    }
+
     @Test fun highRatePreviewHasBoundedHistoryAndDoesNotClaimChartSkipsAreWireLoss() {
         val state = DeviceUiStateHolder()
         state.onV2PreviewConnecting()
