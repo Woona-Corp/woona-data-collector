@@ -21,14 +21,8 @@ case "${1:-help}" in
             'set -e
              docker ps --format "{{.Names}}\t{{.Status}}"
              df -h /
-             systemctl show woona-backup.service -p ActiveState -p Result
-             systemctl list-timers woona-backup.timer --no-pager
-             find /srv/woona/backups/scheduled -mindepth 2 -maxdepth 2 -name VERIFIED -printf "Server backup: %h (verified %TY-%Tm-%Td %TH:%TM)\n"' || result=1
-        printf '\nVerified off-host backups:\n'
-        if [[ -d "$HOME/.local/share/woona-backups" ]]; then
-            find "$HOME/.local/share/woona-backups" -mindepth 2 -maxdepth 2 -name VERIFIED -printf '%h (verified %TY-%Tm-%Td %TH:%TM)\n' | sort
-            find "$HOME/.local/share/woona-backups/.pending" -mindepth 1 -maxdepth 1 -type d -exec du -sh {} + 2>/dev/null || true
-        fi
+             systemctl show woona-backup.service woona-backup.timer -p Id -p ActiveState -p UnitFileState' || result=1
+        printf '\nWoona backups: disabled by owner request (2026-10-27); server/off-host/laptop jobs must remain disabled.\n'
         for repo in "$mobile" "$windows"; do
             printf '\n%s\n' "$repo"
             git -C "$repo" status --short || result=1
@@ -102,13 +96,13 @@ EOF
         ;;
     help|-h|--help)
         cat <<'EOF'
-./woona status                 Live health, containers, backups and Git status
+./woona status                 Live health, containers, disabled backup policy and Git status
 ./woona check [all|server|android|windows|clinic]
 ./woona check android full     Also run managed-device instrumentation
 ./woona links                  Server, apps and downloads
 
 Start: README.md. Findings and remaining work: Operations/STATUS.md.
-Backup schedule, recovery and logs: Operations/backups/README.md.
+Backup policy: shared/operations/backups/README.md (backups disabled).
 Checks use an isolated local server; they never target production.
 EOF
         ;;

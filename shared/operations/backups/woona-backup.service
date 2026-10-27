@@ -1,9 +1,0 @@
-[Unit]
-Description=Woona consistent full backup and verification
-Requires=docker.service
-After=docker.service
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash /opt/woona/operations-backups/scheduled-backup.sh
-TimeoutStartSec=infinity

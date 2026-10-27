@@ -42,23 +42,17 @@ backup каталоги как read-only mounts. CloudBeaver подключае�
 `public`; PostgreSQL порт наружу не публикуется. Пароли находятся только в
 root-only `/opt/woona/.env.team`, а не в репозитории.
 
-## Backup
+## Backup: отключён
 
-БД и файловое хранилище являются одной логической копией. Для строгого
-point-in-time backup `server/backup.sh` останавливает API, создаёт пару с одним
-UTC timestamp (`postgres-*.dump` и `storage-*.tar`), записывает общий
-`backup-*.sha256` и снова запускает API. В storage archive не входят
-незавершённые `incoming`, временные файлы и вложенный каталог backups.
+27 октября 2026 владелец явно отменил резервное копирование Woona. Серверные
+scheduled/full jobs и off-host/laptop pull отключены; не включать их при
+deployment, установке или обновлении. Старые backup entrypoints завершаются
+кодом 78 до копирования файлов, SSH, изменения каталогов или остановки API.
+Timer/service templates удалены из текущей конфигурации. Политика и проверка:
+[Backup policy](../../operations/backups/README.md).
 
-```bash
-sudo /opt/woona/server/backup.sh
-cd /srv/woona/backups
-sha256sum -c backup-YYYYMMDDTHHMMSSZ.sha256
-```
-
-Локальная копия на том же диске защищает от логического удаления, но не от
-потери диска или сервера. Timestamp-pair вместе с checksum нужно регулярно
-копировать на другой хост/носитель или включить независимый snapshot диска.
+Новый backup server пользователь подключит самостоятельно при необходимости.
+Настройка нового расписания не является частью обычного deployment.
 
 ## Restore drill
 
