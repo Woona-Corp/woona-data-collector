@@ -1,5 +1,7 @@
 package com.example.myapplication.ble
 
+import com.example.myapplication.protocol.WoonaV2Codec
+
 /**
  * Divides a COBS-framed command into ATT Write Request payloads. Never advance to the
  * next fragment before Android reports onCharacteristicWrite(GATT_SUCCESS).
@@ -8,6 +10,9 @@ package com.example.myapplication.ble
  * deliberately requires acknowledged writes, not WRITE_TYPE_NO_RESPONSE.
  */
 class WoonaV2GattWriteQueue {
+    companion object {
+        const val MAX_FRAME_BYTES = WoonaV2Codec.MAX_RAW + WoonaV2Codec.MAX_RAW / 254 + 2
+    }
     private var bytes: ByteArray? = null
     private var offset = 0
     private var pendingEnd = 0
@@ -18,7 +23,7 @@ class WoonaV2GattWriteQueue {
     /** Start one frame; [mtu] is the negotiated ATT MTU (default 23). */
     fun begin(frame: ByteArray, mtu: Int): ByteArray {
         require(!isBusy) { "A V2 GATT write is already in progress" }
-        require(frame.isNotEmpty())
+        require(frame.size in 1..MAX_FRAME_BYTES) { "Invalid V2 wire frame size" }
         require(mtu >= 23) { "Invalid ATT MTU" }
         bytes = frame.clone()
         offset = 0

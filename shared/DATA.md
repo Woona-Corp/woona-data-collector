@@ -30,6 +30,15 @@ Retired identities are stored only as SHA-256 of lowercase UUID strings.
 Authenticated `/v1/deletions` propagates deletion to clients and prevents upload
 of the retired dog, profile, recording or artifact.
 
+Retirement is an authoritative global decision for the exact identity, including
+inactive workspaces on the same device. It differs from user-requested eviction
+of a local copy, which requires fresh receipt and file verification. Clients
+commit retirement and a durable cleanup job in one database transaction before
+unlinking files. A failed unlink is visible and retried after restart. Active
+capture identities are deferred until shutdown/recovery; a failed SQL transaction
+must never remove their files. A missing list/detail response alone is not a
+retirement marker and cannot authorize local deletion.
+
 For reviewed recovery from a loose native export, `server.directory_import`
 requires the original final manifest and all of its exact-size files. An operator
 review binds the original manifest/sync SHA-256, recording UUID, source profile

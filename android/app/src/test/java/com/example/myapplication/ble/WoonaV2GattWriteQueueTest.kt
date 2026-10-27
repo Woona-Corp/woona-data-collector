@@ -7,6 +7,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WoonaV2GattWriteQueueTest {
+    @Test fun oversizedFrameIsRejectedBeforeRetainingAnyBytes() {
+        val queue = WoonaV2GattWriteQueue()
+        try {
+            queue.begin(ByteArray(WoonaV2GattWriteQueue.MAX_FRAME_BYTES + 1), 23)
+            org.junit.Assert.fail("Unbounded command accepted")
+        } catch (_: IllegalArgumentException) { }
+        assertFalse(queue.isBusy)
+        assertArrayEquals(byteArrayOf(7), queue.begin(byteArrayOf(7), 23))
+    }
     @Test fun mtu23SplitsAndAcknowledgesWithoutSkippingBytes() {
         val queue = WoonaV2GattWriteQueue()
         val wire = ByteArray(47) { it.toByte() }
