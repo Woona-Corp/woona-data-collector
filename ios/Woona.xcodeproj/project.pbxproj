@@ -59,6 +59,11 @@
 		8A1AB0022B00000100000001 /* CompleteDataArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AB0012B00000100000001 /* CompleteDataArchive.swift */; };
 		8A1AB0042B00000100000001 /* CompleteArchiveCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AB0032B00000100000001 /* CompleteArchiveCard.swift */; };
 		8A1AB0062B00000100000001 /* CompleteDataArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AB0052B00000100000001 /* CompleteDataArchiveTests.swift */; };
+		8A1AC0002B0000000000A102 /* WoonaV2Codec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000A101 /* WoonaV2Codec.swift */; };
+		8A1AC0002B0000000000A104 /* WoonaV2Discovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000A103 /* WoonaV2Discovery.swift */; };
+		8A1AC0002B0000000000A106 /* WoonaV2LiveSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000A105 /* WoonaV2LiveSession.swift */; };
+		8A1AC0002B0000000000A108 /* WoonaV2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000A107 /* WoonaV2Tests.swift */; };
+		8A1AC0002B0000000000A110 /* woona-v2-wire-vectors.json in Resources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000A109 /* woona-v2-wire-vectors.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -128,6 +133,11 @@
 		8A1AB0012B00000100000001 /* CompleteDataArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompleteDataArchive.swift; sourceTree = "<group>"; };
 		8A1AB0032B00000100000001 /* CompleteArchiveCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompleteArchiveCard.swift; sourceTree = "<group>"; };
 		8A1AB0052B00000100000001 /* CompleteDataArchiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompleteDataArchiveTests.swift; sourceTree = "<group>"; };
+		8A1AC0002B0000000000A101 /* WoonaV2Codec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoonaV2Codec.swift; sourceTree = "<group>"; };
+		8A1AC0002B0000000000A103 /* WoonaV2Discovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoonaV2Discovery.swift; sourceTree = "<group>"; };
+		8A1AC0002B0000000000A105 /* WoonaV2LiveSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoonaV2LiveSession.swift; sourceTree = "<group>"; };
+		8A1AC0002B0000000000A107 /* WoonaV2Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoonaV2Tests.swift; sourceTree = "<group>"; };
+		8A1AC0002B0000000000A109 /* woona-v2-wire-vectors.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = woona-v2-wire-vectors.json; path = "../shared/testdata/woona-v2-wire-vectors.json"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -214,6 +224,9 @@
 		8A1A00322B00000200000001 /* Protocol */ = {
 			isa = PBXGroup;
 			children = (
+				8A1AC0002B0000000000A105 /* WoonaV2LiveSession.swift */,
+				8A1AC0002B0000000000A103 /* WoonaV2Discovery.swift */,
+				8A1AC0002B0000000000A101 /* WoonaV2Codec.swift */,
 				8A1A002E2B00000200000001 /* PacketAssembler.swift */,
 				8A1A002C2B00000200000001 /* PacketStatsTracker.swift */,
 				8A1A002A2B00000200000001 /* PacketValidator.swift */,
@@ -226,6 +239,8 @@
 		8A1A003F2B00000200000001 /* ProtocolTests */ = {
 			isa = PBXGroup;
 			children = (
+				8A1AC0002B0000000000A109 /* woona-v2-wire-vectors.json */,
+				8A1AC0002B0000000000A107 /* WoonaV2Tests.swift */,
 				8A1A003B2B00000200000001 /* PacketAssemblerTests.swift */,
 				8A1A00392B00000200000001 /* PacketStatsTrackerTests.swift */,
 				8A1A00372B00000200000001 /* PacketValidatorTests.swift */,
@@ -399,6 +414,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8A1AC0002B0000000000A110 /* woona-v2-wire-vectors.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -410,6 +426,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8A1AC0002B0000000000A106 /* WoonaV2LiveSession.swift in Sources */,
+				8A1AC0002B0000000000A104 /* WoonaV2Discovery.swift in Sources */,
+				8A1AC0002B0000000000A102 /* WoonaV2Codec.swift in Sources */,
 				8A1A000B2B00000100000001 /* WoonaApp.swift in Sources */,
 				8A1A000D2B00000100000001 /* AppViewModel.swift in Sources */,
 				8A1A000F2B00000100000001 /* AppRootView.swift in Sources */,
@@ -448,6 +467,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8A1AC0002B0000000000A108 /* WoonaV2Tests.swift in Sources */,
 				8A1A00172B00000100000001 /* AppShellTests.swift in Sources */,
 				8A1A00342B00000200000001 /* ProtocolTestSupport.swift in Sources */,
 				8A1A00362B00000200000001 /* SensorBlockParserTests.swift in Sources */,
