@@ -252,7 +252,10 @@ final class KeychainTokenStore {
             kSecAttrAccount as String: account,
         ]
         if token.isEmpty {
-            SecItemDelete(key as CFDictionary)
+            let status = SecItemDelete(key as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw ServerSyncError.requestFailed(Int(status), "Unable to remove server token")
+            }
             return
         }
         let data = Data(token.utf8)
@@ -276,6 +279,12 @@ final class KeychainTokenStore {
 
 @MainActor
 final class WoonaServerClient {
+    private static let liveClients = NSHashTable<WoonaServerClient>.weakObjects()
+
+    static func cancelAllTransfers() {
+        for client in liveClients.allObjects { client.session.invalidateAndCancel() }
+    }
+
     private let baseURL: URL
     private let token: String
     private let accountID: String?
@@ -294,6 +303,7 @@ final class WoonaServerClient {
         sessionConfiguration.allowsExpensiveNetworkAccess = !configuration.wifiOnly
         sessionConfiguration.waitsForConnectivity = true
         self.session = URLSession(configuration: sessionConfiguration, delegate: NoTransferRedirects(), delegateQueue: nil)
+        Self.liveClients.add(self)
     }
 
     deinit { session.invalidateAndCancel() }
@@ -398,6 +408,14 @@ final class WoonaServerClient {
         return try await json(method: "GET", path: "/v1/deletions", body: Optional<Data>.none, as: Result.self).entities
     }
 
+    // A stale list can race an operator retirement. Neither an arbitrary 404 nor
+    // an authorization/network error proves retirement or permits local purge.
+    private func confirmedRetirement(after error: Error, kind: String, id: UUID) async throws -> Bool {
+        guard case ServerSyncError.requestFailed(let status, _) = error, [404, 410].contains(status) else { return false }
+        let digest = WoonaStore.sha256(Data(id.uuidString.lowercased().utf8))
+        return try await deletions().contains { $0.kind == kind && $0.id_sha256 == digest }
+    }
+
     func restoreProfiles(into store: WoonaStore) async throws -> [DogProfile] {
         struct Dog: Decodable {
             let id: UUID
@@ -416,12 +434,16 @@ final class WoonaServerClient {
             let suffix = cursor.map { "?limit=200&cursor=\($0.uuidString)" } ?? "?limit=200"
             let page: Page = try await json(method: "GET", path: "/v1/dogs\(suffix)", body: Optional<Data>.none, as: Page.self)
             for summary in page.items {
-                let dog: Dog = try await json(
+                let dog: Dog
+                do { dog = try await json(
                     method: "GET",
                     path: "/v1/dogs/\(summary.id.uuidString)",
                     body: Optional<Data>.none,
                     as: Dog.self
-                )
+                ) } catch {
+                    if try await confirmedRetirement(after: error, kind: "dog", id: summary.id) { continue }
+                    throw error
+                }
                 _ = try store.upsertRemoteProfile(
                     dogID: dog.id,
                     profileVersionID: dog.profileVersion.id,
@@ -464,19 +486,27 @@ final class WoonaServerClient {
             var seenCursors = Set<UUID>()
             repeat {
                 let suffix = cursor.map { "?limit=200&cursor=\($0.uuidString)" } ?? "?limit=200"
-                let page: Page = try await json(
+                let page: Page
+                do { page = try await json(
                     method: "GET",
                     path: "/v1/dogs/\(dogID.uuidString)/recordings\(suffix)",
                     body: Optional<Data>.none,
                     as: Page.self
-                )
+                ) } catch {
+                    if try await confirmedRetirement(after: error, kind: "dog", id: dogID) { break }
+                    throw error
+                }
                 for summary in page.items {
-                    let detail: ServerRecordingDetail = try await json(
+                    let detail: ServerRecordingDetail
+                    do { detail = try await json(
                         method: "GET",
                         path: "/v1/recordings/\(summary.id.uuidString)",
                         body: Optional<Data>.none,
                         as: ServerRecordingDetail.self
-                    )
+                    ) } catch {
+                        if try await confirmedRetirement(after: error, kind: "recording", id: summary.id) { continue }
+                        throw error
+                    }
                     if try store.restoreRemoteRecording(detail) { restored += 1 }
                 }
                 cursor = page.nextCursor
@@ -485,6 +515,7 @@ final class WoonaServerClient {
                 }
             } while cursor != nil
         }
+        try store.applyServerDeletions(try await deletions(), accountID: accountID)
         return restored
     }
 

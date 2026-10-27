@@ -192,6 +192,13 @@ final class AppViewModel: ObservableObject {
         uploadingProfileCount == 0 && scheduledSyncCount == 0 && downloadingRecordingID == nil && removingLocalRecordingID == nil
     }
 
+    // Disconnect can cancel a waiting upload. Requiring the entire queue to be
+    // idle here would prevent removing credentials when connectivity is lost.
+    var canDisconnectServer: Bool {
+        !serverToken.isEmpty && completeArchiveTask == nil && exportPhase == nil &&
+        !isAccountOperationRunning && activeRecording == nil && !captureStopInProgress && !isRecording
+    }
+
     var canChangeNetworkPolicy: Bool {
         !isBackgroundSyncRunning && completeArchiveTask == nil && !isAccountOperationRunning && !isRecording && activeRecording == nil &&
         !captureStopInProgress && !isReplayRunning && syncingRecordingIDs.isEmpty && uploadingProfileCount == 0 &&
@@ -259,12 +266,15 @@ final class AppViewModel: ObservableObject {
 
     private let questionnaireClientFactory: ((String?) throws -> WoonaServerClient)?
     private let syncClientFactory: ((String?) throws -> WoonaServerClient)?
+    private let serverTokenWriter: ((String) throws -> Void)?
 
     init(store: WoonaStore? = try? WoonaStore(), uiTesting: Bool = false,
          questionnaireClientFactory: ((String?) throws -> WoonaServerClient)? = nil,
-         syncClientFactory: ((String?) throws -> WoonaServerClient)? = nil) {
+         syncClientFactory: ((String?) throws -> WoonaServerClient)? = nil,
+         serverTokenWriter: ((String) throws -> Void)? = nil) {
         self.questionnaireClientFactory = questionnaireClientFactory
         self.syncClientFactory = syncClientFactory
+        self.serverTokenWriter = serverTokenWriter
         self.backgroundSchedulingEnabled = !uiTesting &&
             ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil && NSClassFromString("XCTestCase") == nil
         self.store = store
@@ -363,11 +373,38 @@ final class AppViewModel: ObservableObject {
         serverTransferStatuses = [:]; transferStatusErrors = [:]; transferCheckedAt = [:]
         serverBaseURL = serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         serverToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        do { try keychainTokenStore.save(serverToken) }
+        do { try persistServerToken(serverToken) }
         catch { showError("Failed to store server token", error: error); return false }
         UserDefaults.standard.set(serverBaseURL, forKey: "serverBaseURL")
         UserDefaults.standard.set(serverWifiOnly, forKey: "serverWifiOnly")
         if networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting { schedulePendingSync() }
+        return true
+    }
+
+    private func persistServerToken(_ value: String) throws {
+        if let serverTokenWriter { try serverTokenWriter(value) }
+        else { try keychainTokenStore.save(value) }
+    }
+
+    @discardableResult
+    func disconnectServer() -> Bool {
+        guard canDisconnectServer else {
+            errorMessage = selectedLanguage == .russian
+                ? "Завершите запись, экспорт или операцию с аккаунтом перед отключением сервера."
+                : "Finish capture, export or the account operation before disconnecting the server."
+            return false
+        }
+        do { try persistServerToken("") }
+        catch { showError("Server token could not be removed; connection settings are unchanged", error: error); return false }
+        serverToken = ""
+        WoonaServerClient.cancelAllTransfers()
+        if backgroundSchedulingEnabled { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundSyncIdentifier) }
+        connectionCheck = "not_checked"; connectionCheckedAt = nil; connectionCheckError = nil
+        serverTransferStatuses = [:]; transferStatusErrors = [:]; transferCheckedAt = [:]
+        backgroundSyncStatus = "not_requested"; backgroundSyncError = nil
+        appendDiagnostic(selectedLanguage == .russian
+            ? "Сервер отключён на этом устройстве. Токен удалён; файлы, анкеты и очередь сохранены."
+            : "Server disconnected on this device. Token removed; files, questionnaires and queue preserved.")
         return true
     }
 

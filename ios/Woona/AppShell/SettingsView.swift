@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppViewModel
     @State private var isServerEditorPresented = false
+    @State private var isServerDisconnectPresented = false
     private var russian: Bool { appState.selectedLanguage == .russian }
     private var isServerConfigured: Bool { !appState.serverBaseURL.isEmpty && !appState.serverToken.isEmpty }
 
@@ -108,6 +109,12 @@ struct SettingsView: View {
                     Button(russian ? "Восстановить с сервера" : "Restore from server") { appState.refreshFromServer() }
                         .buttonStyle(.bordered)
                         .disabled(!isServerConfigured || !appState.canChangeAccount)
+                    if isServerConfigured {
+                        Button(russian ? "Отключить сервер" : "Disconnect server", role: .destructive) { isServerDisconnectPresented = true }
+                            .buttonStyle(.bordered)
+                            .disabled(!appState.canDisconnectServer)
+                            .accessibilityIdentifier("server.disconnect")
+                    }
 
                     if let reason = appState.serverMutationBlockedReason {
                         Text(reason).font(.footnote).foregroundStyle(.secondary)
@@ -119,6 +126,14 @@ struct SettingsView: View {
             .background(Color.woonaBackground)
             .navigationTitle(appState.text(.settings))
             .navigationBarTitleDisplayMode(.inline)
+            .alert(russian ? "Отключить сервер на этом устройстве?" : "Disconnect the server on this device?", isPresented: $isServerDisconnectPresented) {
+                Button(russian ? "Отмена" : "Cancel", role: .cancel) {}
+                Button(russian ? "Отключить сервер" : "Disconnect server", role: .destructive) { _ = appState.disconnectServer() }
+            } message: {
+                Text(russian
+                    ? "Токен будет удалён, текущие передачи остановятся. Локальные файлы, анкеты и очередь сохранятся. Для продолжения подключите сервер с новым токеном."
+                    : "The token will be removed and current transfers will stop. Local files, questionnaires and the queue remain saved. Connect the server with a new token to resume.")
+            }
             .sheet(isPresented: $isServerEditorPresented) {
                 ServerConnectionEditor(baseURL: appState.serverBaseURL, russian: russian) { baseURL, token in
                     guard appState.canChangeAccount else { throw WoonaStoreError.invalidData(appState.serverMutationBlockedReason ?? "Server settings are busy") }

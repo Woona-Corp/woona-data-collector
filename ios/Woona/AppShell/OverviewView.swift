@@ -592,6 +592,7 @@ struct OverviewView: View {
                         ForEach(appState.serverRecordings.filter { remote in !appState.recentRecordings.contains(where: { $0.id == remote.id }) }) { recording in
                             VStack(alignment: .leading) {
                                 Text(recording.sessionLabel)
+                                Text(recordingDisplayTime(recording.startedAtUtc)).font(.caption)
                                 Text(recordingSourceText(recording.source, language: appState.selectedLanguage)).font(.caption)
                                 Text(recordingCaptureText(status: recording.captureStatus, code: recording.captureErrorCode, message: recording.captureErrorMessage, language: appState.selectedLanguage)).font(.caption)
                                 Text(recordingUploadText(state: recording.ingestStatus == "uploading" ? "uploading" : recording.ingestStatus, message: nil, language: appState.selectedLanguage))
