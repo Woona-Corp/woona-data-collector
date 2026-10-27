@@ -599,7 +599,7 @@ struct OverviewView: View {
                     .id(profile.id)
                 }
 
-                if section == .session && (appState.isConnectionActive || appState.activeRecording != nil || appState.packetsReceived > 0) {
+                if section == .session && !appState.isV2PreviewActive && (appState.isConnectionActive || appState.activeRecording != nil || appState.packetsReceived > 0) {
                 AppCard(title: appState.text(.session)) {
                     LabeledContent(appState.text(.status), value: appState.statusText)
                     if appState.isReplayRunning {

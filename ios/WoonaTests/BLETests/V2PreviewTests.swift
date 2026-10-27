@@ -161,7 +161,7 @@ final class V2PreviewTests: XCTestCase {
         var input: [V2PreviewPoint] = []
         for index in 0..<7001 {
             let startsSegment = index == 101 || index == 4999
-            input.append(V2PreviewPoint(time: Double(index), value: Double(index), breakBefore: startsSegment))
+            input.append(V2PreviewPoint(time: Double(index), value: Double(index), breakBefore: startsSegment, timestampUs: UInt64(index) * 1000))
         }
         let output = V2PreviewWorker.coarsen(input)
         XCTAssertLessThanOrEqual(output.count, 3000)
