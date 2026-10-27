@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ActivityScenario
@@ -31,14 +32,20 @@ class MainActivityRecreationTest {
     @get:Rule
     val composeRule = createEmptyComposeRule()
 
+    private fun awaitScreenReady() {
+        composeRule.waitUntil(30_000) { composeRule.onAllNodesWithTag("tab.animals").fetchSemanticsNodes().isNotEmpty() }
+    }
+
     @Test
     fun keepScreenOn_survivesActivityRecreation() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            awaitScreenReady()
             scenario.onActivity { activity ->
                 assertTrue(activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0)
             }
 
             scenario.recreate()
+            awaitScreenReady()
 
             scenario.onActivity { activity ->
                 assertTrue(activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0)
@@ -57,6 +64,7 @@ class MainActivityRecreationTest {
             .edit().putString("last_profile_id", profile.id).commit()
 
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            awaitScreenReady()
             composeRule.onNode(
                 hasText("Session") and SemanticsMatcher.expectValue(
                     androidx.compose.ui.semantics.SemanticsProperties.Role,
@@ -73,6 +81,7 @@ class MainActivityRecreationTest {
                 .performTextInput("Lifecycle draft")
 
             scenario.recreate()
+            awaitScreenReady()
 
             composeRule.onNodeWithText("Session questionnaire").assertIsDisplayed()
             composeRule.onNodeWithText("Lifecycle draft").assertIsDisplayed()
@@ -93,12 +102,14 @@ class MainActivityRecreationTest {
             requireNotNull(database.recording(record.id))
         }
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            awaitScreenReady()
             composeRule.onNode(hasText("Recordings") and SemanticsMatcher.expectValue(
                 androidx.compose.ui.semantics.SemanticsProperties.Role, androidx.compose.ui.semantics.Role.Tab)).performClick()
             composeRule.onNodeWithText("Edit questionnaire").performScrollTo().performClick()
             composeRule.onNodeWithText("Номер сессии *").performTextReplacement("Retained existing session draft")
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             scenario.recreate()
+            awaitScreenReady()
             composeRule.onNodeWithText("Session questionnaire").assertIsDisplayed()
             composeRule.onNodeWithText("Retained existing session draft").assertIsDisplayed()
             composeRule.onNodeWithText("Validate and save").performClick()
@@ -125,6 +136,7 @@ class MainActivityRecreationTest {
             database.writableDatabase.execSQL("UPDATE recordings SET status='completed',ended_at_utc=NULL WHERE id=?", arrayOf(record.id))
         }
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            awaitScreenReady()
             composeRule.onNode(hasText("Recordings") and SemanticsMatcher.expectValue(
                 androidx.compose.ui.semantics.SemanticsProperties.Role, androidx.compose.ui.semantics.Role.Tab)).performClick()
             composeRule.onNodeWithText("Edit questionnaire").performScrollTo().performClick()
@@ -132,6 +144,7 @@ class MainActivityRecreationTest {
             composeRule.onNodeWithText("Какой диагноз? (необязательно)").performScrollTo().performTextInput("Retained synthetic heart detail")
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             scenario.recreate()
+            awaitScreenReady()
             composeRule.onNodeWithText("Анкета по активности и сердцебиению").assertIsDisplayed()
             composeRule.onNodeWithText("Retained synthetic heart detail").performScrollTo().assertIsDisplayed()
         }

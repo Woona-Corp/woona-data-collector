@@ -398,7 +398,12 @@ data class Recording(
     val captureErrorCode: String? = null,
     val captureErrorMessage: String? = null,
     val serverSyncError: String? = null,
-)
+    val remoteOrigin: Boolean = false,
+    val serverReceiptSha256: String? = null,
+) {
+    val requiresServerQuestionnaireEdit: Boolean
+        get() = remoteOrigin || serverReceiptSha256 != null || serverSyncState in setOf("synced", "remote")
+}
 
 data class RecordingSummary(
     val recording: Recording,
@@ -1056,7 +1061,25 @@ class WoonaDatabase(
                 while (cursor.moveToNext()) add(cursor.getString(0))
             }
         }
-        ids.forEach { finishRecording(it, RecordingStatus.INTERRUPTED, now) }
+        ids.forEach { id ->
+            val recording = requireNotNull(recording(id))
+            val files = artifactFilesIn(recordingDirectory(recording.relativeDirectory))
+            writableDatabase.beginTransaction()
+            try {
+                writableDatabase.execSQL("""UPDATE recordings SET status='interrupted',
+                    capture_error_code=COALESCE(capture_error_code,'process_interrupted'),
+                    capture_error_message=COALESCE(capture_error_message,?) WHERE id=?""",
+                    arrayOf("Приложение завершилось во время записи. Существующие файлы сохранены; фактическое время остановки неизвестно / The app exited during capture. Existing files are preserved; the actual stop time is unknown", id))
+                // A launch timestamp cannot establish when the killed process stopped.
+                // Preserve any known machine end and questionnaire answers unchanged.
+                files.forEach { (type, file) -> insertArtifact(id, type, file, now) }
+                val hasSync = writableDatabase.rawQuery("SELECT 1 FROM recording_sync WHERE recording_id=?", arrayOf(id)).use { it.moveToFirst() }
+                if (!hasSync) writableDatabase.execSQL("""UPDATE server_sync_state SET state='permanent_error',
+                    last_error_code='recovery_metadata_missing',last_error_message=?,updated_at_utc=? WHERE recording_id=?""",
+                    arrayOf("Файлы прерванной записи сохранены, но метаданные синхронизации отсутствуют. Экспортируйте все данные для разбора; время и синхронизация не восстановлены / Interrupted files are preserved, but synchronization metadata is missing. Export all data for review; timing could not be recovered", now.toString(), id))
+                writableDatabase.setTransactionSuccessful()
+            } finally { writableDatabase.endTransaction() }
+        }
         return ids.size
     }
 
@@ -1292,6 +1315,7 @@ class WoonaDatabase(
     fun saveSessionQuestionnaire(recordingId: String, questionnaire: SessionQuestionnaire) {
         val recording = requireNotNull(recording(recordingId))
         val original = requireNotNull(recording.questionnaire)
+        require(!recording.requiresServerQuestionnaireEdit) { "Для изменения восстановленной серверной анкеты подключитесь к серверу. Черновик сохранён в редакторе / Connect to the server to edit a restored server questionnaire. Your draft remains in the editor" }
         require(recording.status in setOf(RecordingStatus.COMPLETED, RecordingStatus.FAILED, RecordingStatus.INTERRUPTED) && recording.serverSyncState != "synced" && recording.serverSyncState != "uploading")
         require(questionnaire.validate().isValid)
         require(original.animalId == questionnaire.animalId && original.videoRequested == questionnaire.videoRequested && original.sessionKind == questionnaire.sessionKind)
@@ -1732,6 +1756,8 @@ class WoonaDatabase(
         questionnaireRevision = getInt(12),
         captureErrorCode = if (isNull(13)) null else getString(13),
         captureErrorMessage = if (isNull(14)) null else getString(14),
+        remoteOrigin = getInt(15) != 0,
+        serverReceiptSha256 = if (isNull(16)) null else getString(16),
     )
 
     companion object {
@@ -1752,6 +1778,8 @@ class WoonaDatabase(
             "questionnaire_revision",
             "capture_error_code",
             "capture_error_message",
+            "remote_copy",
+            "(SELECT server_receipt_sha256 FROM server_sync_state WHERE recording_id=recordings.id)",
         )
         private val ARTIFACT_COLUMNS = arrayOf(
             "id",

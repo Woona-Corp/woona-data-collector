@@ -40,7 +40,10 @@ data class RecordingSyncClock(
     val firstSensorDeviceTimerMillis: Long? = null,
     val videoFirstFrameCallbackMonotonicNs: Long? = null,
     val videoFirstSamplePtsUs: Long? = null,
-)
+    val monotonicClock: String = "android.elapsedRealtimeNanos",
+) {
+    init { require(monotonicClock in setOf("android.elapsedRealtimeNanos", "ios.CMClock.hostTime")) { "Unsupported monotonic clock domain: $monotonicClock" } }
+}
 
 data class ArtifactSyncRecord(
     val id: String,
@@ -408,6 +411,7 @@ fun WoonaDatabase.recordingSyncRecord(recordingId: String): RecordingSyncRecord?
             firstSensorDeviceTimerMillis = cursor.nullableLong(18),
             videoFirstFrameCallbackMonotonicNs = cursor.nullableLong(19),
             videoFirstSamplePtsUs = cursor.nullableLong(20),
+            monotonicClock = cursor.getString(21),
         )
     }
     val artifacts = readableDatabase.query(
@@ -1022,7 +1026,7 @@ private fun insertRemoteSync(database: SQLiteDatabase, recording: RemoteRecordin
         ContentValues().apply {
             put("recording_id", recording.id)
             put("schema_version", sync.schemaVersion)
-            put("monotonic_clock", "android.elapsedRealtimeNanos")
+            put("monotonic_clock", sync.monotonicClock)
             put("session_zero_at_utc", sync.sessionZeroAtUtc)
             put("session_zero_wall_clock_ms", sync.sessionZeroWallClockMs)
             put("session_zero_monotonic_ns", sync.sessionZeroMonotonicNs)
@@ -1076,6 +1080,7 @@ private val SYNC_COLUMNS = arrayOf(
     "first_sensor_device_timer_ms",
     "video_first_frame_callback_monotonic_ns",
     "video_first_sample_pts_us",
+    "monotonic_clock",
 )
 
 /** Caller holds serverOperationLock; only orphaned upload states are recovered.

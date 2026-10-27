@@ -835,6 +835,158 @@ class WoonaDatabaseTest {
         assertEquals("packet data", database.resolveRelativePath(local.artifacts.single().relativePath).readText())
     }
 
+    @Test fun iosClockRoundTripPreservesDomainAndExactNanoseconds() {
+        val local=completedPacketRecording("QA clock")
+        val n=9_007_199_254_740_993L
+        val clock=local.sync.copy(sessionZeroMonotonicNs=n,firstSensorPacketMonotonicNs=n+17,
+            lastSensorPacketMonotonicNs=n+900_000_017,videoRequestedMonotonicNs=n-10,
+            mediaRecorderStartedMonotonicNs=n+100,videoFirstFrameMonotonicNs=n+150,
+            videoFirstFrameCameraTimestampNs=n+200,videoOffsetFromSensorNs=-123456789,
+            videoFirstFrameCallbackMonotonicNs=n+250,videoFirstSamplePtsUs=1_234_567)
+        val base=remoteCompletedRecording(local).copy(id=java.util.UUID.randomUUID().toString(),sync=clock,artifacts=emptyList())
+        val client=com.example.myapplication.sync.ServerApiClient(com.example.myapplication.sync.ServerSettings("https://invalid.example","synthetic","qa-device",false,null))
+        client.javaClass.getDeclaredField("authenticatedDeviceId").apply {isAccessible=true}.set(client,"00000000-0000-0000-0000-000000000099")
+        val manifestMethod=client.javaClass.getDeclaredMethod("recordingManifest",RecordingSyncRecord::class.java).apply {isAccessible=true}
+        val m=manifestMethod.invoke(client,local.copy(sync=clock)) as JSONObject
+        val remoteJson=JSONObject(m.getJSONObject("recording").toString())
+            .put("id",base.id).put("dogId",base.dogId).put("profileVersion",m.getJSONObject("dogProfileVersion"))
+            .put("sync",m.getJSONObject("sync").put("monotonicClock","ios.CMClock.hostTime"))
+            .put("artifacts",org.json.JSONArray()).put("receiptSha256",base.receiptSha256).put("serverVerifiedAtUtc",base.verifiedAtUtc)
+        val parse=client.javaClass.getDeclaredMethod("parseRecording",JSONObject::class.java).apply {isAccessible=true}
+        val parsed=parse.invoke(client,JSONObject(remoteJson.toString())) as RemoteRecording
+        assertEquals(clock.copy(monotonicClock="ios.CMClock.hostTime"),parsed.sync)
+        val invalid = JSONObject(remoteJson.toString()).apply { getJSONObject("sync").put("monotonicClock","unknown.clock") }
+        assertTrue(runCatching { parse.invoke(client,invalid) }.exceptionOrNull()?.cause is IllegalArgumentException)
+        database.restoreServerMetadata(emptyList(),listOf(parsed))
+        database.readableDatabase.rawQuery("SELECT monotonic_clock,session_zero_monotonic_ns FROM recording_sync WHERE recording_id=?",arrayOf(base.id)).use {
+            it.moveToFirst();assertEquals("ios.CMClock.hostTime",it.getString(0));assertEquals(n,it.getLong(1))
+        }
+        val restored=requireNotNull(database.recordingSyncRecord(base.id)); assertEquals(clock.copy(monotonicClock="ios.CMClock.hostTime"),restored.sync)
+        val emitted=(manifestMethod.invoke(client,restored) as JSONObject).getJSONObject("sync")
+        assertEquals(n,emitted.getLong("sessionZeroMonotonicNs"));assertEquals(n+150,emitted.getLong("videoFirstFrameMonotonicNs"))
+        assertEquals(-123456789L,emitted.getLong("videoOffsetFromSensorNs"));assertEquals("ios.CMClock.hostTime",emitted.getString("monotonicClock"))
+    }
+
+
+    @Test fun acceptedLocalRecordingCannotBecomeOfflineEditableAfterAnotherTaskMakesItPending() {
+        val local=completedPacketRecording("Accepted with queued reference")
+        database.markRecordingSynced(local.id,"f".repeat(64),"2026-10-27T00:00:00Z")
+        database.markRecordingSyncError(local.id,true,"transfer_paused","Paused")
+        val current=requireNotNull(database.recording(local.id))
+        assertTrue(!current.remoteOrigin);assertTrue(current.requiresServerQuestionnaireEdit)
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            database.saveSessionQuestionnaire(local.id,requireNotNull(current.questionnaire).copy(sessionLabel="Do not silently queue this edit"))
+        }
+        assertEquals(local.sessionLabel,database.recording(local.id)?.sessionLabel)
+    }
+
+    @Test fun restoredPendingQuestionnaireCannotBeSavedOfflineOrThrough404Fallback() {
+        database.close(); root.deleteRecursively()
+        val context=ApplicationProvider.getApplicationContext<android.content.Context>()
+        root=File(context.filesDir,"Woona");root.deleteRecursively()
+        val store=com.example.myapplication.sync.ServerSettingsStore(context)
+        context.getSharedPreferences("woona_server",android.content.Context.MODE_PRIVATE).edit().clear().commit()
+        database=WoonaDatabase(context,root)
+        val local=completedPacketRecording("Remote edit protection")
+        val remote=remoteCompletedRecording(local).copy(id=java.util.UUID.randomUUID().toString(),receiptSha256=null,verifiedAtUtc=null,artifacts=emptyList())
+        database.restoreServerMetadata(emptyList(),listOf(remote))
+        val displayed=requireNotNull(database.recording(remote.id))
+        val draft=requireNotNull(displayed.questionnaire).copy(sessionLabel="KEEP MY DRAFT")
+        assertTrue(displayed.remoteOrigin);assertEquals("pending",displayed.serverSyncState)
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { database.saveSessionQuestionnaire(remote.id,draft) }
+        androidx.test.core.app.ActivityScenario.launch(com.example.myapplication.MainActivity::class.java).use { scenario ->
+            awaitStartupReady(scenario)
+            fun attempt():Throwable? {
+                var failed:Throwable?=null
+                scenario.onActivity { activity ->
+                    val editor=activity.javaClass.getDeclaredField("editingRecording\$delegate").apply {isAccessible=true}
+                    @Suppress("UNCHECKED_CAST")
+                    (editor.get(activity) as androidx.compose.runtime.MutableState<Recording?>).value=displayed
+                    val method=activity.javaClass.declaredMethods.single {it.name=="saveEditedQuestionnaire"}.apply {isAccessible=true}
+                    try { kotlinx.coroutines.runBlocking {
+                        kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Unit> { continuation ->
+                            method.invoke(activity,displayed,draft,null,false,continuation)
+                        }
+                    } } catch(error:Throwable) { failed=error }
+                    assertTrue("The editor must remain open",(editor.get(activity) as androidx.compose.runtime.State<*>).value!=null)
+                }
+                return failed
+            }
+            assertTrue(attempt() is IllegalStateException)
+            assertEquals(remote.sessionLabel,database.recording(remote.id)?.sessionLabel)
+            val requests=java.util.concurrent.CopyOnWriteArrayList<String>()
+            java.net.ServerSocket(0,10,java.net.InetAddress.getLoopbackAddress()).use { server ->
+                val responder=Thread {
+                    try { while(!server.isClosed) server.accept().use { socket ->
+                        socket.soTimeout=5000
+                        val input=socket.getInputStream();val headers=java.io.ByteArrayOutputStream()
+                        while(!headers.toString("UTF-8").endsWith("\r\n\r\n")) { val byte=input.read();if(byte<0)error("Unexpected EOF");headers.write(byte) }
+                        val text=headers.toString("UTF-8");requests+=text.lineSequence().first()
+                        val size=Regex("""(?i)Content-Length: (\d+)""").find(text)?.groupValues?.get(1)?.toInt()?:0
+                        repeat(size) { check(input.read()>=0) }
+                        val body=JSONObject().put("detail",JSONObject().put("code","recording_not_found")).toString()
+                        socket.getOutputStream().write(("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: ${body.toByteArray().size}\r\nConnection: close\r\n\r\n"+body).toByteArray())
+                    } } catch (_:java.net.SocketException) { }
+                }.apply { isDaemon=true;start() }
+                store.save("http://127.0.0.1:${server.localPort}","synthetic-review-token",true)
+                assertTrue(attempt() is com.example.myapplication.sync.ServerHttpException)
+                assertTrue(requests.any {it.startsWith("PUT /v1/recordings/${remote.id}/questionnaire ")})
+                assertEquals(remote.sessionLabel,database.recording(remote.id)?.sessionLabel)
+                store.clearToken();server.close();responder.join(2000)
+            }
+        }
+        context.getSharedPreferences("woona_server",android.content.Context.MODE_PRIVATE).edit().clear().commit()
+    }
+
+    @Test fun startupRecoveryKeepsMainResponsiveBlocksCaptureAndPreservesUnknownEnd() {
+        database.close();root.deleteRecursively()
+        val context=ApplicationProvider.getApplicationContext<android.content.Context>()
+        root=File(context.filesDir,"Woona");root.deleteRecursively()
+        context.getSharedPreferences("woona_server",android.content.Context.MODE_PRIVATE).edit().clear().commit()
+        database=WoonaDatabase(context,root)
+        val dog=database.saveProfile(completeDogQuestionnaire("Cold recovery"))
+        val session=database.beginRecording(dog.id,RecordingSource.LIVE,completeSessionQuestionnaire())
+        val video=File(database.recordingDirectory(session.relativeDirectory),"video.mp4")
+        java.io.RandomAccessFile(video,"rw").use {it.setLength(256L*1024*1024)}
+        database.close()
+        val lock=com.example.myapplication.sync.serverOperationLock
+        lock.lock()
+        var scenario:androidx.test.core.app.ActivityScenario<com.example.myapplication.MainActivity>?=null
+        try {
+            scenario=androidx.test.core.app.ActivityScenario.launch(com.example.myapplication.MainActivity::class.java)
+            val responsive=java.util.concurrent.CountDownLatch(1)
+            android.os.Handler(android.os.Looper.getMainLooper()).post {responsive.countDown()}
+            assertTrue("Main thread stays responsive while recovery waits",responsive.await(2,java.util.concurrent.TimeUnit.SECONDS))
+            scenario.onActivity {activity ->
+                assertTrue(activity.javaClass.getDeclaredField("startupReady\$delegate").apply {isAccessible=true}.let {(it.get(activity) as androidx.compose.runtime.State<*>).value}==false)
+                val toggle=activity.javaClass.getDeclaredMethod("toggleCapture").apply {isAccessible=true}
+                assertTrue(runCatching {toggle.invoke(activity)}.exceptionOrNull()?.cause is IllegalStateException)
+            }
+        } finally { lock.unlock() }
+        requireNotNull(scenario).use {
+            awaitStartupReady(it)
+            database=WoonaDatabase(context,root)
+            val recovered=requireNotNull(database.recording(session.id))
+            assertEquals(RecordingStatus.INTERRUPTED,recovered.status)
+            assertEquals(null,recovered.endedAtUtc)
+            assertEquals("process_interrupted",recovered.captureErrorCode)
+            assertEquals(256L*1024*1024,recovered.artifacts.single().sizeBytes)
+            assertEquals(sha256(video),recovered.artifacts.single().sha256)
+            assertEquals(completeSessionQuestionnaire().toJson(),requireNotNull(recovered.questionnaire).toJson())
+        }
+    }
+
+    private fun awaitStartupReady(scenario:androidx.test.core.app.ActivityScenario<com.example.myapplication.MainActivity>) {
+        val deadline=android.os.SystemClock.elapsedRealtime()+30_000
+        while(true) {
+            var ready=false
+            scenario.onActivity {activity ->ready=activity.javaClass.getDeclaredField("startupReady\$delegate").apply {isAccessible=true}.let {(it.get(activity) as androidx.compose.runtime.State<*>).value}==true}
+            if(ready)return
+            check(android.os.SystemClock.elapsedRealtime()<deadline) {"Startup recovery did not finish"}
+            Thread.sleep(25)
+        }
+    }
+
     private fun completedPacketRecording(name: String): RecordingSyncRecord {
         val profile = database.saveProfile(completeDogQuestionnaire(name))
         val recording = database.beginRecording(profile.id, RecordingSource.LIVE, completeSessionQuestionnaire())
