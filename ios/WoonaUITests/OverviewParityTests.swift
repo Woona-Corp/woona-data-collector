@@ -39,6 +39,8 @@ final class OverviewParityTests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
         app.buttons["tab.recordings"].tap()
+        XCTAssertTrue(app.navigationBars["Recordings"].waitForExistence(timeout: 5), "The center of the Recordings tab must activate its full padded hit area")
+        XCTAssertTrue(app.buttons["tab.recordings"].isSelected)
         let cause = app.staticTexts["Capture: interrupted — collar connection failed (GATT 8)"]
         for _ in 0..<4 {
             if cause.isHittable { break }
