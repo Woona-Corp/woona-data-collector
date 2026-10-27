@@ -35,6 +35,8 @@ import com.example.myapplication.data.remoteArtifacts
 import com.example.myapplication.data.resetFailedSync
 import com.example.myapplication.data.restoreServerMetadata
 import com.example.myapplication.data.applyServerDeletions
+import com.example.myapplication.data.retryRetirementCleanup
+import com.example.myapplication.data.retirementCleanupStatus
 import com.example.myapplication.data.serverSyncCounts
 import com.example.myapplication.data.sessionQuestionnaireFromJson
 import com.example.myapplication.data.removeLocalRecordingFiles
@@ -53,6 +55,7 @@ import com.example.myapplication.profile.HeartQuestionnaireDialog
 import com.example.myapplication.profile.ReferenceAttachmentDialog
 import com.example.myapplication.data.heartQuestionnaireDraft
 import com.example.myapplication.sync.serverOperationLock
+import com.example.myapplication.sync.sameRetirementServer
 import kotlin.concurrent.withLock
 import com.example.myapplication.sync.ServerSettingsDialog
 import com.example.myapplication.sync.ServerSettingsStore
@@ -114,6 +117,8 @@ class MainActivity : ComponentActivity() {
     private var connectionCheckError: String? = null
     private var workersRunning = 0
     private var workersQueued = 0
+    private var retirementChecking = false
+    private var retirementNetworkError: String? = null
     private var isServerRestoreInProgress = false
     private var isServerSettingsVisible by mutableStateOf(false)
     private var isDogQuestionnaireVisible by mutableStateOf(false)
@@ -274,6 +279,7 @@ class MainActivity : ComponentActivity() {
                         selectedLanguage = selectedLanguage,
                         selectedThemeMode = selectedThemeMode,
                         serverSyncState = serverSyncState.copy(mutationsAllowed = serverMutationBlock == null, mutationBlockReason = serverMutationBlock,
+                            connectionEditorAllowed = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && !com.example.myapplication.data.isCompleteArchiveExporting,
                             networkPolicyAllowed = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && serverSyncState.workersRunning == 0),
                         onStartScan = {
                             if (accountBusy || isServerRestoreInProgress) {
@@ -308,7 +314,7 @@ class MainActivity : ComponentActivity() {
                             applyAppThemeMode(this, it)
                         },
                         onServerConfigure = {
-                            if (!accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && woonaDatabase.serverSyncCounts().uploading == 0) isServerSettingsVisible = true
+                            if (!accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && !com.example.myapplication.data.isCompleteArchiveExporting) isServerSettingsVisible = true
                         },
                         onServerWifiOnlyChange = {
                             if (!accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && serverSyncState.workersRunning == 0) {
@@ -557,6 +563,9 @@ class MainActivity : ComponentActivity() {
                             current = serverSettingsStore.get(),
                             language = selectedLanguage,
                             onDismiss = { isServerSettingsVisible = false },
+                            onDisconnect = ::disconnectServer,
+                            canSave = serverSyncState.mutationsAllowed,
+                            canDisconnect = serverSyncState.connectionEditorAllowed,
                             onSave = { url, token ->
                                 if (accountBusy || isServerRestoreInProgress || deviceFeatureController.isCaptureActive() || woonaDatabase.serverSyncCounts().uploading > 0) {
                                     toast("Дождитесь завершения записи и синхронизации"); return@ServerSettingsDialog
@@ -593,7 +602,7 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.IO) {
                     serverOperationLock.withLock {
                         if (!CaptureServiceBridge.isRunning && !DeviceFeatureControllerHolder.hasActiveCapture()) {
-                            WoonaDatabase(applicationContext).use { it.interruptUnfinished() }
+                            WoonaDatabase(applicationContext).use { it.interruptUnfinished(); it.applyServerDeletions(emptyList()) }
                         }
                     }
                 }
@@ -726,6 +735,7 @@ class MainActivity : ComponentActivity() {
             try {
                 withContext(Dispatchers.IO) {
                     deviceFeatureController.onDisconnectRequested()
+                    serverOperationLock.withLock { woonaDatabase.applyServerDeletions(emptyList()) }
                 }
                 ServerSyncScheduler.enqueuePending(applicationContext)
                 refreshProfilesAndRecordings()
@@ -841,6 +851,7 @@ class MainActivity : ComponentActivity() {
             connectionCheckedAt = null; connectionCheckError = null
         }
         val counts = woonaDatabase.serverSyncCounts()
+        val cleanup = woonaDatabase.retirementCleanupStatus()
         serverSyncState = ServerSyncUiState(
             status = when {
                 !settings.isConfigured -> ServerSyncStatus.NOT_CONFIGURED
@@ -858,6 +869,12 @@ class MainActivity : ComponentActivity() {
             lastErrorMessage = counts.lastErrorMessage,
             restoring = isServerRestoreInProgress,
             mutationsAllowed = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && counts.uploading == 0,
+            connectionEditorAllowed = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && !com.example.myapplication.data.isCompleteArchiveExporting,
+            retirementCleanupPending = cleanup.pending,
+            retirementCleanupError = cleanup.lastError,
+            retirementDeferred = cleanup.deferredCount,
+            retirementChecking = retirementChecking,
+            retirementNetworkError = retirementNetworkError,
             networkPolicyAllowed = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive() && workersRunning == 0,
             mutationBlockReason = serverMutationBlockReason(counts.uploading),
             networkAvailable = networkCapabilities()?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true,
@@ -901,6 +918,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun disconnectServer() {
+        if (!startupReady || accountBusy || isServerRestoreInProgress || deviceFeatureController.isCaptureActive() || com.example.myapplication.data.isCompleteArchiveExporting) {
+            toast(if (selectedLanguage == AppLanguage.RUSSIAN) "Дождитесь записи, экспорта или операции аккаунта" else "Wait for capture, export or the account operation")
+            return
+        }
+        accountBusy = true
+        isServerSettingsVisible = false
+        serverSyncState = serverSyncState.copy(operationMessage = if (selectedLanguage == AppLanguage.RUSSIAN) "Отключаем сервер и останавливаем передачи. Локальные данные сохраняются." else "Disconnecting server and stopping transfers. Local data is preserved.")
+        refreshServerState()
+        backgroundExecutor.execute {
+            val result = runCatching { ServerSyncScheduler.disconnect(applicationContext) }
+            runOnUiThread {
+                accountBusy = false
+                connectionCheck = com.example.myapplication.sync.ConnectionCheck.NOT_CHECKED
+                connectionCheckedAt = null; connectionCheckError = null
+                serverSyncState = serverSyncState.copy(operationMessage = result.fold(
+                    onSuccess = { if (selectedLanguage == AppLanguage.RUSSIAN) "Сервер отключён, токен удалён с устройства. Локальные данные и очередь сохранены. Для продолжения укажите токен." else "Server disconnected and token removed from this device. Local data and queue are preserved. Enter a token to resume." },
+                    onFailure = { (if (selectedLanguage == AppLanguage.RUSSIAN) "Отключение не завершено; локальные данные сохранены. Повторите действие.\n" else "Disconnection did not complete; local data is preserved. Retry.\n") + (it.message ?: it.javaClass.simpleName) },
+                ))
+                refreshServerState()
+            }
+        }
+    }
+
     private fun checkServerConnection() {
         if (connectionCheck == com.example.myapplication.sync.ConnectionCheck.CHECKING) return
         val settings = serverSettingsStore.get()
@@ -935,7 +976,10 @@ class MainActivity : ComponentActivity() {
             val result = runCatching { serverOperationLock.withLock {
                 if (identifier != null && settings.isConfigured) ServerApiClient(settings).applyAccount(identifier)
                 val snapshot = if (settings.isConfigured) ServerApiClient(settings).fetchRestoreSnapshot() else null
-                snapshot?.let { woonaDatabase.restoreServerMetadata(it.dogs, it.recordings) }
+                snapshot?.let {
+                    woonaDatabase.restoreServerMetadata(it.dogs, it.recordings)
+                    if (settings.sameRetirementServer(serverSettingsStore.get())) woonaDatabase.applyServerDeletions(it.deletions)
+                }
                 snapshot
             }
             }
@@ -944,6 +988,7 @@ class MainActivity : ComponentActivity() {
                 result.onSuccess { snapshot ->
                     if (deviceFeatureController.isCaptureActive()) { toast("Дождитесь завершения записи"); return@onSuccess }
                     serverSettingsStore.setAccount(identifier)
+                    serverSyncState = serverSyncState.copy(operationMessage = snapshot?.warnings?.let { com.example.myapplication.sync.restoreWarningsText(it,selectedLanguage) })
                     editingProfile = null; editingRecording = null; heartQuestionnaireRecordingId = null
                     isDogQuestionnaireVisible = false
                     refreshProfilesAndRecordings(); refreshServerState()
@@ -1023,16 +1068,19 @@ class MainActivity : ComponentActivity() {
         backgroundExecutor.execute {
             val outcome = runCatching { serverOperationLock.withLock {
                 val snapshot = ServerApiClient(settings).fetchRestoreSnapshot()
+                check(settings.sameRetirementServer(serverSettingsStore.get())) { "Server connection changed during restore; retry with the current connection" }
                 val restored = woonaDatabase.restoreServerMetadata(snapshot.dogs, snapshot.recordings)
                 woonaDatabase.applyServerDeletions(snapshot.deletions)
-                restored
+                restored to snapshot.warnings
             } }
             runOnUiThread {
                 isServerRestoreInProgress = false
                 refreshProfilesAndRecordings()
                 refreshServerState()
                 outcome.fold(
-                    onSuccess = { result ->
+                    onSuccess = { (result, warnings) ->
+                        serverSyncState = serverSyncState.copy(operationMessage = com.example.myapplication.sync.restoreWarningsText(warnings, selectedLanguage)
+                            ?: if (selectedLanguage == AppLanguage.RUSSIAN) "Восстановление завершено. Серверные удаления проверены." else "Restore completed. Server retirements were checked.")
                         toast(
                             if (selectedLanguage == AppLanguage.RUSSIAN) {
                                 "Восстановлено: собак ${result.dogs}, записей ${result.recordings}, файлов ${result.artifacts}" +
@@ -1138,8 +1186,12 @@ class MainActivity : ComponentActivity() {
         WorkManager.getInstance(applicationContext)
             .getWorkInfosByTagLiveData(ServerSyncScheduler.WORK_TAG)
             .observe(this) { infos ->
-                workersRunning = infos.count { it.state == androidx.work.WorkInfo.State.RUNNING }
-                workersQueued = infos.count { it.state in setOf(androidx.work.WorkInfo.State.ENQUEUED, androidx.work.WorkInfo.State.BLOCKED) }
+                val maintenance = infos.filter { ServerSyncScheduler.MAINTENANCE_TAG in it.tags }
+                retirementChecking = maintenance.any { it.state == androidx.work.WorkInfo.State.RUNNING }
+                retirementNetworkError = maintenance.filter { it.outputData.getString("retirement_completed_at") != null }
+                    .maxByOrNull { it.outputData.getString("retirement_completed_at").orEmpty() }?.outputData?.getString("retirement_error")
+                workersRunning = infos.count { ServerSyncScheduler.MAINTENANCE_TAG !in it.tags && it.state == androidx.work.WorkInfo.State.RUNNING }
+                workersQueued = infos.count { ServerSyncScheduler.MAINTENANCE_TAG !in it.tags && it.state in setOf(androidx.work.WorkInfo.State.ENQUEUED, androidx.work.WorkInfo.State.BLOCKED) }
                 refreshServerState()
                 refreshProfilesAndRecordings()
             }

@@ -296,6 +296,14 @@ fun DeviceSettingsScreen(
         }
 
         item {
+            com.example.myapplication.storage.RetirementCleanupCard(
+                language = selectedLanguage,
+                state = serverSyncState,
+                captureActive = uiState.showCaptureUi || uiState.isReplayPreparing || uiState.isReplayRunning || uiState.videoState == VideoCaptureState.STOPPING,
+            )
+        }
+
+        item {
             ServerSyncSettingsCard(
                 state = serverSyncState,
                 language = selectedLanguage,
@@ -771,6 +779,7 @@ private fun ServerSyncSettingsCard(
             if (!state.mutationsAllowed) Text(state.mutationBlockExplanation(language), style = MaterialTheme.typography.bodySmall)
             Text(if (language == AppLanguage.RUSSIAN) "Очередь всех локальных аккаунтов. Каждая анкета и запись отправляется в свой аккаунт." else "Queue for all local accounts. Each profile and recording uploads to its own account.", style = MaterialTheme.typography.bodySmall)
             Text(state.queueExplanation(language), style = MaterialTheme.typography.bodySmall)
+            state.operationMessage?.let { message -> androidx.compose.foundation.text.selection.SelectionContainer { Text(message, style = MaterialTheme.typography.bodySmall) } }
             Text((if (language == AppLanguage.RUSSIAN) "Аккаунт: " else "Account: ") + (state.accountId ?: (if (language == AppLanguage.RUSSIAN) "без аккаунта" else "unassigned")))
             Text(state.connectionCheck.label(language), style = MaterialTheme.typography.bodySmall)
             state.checkedAtUtc?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
@@ -793,7 +802,7 @@ private fun ServerSyncSettingsCard(
                 )
                 OutlinedButton(
                     onClick = onConfigure,
-                    enabled = state.mutationsAllowed,
+                    enabled = state.connectionEditorAllowed,
                 ) {
                     Text(
                         if (state.isConfigured) {

@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -27,10 +28,14 @@ fun ServerSettingsDialog(
     language: AppLanguage,
     onDismiss: () -> Unit,
     onSave: (baseUrl: String, token: String) -> Unit,
+    onDisconnect: (() -> Unit)? = null,
+    canSave: Boolean = true,
+    canDisconnect: Boolean = true,
 ) {
     var baseUrl by remember(current.baseUrl) { mutableStateOf(current.baseUrl) }
     var token by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var confirmingDisconnect by remember { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss) {
         Surface {
             Column(
@@ -63,11 +68,16 @@ fun ServerSettingsDialog(
                     supportingText = error?.let { { Text(it) } },
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (!canSave) Text(if (language == AppLanguage.RUSSIAN) "Изменение подключения доступно после завершения текущей операции. Отключить сервер можно, не удаляя локальные данные." else "Connection changes are available after the current operation. You can disconnect without deleting local data.")
+                if (current.isConfigured && onDisconnect != null) TextButton(onClick = { confirmingDisconnect = true }, enabled = canDisconnect) {
+                    Text(if (language == AppLanguage.RUSSIAN) "Отключить сервер и удалить токен" else "Disconnect server and remove token")
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
                         Text(if (language == AppLanguage.RUSSIAN) "Отмена" else "Cancel")
                     }
                     Button(
+                        enabled = canSave,
                         onClick = {
                             error = runCatching {
                                 require(token.isNotBlank()) {
@@ -84,4 +94,12 @@ fun ServerSettingsDialog(
             }
         }
     }
+    if (confirmingDisconnect) AlertDialog(
+        onDismissRequest = { confirmingDisconnect = false },
+        title = { Text(if (language == AppLanguage.RUSSIAN) "Отключить сервер?" else "Disconnect server?") },
+        text = { Text(if (language == AppLanguage.RUSSIAN) "Токен будет удалён с этого устройства, текущие передачи остановятся. Локальные файлы, анкеты, очередь и подтверждённый прогресс сохранятся. Для продолжения снова укажите токен. Это не отзывает токен на сервере." else "The token will be removed from this device and current transfers will stop. Local files, questionnaires, queue and confirmed progress are preserved. Enter a token again to resume. This does not revoke the token on the server.") },
+        confirmButton = { TextButton(onClick = { confirmingDisconnect = false; onDisconnect?.invoke() }, enabled = canDisconnect) { Text(if (language == AppLanguage.RUSSIAN) "Отключить" else "Disconnect") } },
+        dismissButton = { TextButton(onClick = { confirmingDisconnect = false }) { Text(if (language == AppLanguage.RUSSIAN) "Отмена" else "Cancel") } },
+    )
+
 }

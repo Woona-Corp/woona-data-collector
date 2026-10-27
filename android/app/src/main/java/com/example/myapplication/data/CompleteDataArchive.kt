@@ -11,6 +11,10 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
+internal val completeArchiveLifecycleLock = Any()
+@Volatile var isCompleteArchiveExporting: Boolean = false
+    private set
+
 /** Uses SQLite's transactional VACUUM INTO snapshot, including committed WAL pages. */
 fun createCompleteDataArchive(
     context: Context,
@@ -20,8 +24,14 @@ fun createCompleteDataArchive(
 ): File {
     checkCancelled()
     if (captureActive) throw IOException("Stop and finalize the active recording before exporting all data. Original files are unchanged.")
-    if (!serverOperationLock.tryLock(1, TimeUnit.SECONDS)) throw IOException("Server synchronization is running. Wait for it to finish, then retry the export.")
+    synchronized(completeArchiveLifecycleLock) {
+        check(!isCompleteArchiveExporting) { "A complete archive export is already running" }
+        isCompleteArchiveExporting = true
+    }
+    var acquired = false
     try {
+        if (!serverOperationLock.tryLock(1, TimeUnit.SECONDS)) throw IOException("Server synchronization is running. Wait for it to finish, then retry the export.")
+        acquired = true
         val root = File(context.filesDir, "Woona")
         WoonaDatabase(context).use { database ->
             val directory = File(context.cacheDir, "woona_complete_exports/${UUID.randomUUID()}")
@@ -61,7 +71,10 @@ fun createCompleteDataArchive(
                 throw error
             } finally { snapshot.delete() }
         }
-    } finally { serverOperationLock.unlock() }
+    } finally {
+        if (acquired) serverOperationLock.unlock()
+        synchronized(completeArchiveLifecycleLock) { isCompleteArchiveExporting = false }
+    }
 }
 
 internal fun completeArchiveMetadata(snapshot: File, root: File): String =

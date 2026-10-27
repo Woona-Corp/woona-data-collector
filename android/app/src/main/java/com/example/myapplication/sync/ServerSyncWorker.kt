@@ -49,6 +49,7 @@ import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import java.util.concurrent.TimeUnit
 
 class ProfileSyncWorker(
@@ -73,7 +74,10 @@ class ProfileSyncWorker(
             val profile = database.profileSyncRecord(profileVersionId) ?: return Result.success()
             val transferContext = currentCoroutineContext()
             val client = ServerApiClient(settings.copy(accountId = database.profile(profile.dogId)?.accountId), checkCancelled = { transferContext.ensureActive() })
-            database.applyServerDeletions(client.fetchDeletions())
+            val markers = client.fetchDeletions()
+            if (!settings.sameRetirementServer(ServerSettingsStore(applicationContext).get())) return Result.retry()
+            database.applyServerDeletions(markers)
+            if (database.profileSyncRecord(profileVersionId) == null) return Result.success()
             database.markProfileUploading(profileVersionId)
             val receipt = client.uploadProfile(profile)
             receipt.profileVersion?.let { database.acceptServerProfile(profile.dogId, it) }
@@ -87,6 +91,10 @@ class ProfileSyncWorker(
             database.markProfileSyncError(profileVersionId, true, "transfer_paused", "transfer_paused: Transfer paused; local data and confirmed progress are preserved for retry")
             throw cancelled
         } catch (exception: Exception) {
+            if (!currentCoroutineContext().isActive) {
+                database.markProfileSyncError(profileVersionId,true,"transfer_paused","transfer_paused: Transfer paused; local data and confirmed progress are preserved")
+                throw CancellationException("Transfer cancelled").apply { initCause(exception) }
+            }
             val retryable = exception.isRetryable()
             database.markProfileSyncError(
                 profileVersionId,
@@ -147,7 +155,10 @@ class RecordingSyncWorker(
             var record = database.recordingSyncRecord(recordingId) ?: return Result.success()
             val transferContext = currentCoroutineContext()
             val client = ServerApiClient(settings.copy(accountId = database.profile(record.dogId)?.accountId), checkCancelled = { transferContext.ensureActive() })
-            database.applyServerDeletions(client.fetchDeletions())
+            val markers = client.fetchDeletions()
+            if (!settings.sameRetirementServer(ServerSettingsStore(applicationContext).get())) return Result.retry()
+            database.applyServerDeletions(markers)
+            record = database.recordingSyncRecord(recordingId) ?: return Result.success()
             val accepted = try { client.fetchRecording(recordingId) }
                 catch (error: ServerHttpException) { if (error.status == 404) null else throw error }
             if (accepted?.receiptSha256 != null) {
@@ -196,6 +207,10 @@ class RecordingSyncWorker(
             database.markRecordingSyncError(recordingId, true, "transfer_paused", "transfer_paused: Transfer paused; local data and confirmed progress are preserved for retry")
             throw cancelled
         } catch (exception: Exception) {
+            if (!currentCoroutineContext().isActive) {
+                database.markRecordingSyncError(recordingId,true,"transfer_paused","transfer_paused: Transfer paused; local data and confirmed progress are preserved")
+                throw CancellationException("Transfer cancelled").apply { initCause(exception) }
+            }
             val retryable = exception.isRetryable()
             database.markRecordingSyncError(
                 recordingId,
@@ -245,11 +260,29 @@ class RecordingSyncWorker(
 
 object ServerSyncScheduler {
     const val WORK_TAG = "woona-server-sync"
+    const val MAINTENANCE_TAG = "woona-retirement-maintenance"
+    private const val RETIREMENT_WORK_NAME = "server-retirement-reconcile"
 
     private val policyLock = Any()
     private val policyExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "woona-network-policy") }
 
     /** Update queued constraints in-place; WorkManager never interrupts a running generation. */
+    /** Credentials are durably disabled before cancellation; neither queue nor files are cleared. */
+    fun disconnect(context: Context) {
+        synchronized(com.example.myapplication.data.completeArchiveLifecycleLock) {
+            check(!com.example.myapplication.data.isCompleteArchiveExporting) { "Дождитесь завершения экспорта / Wait for archive export to finish" }
+            ServerSettingsStore(context).clearToken()
+            ServerTransferRegistry.cancelAll()
+        }
+        val manager = WorkManager.getInstance(context.applicationContext)
+        manager.cancelAllWorkByTag(WORK_TAG).result.get(30, TimeUnit.SECONDS)
+        serverOperationLock.withLock {
+            WoonaDatabase(context.applicationContext).use { database ->
+                database.recoverOrphanedUploads { name -> manager.getWorkInfosForUniqueWork(name).get(30, TimeUnit.SECONDS).any { !it.state.isFinished } }
+            }
+        }
+    }
+
     fun refreshPendingNetworkPolicy(context: Context, onComplete: (Throwable?) -> Unit = {}) = policyExecutor.submit {
         val failure = runCatching {
             serverOperationLock.withLock {
@@ -260,6 +293,7 @@ object ServerSyncScheduler {
                     database.recoverOrphanedUploads { name ->
                         manager.getWorkInfosForUniqueWork(name).get(30, TimeUnit.SECONDS).any { !it.state.isFinished }
                     }
+                    updateWaitingNetworkPolicy(manager, RETIREMENT_WORK_NAME, constraints) { old -> retirementRequest(context, old, constraints) }
                     database.networkPolicyProfileVersionIds().forEach { id ->
                         updateWaitingNetworkPolicy(manager, "server-profile-$id", constraints) { old -> profileRequest(context, id, old, constraints) }
                     }
@@ -288,6 +322,9 @@ object ServerSyncScheduler {
     }
 
     fun enqueuePending(context: Context) {
+        if (ServerSettingsStore(context).get().isConfigured) synchronized(policyLock) {
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(RETIREMENT_WORK_NAME, ExistingWorkPolicy.KEEP, retirementRequest(context))
+        }
         val database = WoonaDatabase(context.applicationContext)
         try {
             database.pendingProfileVersionIds().forEach { enqueueProfile(context, it) }
@@ -343,6 +380,15 @@ object ServerSyncScheduler {
             .setConstraints(constraints)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .apply { old?.let { setId(it.id); it.tags.forEach { tag -> addTag(tag) } } }
+            .build()
+
+    private fun retirementRequest(context: Context, old: WorkInfo? = null, constraints: Constraints = networkConstraints(context)): OneTimeWorkRequest =
+        OneTimeWorkRequestBuilder<RetirementSyncWorker>()
+            .setId(old?.id ?: java.util.UUID.randomUUID())
+            .addTag(WORK_TAG).addTag(MAINTENANCE_TAG)
+            .apply { old?.tags?.forEach(::addTag) }
+            .setConstraints(constraints)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .build()
 
     private fun networkConstraints(context: Context): Constraints =

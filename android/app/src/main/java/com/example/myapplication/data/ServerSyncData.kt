@@ -503,12 +503,17 @@ fun WoonaDatabase.acceptServerRecording(recording: RemoteRecording) {
         arrayOf(recording.id, recording.dogId, recording.profile.id))
 }
 
-fun WoonaDatabase.applyServerDeletions(entities: List<Pair<String, String>>): Int {
-    fun retired(kind: String, id: String): Boolean {
-        val hash = MessageDigest.getInstance("SHA-256").digest(id.lowercase().toByteArray())
-            .joinToString("") { "%02x".format(it) }
-        return (kind to hash) in entities
+fun WoonaDatabase.applyServerDeletions(
+    entities: List<Pair<String, String>>,
+    deleteEntry: (File, Boolean) -> Boolean = { file, directory -> if (directory) file.deleteRecursively() else file.delete() },
+): Int {
+    val accepted = entities.toMutableSet()
+    readableDatabase.rawQuery("SELECT kind,id_sha256 FROM deferred_retirements", null).use { cursor ->
+        while (cursor.moveToNext()) accepted += cursor.getString(0) to cursor.getString(1)
     }
+    fun marker(kind: String, id: String): Pair<String,String> = kind to MessageDigest.getInstance("SHA-256")
+        .digest(id.lowercase().toByteArray()).joinToString("") { "%02x".format(it) }
+    fun retired(kind: String, id: String): Boolean = marker(kind,id) in accepted
     val directories = mutableListOf<File>()
     val ids = mutableListOf<String>()
     writableDatabase.rawQuery("SELECT id,dog_id,status,relative_directory FROM recordings", null).use { cursor ->
@@ -520,19 +525,17 @@ fun WoonaDatabase.applyServerDeletions(entities: List<Pair<String, String>>): In
             }
         }
     }
-    directories.forEach { directory ->
-        require(directory != rootDirectory.canonicalFile) { "Cannot remove Woona storage root" }
-        check(directory.deleteRecursively() || !directory.exists()) { "Could not remove retired recording files" }
-    }
     writableDatabase.beginTransaction()
     try {
+        // Files are untouched until every retirement row and cleanup intent commits.
+        directories.forEach { enqueueRetirementCleanup(writableDatabase, it, directory = true) }
         ids.forEach { writableDatabase.delete("recordings", "id=?", arrayOf(it)) }
         val artifacts = mutableListOf<Pair<String,File>>()
         writableDatabase.rawQuery("SELECT id,relative_path FROM artifacts WHERE recording_id NOT IN (SELECT id FROM recordings WHERE status IN ('preparing','recording'))",null).use { cursor ->
             while (cursor.moveToNext()) if (retired("artifact",cursor.getString(0))) artifacts += cursor.getString(0) to resolveRelativePath(cursor.getString(1))
         }
         artifacts.forEach { (id,file) ->
-            check(file.delete() || !file.exists()) { "Could not remove retired artifact" }
+            enqueueRetirementCleanup(writableDatabase, file, directory = false)
             writableDatabase.delete("artifacts","id=?",arrayOf(id))
         }
         val profiles = mutableListOf<String>()
@@ -548,8 +551,21 @@ fun WoonaDatabase.applyServerDeletions(entities: List<Pair<String, String>>): In
             while (cursor.moveToNext()) if (retired("dog", cursor.getString(0))) dogs += cursor.getString(0)
         }
         dogs.forEach { writableDatabase.delete("dogs", "id=?", arrayOf(it)) }
+        // Keep exact accepted negative knowledge while active capture or profile
+        // references defer retirement. A later stop/recovery needs no new approval.
+        val deferred = mutableSetOf<Pair<String,String>>()
+        listOf("recording" to "recordings", "dog" to "dogs", "profile" to "dog_profile_versions", "artifact" to "artifacts").forEach { (kind, table) ->
+            writableDatabase.rawQuery("SELECT id FROM $table", null).use { cursor ->
+                while (cursor.moveToNext()) marker(kind,cursor.getString(0)).takeIf { it in accepted }?.let(deferred::add)
+            }
+        }
+        writableDatabase.delete("deferred_retirements", null, null)
+        deferred.forEach { (kind, hash) -> writableDatabase.insertOrThrow("deferred_retirements", null, ContentValues().apply {
+            put("kind",kind);put("id_sha256",hash);put("received_at_utc",java.time.Instant.now().toString())
+        }) }
         writableDatabase.setTransactionSuccessful()
     } finally { writableDatabase.endTransaction() }
+    retryRetirementCleanup(deleteEntry)
     return ids.size
 }
 

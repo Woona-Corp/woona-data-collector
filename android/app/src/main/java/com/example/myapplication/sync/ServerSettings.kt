@@ -19,6 +19,7 @@ data class ServerSettings(
     val deviceId: String,
     val wifiOnly: Boolean,
     val accountId: String? = null,
+    val transferGeneration: Long = ServerTransferRegistry.generation,
 ) {
     val isConfigured: Boolean
         get() = baseUrl.isNotBlank() && token.isNotBlank()
@@ -38,7 +39,7 @@ enum class ServerSyncStatus {
 data class ServerSyncUiState(
     val status: ServerSyncStatus = ServerSyncStatus.NOT_CONFIGURED,
     val baseUrl: String = BuildConfig.WOONA_SERVER_BASE_URL,
-    val wifiOnly: Boolean = false,
+    val wifiOnly: Boolean = true,
     val pending: Int = 0,
     val uploading: Int = 0,
     val synced: Int = 0,
@@ -47,6 +48,12 @@ data class ServerSyncUiState(
     val restoring: Boolean = false,
     val mutationsAllowed: Boolean = true,
     val networkPolicyAllowed: Boolean = true,
+    val connectionEditorAllowed: Boolean = true,
+    val retirementCleanupPending: Int = 0,
+    val retirementCleanupError: String? = null,
+    val retirementDeferred: Int = 0,
+    val retirementChecking: Boolean = false,
+    val retirementNetworkError: String? = null,
     val mutationBlockReason: String? = null,
     val networkAvailable: Boolean? = null,
     val unmeteredNetwork: Boolean? = null,
@@ -69,12 +76,12 @@ class ServerSettingsStore(context: Context) {
 
     fun get(): ServerSettings = ServerSettings(
         baseUrl = preferences.getString(KEY_BASE_URL, DEFAULT_BASE_URL).orEmpty().trimEnd('/'),
-        token = decrypt(preferences.getString(KEY_TOKEN, null)) ?: DEFAULT_TOKEN,
+        token = if (preferences.getBoolean("explicitly_disconnected", false)) "" else decrypt(preferences.getString(KEY_TOKEN, null)) ?: DEFAULT_TOKEN,
         deviceId = preferences.getString(KEY_DEVICE_ID, null)
             ?: UUID.randomUUID().toString().also {
                 preferences.edit().putString(KEY_DEVICE_ID, it).apply()
             },
-        wifiOnly = preferences.getBoolean(KEY_WIFI_ONLY, false),
+        wifiOnly = preferences.getBoolean(KEY_WIFI_ONLY, true),
         accountId = preferences.getString("account_id", null),
     )
 
@@ -84,6 +91,7 @@ class ServerSettingsStore(context: Context) {
         preferences.edit()
             .putString(KEY_BASE_URL, normalizedUrl)
             .putString(KEY_TOKEN, encrypt(token.trim()))
+            .putBoolean("explicitly_disconnected", false)
             .putBoolean(KEY_WIFI_ONLY, wifiOnly)
             .apply()
     }
@@ -97,7 +105,9 @@ class ServerSettingsStore(context: Context) {
     }
 
     fun clearToken() {
-        preferences.edit().remove(KEY_TOKEN).apply()
+        check(preferences.edit().remove(KEY_TOKEN).putBoolean("explicitly_disconnected", true).commit()) {
+            "Не удалось сохранить отключение сервера. Повторите удаление токена; локальные данные сохранены / Could not persist server disconnection. Retry removing the token; local data is preserved"
+        }
     }
 
     private fun encrypt(value: String): String {
