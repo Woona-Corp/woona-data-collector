@@ -26,6 +26,36 @@ import java.util.zip.ZipFile
 @RunWith(AndroidJUnit4::class)
 class DeviceFeatureSmokeTest {
     @Test
+    fun postedPreviewEventsCannotChangeANewerConnection() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val source = File(context.cacheDir, "preview-events-${UUID.randomUUID()}.bin").apply { writeBytes(validPacket()) }
+        lateinit var ble: FakeBleSessionController
+        val controller = createDeviceFeatureController(context, context.filesDir, "${context.packageName}.provider",
+            UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+            packetCaptureControllerFactory = { _, _ -> FakePacketCaptureController(source) },
+            bleSessionControllerFactory = { listener -> FakeBleSessionController(listener).also { ble = it } },
+            fileShareIntentFactory = FakeFileShareIntentFactory())
+        try {
+            instrumentation.runOnMainSync {
+                controller.onV2PreviewConnectRequested("OLD")
+                Thread {
+                    ble.listener.onV2LiveStarted(1, 3)
+                    ble.listener.onStateChanged(BleSessionState.CONNECTED)
+                    ble.listener.onError("Old connection failed", null)
+                }.apply { start(); join(2_000); assertTrue(!isAlive) }
+                controller.onDisconnectRequested()
+                controller.onV2PreviewConnectRequested("NEW")
+            }
+            instrumentation.waitForIdleSync()
+            assertEquals(com.example.myapplication.feature.device.V2PreviewStage.CONNECTING, controller.uiState.v2PreviewStage)
+            org.junit.Assert.assertFalse(controller.uiState.v2LiveRunning)
+            org.junit.Assert.assertFalse(controller.uiState.isConnected)
+            org.junit.Assert.assertNull(controller.uiState.errorMessage)
+        } finally { controller.close(); source.delete() }
+    }
+
+    @Test
     fun v2PreviewDoesNotCreateSessionOrChangePreviousFilesAndCannotReplaceActiveCapture() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val root = File(context.cacheDir, "preview-isolation-${UUID.randomUUID()}").apply { mkdirs() }
