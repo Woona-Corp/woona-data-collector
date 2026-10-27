@@ -58,12 +58,26 @@ class WoonaV2Discovery {
         for (frame in receiver.append(bytes)) {
             // Reject stale, unsolicited and other-command frames during handshake.
             if (frame.requestId != pendingRequestId) continue
+            val error = WoonaV2Codec.error(frame)
+            val expectedType = when (phase) {
+                Phase.WAIT_HELLO -> WoonaV2Codec.HELLO
+                Phase.WAIT_STREAMS -> WoonaV2Codec.GET_STREAMS
+                Phase.WAIT_STATUS -> WoonaV2Codec.GET_STATUS
+                else -> 0
+            }
+            if (error != null && error.offendingType == expectedType) {
+                events += fail("V2 command 0x${expectedType.toString(16)} rejected: status=${error.status} (${WoonaV2Codec.statusDescription(error.status)})")
+                break
+            }
             when (phase) {
                 Phase.WAIT_HELLO -> {
-                    val info = WoonaV2Codec.hello(frame) ?: continue
-                    if (info.versionMin > 2 || info.versionMax < 2 || info.maxPayload < 24) {
-                        phase = Phase.FAILED
-                        events += Event.Failure("Unsupported V2 version or payload limit")
+                    if (frame.type != WoonaV2Codec.HELLO_RESPONSE) continue
+                    val info = WoonaV2Codec.hello(frame)
+                    if (info == null || info.versionMin > 2 || info.versionMax < 2 ||
+                        info.versionMin > info.versionMax || info.maxPayload !in 36..WoonaV2Codec.MAX_PAYLOAD || info.streamMask == 0L) {
+                        events += fail("Unsupported V2 version, stream mask or payload limit")
+                    } else if (!listOf(0, 2, 3, 4, 5).all(info::hasCapability)) {
+                        events += fail("V2 LIVE preview requires LIVE, stream info, status, session control and command replay capabilities")
                     } else {
                         hello = info
                         phase = Phase.WAIT_STREAMS
@@ -71,10 +85,10 @@ class WoonaV2Discovery {
                     }
                 }
                 Phase.WAIT_STREAMS -> {
-                    val info = WoonaV2Codec.streams(frame) ?: continue
-                    if (info.status != 0) {
-                        phase = Phase.FAILED
-                        events += Event.Failure("GET_STREAMS rejected with status ${info.status}")
+                    if (frame.type != WoonaV2Codec.STREAMS_RESPONSE) continue
+                    val info = WoonaV2Codec.streams(frame)
+                    if (info == null || info.status != 0 || info.streamMask != hello?.streamMask) {
+                        events += fail("GET_STREAMS rejected or inconsistent descriptors/mask: status=${info?.status}")
                     } else {
                         streams = info
                         phase = Phase.WAIT_STATUS
@@ -82,10 +96,34 @@ class WoonaV2Discovery {
                     }
                 }
                 Phase.WAIT_STATUS -> {
-                    val status = status(frame) ?: continue
+                    if (frame.type != 0x83) continue
+                    if (frame.payload.isNotEmpty() && frame.payload[0] != 0.toByte()) {
+                        val code = frame.payload[0].toInt() and 255
+                        events += fail("GET_STATUS rejected: status=$code (${WoonaV2Codec.statusDescription(code)})")
+                        continue
+                    }
+                    val status = status(frame)
+                    if (status == null) {
+                        events += fail("Malformed V2 STATUS_RESPONSE")
+                        continue
+                    }
                     val h = hello ?: continue
                     val s = streams ?: continue
+                    if (status.supportedStreamMask != s.streamMask ||
+                        (status.activeStreamMask and s.streamMask) != status.activeStreamMask) {
+                        events += fail("V2 status stream masks disagree with discovery")
+                        continue
+                    }
+                    if (status.sessionMode != 0 || status.sessionId != 0L) {
+                        events += fail("V2 device is busy with ${if (status.sessionMode == 2) "STORAGE" else "LIVE"} session ${status.sessionId}; preserve the active session")
+                        continue
+                    }
+                    if (frame.payload.size == 48 && frame.payload[36] != 0.toByte()) {
+                        events += fail("V2 measurement is not idle: phase=${frame.payload[36].toInt() and 255}; preserve the current connection and device state")
+                        continue
+                    }
                     phase = Phase.READY
+                    pendingRequestId = 0
                     pendingWire = ByteArray(0)
                     events += Event.Complete(Device(h, s, status))
                 }
@@ -127,7 +165,9 @@ class WoonaV2Discovery {
     private fun status(frame: V2Frame): Status? {
         if (frame.type != 0x83 || frame.payload.size !in listOf(36, 48)) return null
         val p = frame.payload
-        if (p[0] != 0.toByte() || p[1] != 1.toByte()) return null
+        if (p[0] != 0.toByte() || p[1] != 1.toByte() || p[2].toInt() !in 0..2 ||
+            p[3] != 1.toByte() || (33..35).any { p[it] != 0.toByte() } ||
+            (p.size == 48 && p[36].toInt() !in 0..4)) return null
         fun u32(offset: Int): Long = (0..3).fold(0L) { acc, i ->
             acc or ((p[offset + i].toLong() and 0xffL) shl (i * 8))
         }
@@ -138,5 +178,12 @@ class WoonaV2Discovery {
             supportedStreamMask = u32(12),
             batteryPercent = (p[32].toInt() and 0xff).let { if (it <= 100) it else null },
         )
+    }
+
+    private fun fail(reason: String): Event.Failure {
+        phase = Phase.FAILED
+        pendingRequestId = 0
+        pendingWire = ByteArray(0)
+        return Event.Failure(reason)
     }
 }

@@ -11,6 +11,7 @@ data class V2Hello(val versionMin: Int, val versionMax: Int, val capabilities: L
 }
 data class V2Stream(val id: Int, val format: Int, val channels: Int, val nativeRateHz: Long)
 data class V2Streams(val status: Int, val streamMask: Long, val descriptors: List<V2Stream>)
+data class V2Error(val status: Int, val offendingType: Int)
 data class V2LiveData(val sessionId: Long, val streamId: Int, val flags: Int, val count: Int,
                       val rateHz: Int, val streamSequence: Long, val timestampUs: Long, val samples: ByteArray)
 
@@ -18,6 +19,7 @@ object WoonaV2Codec {
     const val MAX_PAYLOAD = 2048
     const val HEADER_SIZE = 20
     const val MAX_RAW = HEADER_SIZE + MAX_PAYLOAD + 4
+    const val MAX_ENCODED = MAX_RAW + MAX_RAW / 254 + 1
     const val HELLO = 0x01
     const val GET_STREAMS = 0x02
     const val GET_STATUS = 0x03
@@ -33,6 +35,7 @@ object WoonaV2Codec {
     const val STORED_TRANSFER_END = 0x42
     const val HELLO_RESPONSE = 0x81
     const val STREAMS_RESPONSE = 0x82
+    const val ERROR_RESPONSE = 0xff
     private const val U32_MAX = 0xffff_ffffL
     private val MAGIC = byteArrayOf(0x57, 0x4e, 0x41, 0x32)
     private fun u8(v: Byte): Int = v.toInt() and 255
@@ -63,6 +66,7 @@ object WoonaV2Codec {
         cobsEncode(encodeRaw(type, sequence, requestId, payload)) + byteArrayOf(0)
 
     fun cobsEncode(raw: ByteArray): ByteArray {
+        require(raw.size <= MAX_RAW) { "V2 COBS input exceeds the maximum frame size" }
         val dst = ByteArray(raw.size + raw.size / 254 + 2)
         var codePosition = 0; var next = 1; var code = 1
         for (value in raw) {
@@ -78,7 +82,7 @@ object WoonaV2Codec {
     }
 
     fun cobsDecode(encoded: ByteArray): ByteArray? {
-        if (encoded.isEmpty()) return null
+        if (encoded.isEmpty() || encoded.size > MAX_ENCODED) return null
         val dst = ByteArray(encoded.size)
         var i = 0; var output = 0
         while (i < encoded.size) {
@@ -91,7 +95,7 @@ object WoonaV2Codec {
             }
             if (code != 255 && i < encoded.size) dst[output++] = 0
         }
-        return dst.copyOf(output)
+        return if (output <= MAX_RAW) dst.copyOf(output) else null
     }
 
     fun hello(frame: V2Frame): V2Hello? {
@@ -105,20 +109,62 @@ object WoonaV2Codec {
     fun streams(frame: V2Frame): V2Streams? {
         val b = frame.payload
         if (frame.type != STREAMS_RESPONSE || b.size < 8 || u8(b[2]) != 8 || b[3] != 0.toByte()) return null
-        val count = u8(b[1]); if (b.size != 8 + count * 8) return null
+        val count = u8(b[1]); if (count > 32 || b.size != 8 + count * 8) return null
         val v = le(b); val list = mutableListOf<V2Stream>()
         for (i in 0 until count) {
             val off = 8 + i * 8
             if (b[off + 3] != 0.toByte()) return null
             list += V2Stream(u8(b[off]), u8(b[off + 1]), u8(b[off + 2]), v.getInt(off + 4).toLong() and U32_MAX)
         }
-        return V2Streams(u8(b[0]), v.getInt(4).toLong() and U32_MAX, list)
+        val parsed = V2Streams(u8(b[0]), v.getInt(4).toLong() and U32_MAX, list)
+        return parsed.takeIf { it.status != 0 || validStreams(it) }
+    }
+
+    /** A descriptor is not usable merely because its bytes fit in the frame. */
+    fun validStreams(streams: V2Streams): Boolean {
+        if (streams.status != 0 || streams.streamMask !in 1..U32_MAX ||
+            streams.descriptors.size !in 1..32) return false
+        var mask = 0L
+        for (stream in streams.descriptors) {
+            if (stream.id !in 1..32 || stream.format !in 1..2 ||
+                stream.channels !in 1..16 || stream.nativeRateHz !in 1..U32_MAX) return false
+            // These identities have a defined sample layout in firmware data_block.c.
+            if (stream.id in 1..7 && (stream.format != (if (stream.id == 5) 2 else 1) ||
+                stream.channels != (if (stream.id <= 2) 3 else 1))) return false
+            val bit = 1L shl (stream.id - 1)
+            if (mask and bit != 0L) return false
+            mask = mask or bit
+        }
+        return mask == streams.streamMask
+    }
+
+    fun error(frame: V2Frame): V2Error? {
+        val p = frame.payload
+        if (frame.type != ERROR_RESPONSE || p.size != 4 || p[2] != 0.toByte() || p[3] != 0.toByte()) return null
+        return V2Error(u8(p[0]), u8(p[1]))
+    }
+
+    fun statusDescription(status: Int): String = when (status) {
+        0 -> "ok"
+        1 -> "invalid message"
+        2 -> "invalid argument"
+        3 -> "unsupported stream"
+        4 -> "device busy; preserve its active session"
+        5 -> "no recording sink available"
+        6 -> "invalid device state"
+        7 -> "invalid session"
+        8 -> "device internal error"
+        9 -> "request ID conflicts with a cached command"
+        10 -> "request ID expired; reconcile device state before another action"
+        11 -> "not found"
+        12 -> "device storage error"
+        else -> "unknown device status"
     }
 
     /** Keep sample bytes intact until format and channel count are known from GET_STREAMS. */
     fun liveData(frame: V2Frame): V2LiveData? {
         val b = frame.payload
-        if (frame.type != DATA || b.size < 24 || b[5] != 0.toByte()) return null
+        if (frame.type != DATA || b.size !in 24..MAX_PAYLOAD || b[5] != 0.toByte()) return null
         val v = le(b)
         return V2LiveData(v.getInt(0).toLong() and U32_MAX, u8(b[4]),
             v.getShort(6).toInt() and 0xffff, v.getShort(8).toInt() and 0xffff,
@@ -143,7 +189,7 @@ class WoonaV2StreamDecoder {
                 }
                 pending.clear(); discardUntilDelimiter = false
             } else if (!discardUntilDelimiter) {
-                if (pending.size >= WoonaV2Codec.MAX_RAW + WoonaV2Codec.MAX_RAW / 254 + 2) {
+                if (pending.size >= WoonaV2Codec.MAX_ENCODED) {
                     pending.clear(); discardUntilDelimiter = true
                 } else pending.add(value)
             }

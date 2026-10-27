@@ -15,6 +15,7 @@ object WoonaV2ChartMapper {
         val block = event.block
         val descriptor = event.descriptor
         if (block.count <= 0 || block.rateHz <= 0 || block.timestampUs < 0 ||
+            block.streamId != descriptor.id ||
             descriptor.channels !in 1..3 || descriptor.format !in 1..2 ||
             block.samples.size.toLong() != block.count.toLong() * descriptor.channels * 2L ||
             block.flags and 1 == 0
@@ -25,8 +26,11 @@ object WoonaV2ChartMapper {
             3 -> 4 // contact microphone
             4 -> 5 // ambient microphone (V2-only selector)
             5 -> 6 // piezo (V2-only selector)
+            6 -> 7 // main-board temperature, raw S16 preview units
+            7 -> 8 // ribbon temperature, raw S16 preview units
             else -> return emptyMap()
         }
+        if (block.streamId in 6..7 && (descriptor.format != 1 || descriptor.channels != 1)) return emptyMap()
         val gap = event.sequenceGap || (block.flags and 2 != 0)
         val step = ((block.count + MAX_PREVIEW_INSTANTS_PER_BLOCK - 1) /
             MAX_PREVIEW_INSTANTS_PER_BLOCK).coerceAtLeast(1)
