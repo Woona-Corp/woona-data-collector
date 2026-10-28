@@ -30,7 +30,7 @@ PostgreSQL хранит анкеты, версии, связи, состояни
 - `feature/device/` — единый lifecycle датчика, камеры, replay и экспорта.
 - `storage/` — packet/raw/timeline/diagnostic/CSV/ZIP форматы.
 - `video/` — Camera2 preview и MediaRecorder.
-- `data/` — SQLite v7 на Android, анкеты, immutable profile versions, записи, sync и
+- `data/` — SQLite v8 на Android, анкеты, immutable profile versions, записи, sync и
   artifacts.
 - `sync/` — настройки сервера, Keystore-токен, HTTP upload/download и
   WorkManager.
