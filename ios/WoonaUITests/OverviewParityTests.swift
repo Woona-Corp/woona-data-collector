@@ -7,14 +7,18 @@ final class OverviewParityTests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing"]
+        if name.contains("testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls") {
+            app.launchArguments.append("--ui-testing-v2-charts")
+        }
         app.launch()
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
     }
 
     func testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls() {
-        app.terminate(); app.launchArguments += ["--ui-testing-v2-charts"]; app.launch()
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
         app.buttons["tab.session"].tap()
+        XCTAssertTrue(app.navigationBars["Session"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab.session"].isSelected)
         XCTAssertTrue(app.staticTexts["v2.stage"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["Start session"].exists)
         attachScreen("V2-Session-EnglishLight")
