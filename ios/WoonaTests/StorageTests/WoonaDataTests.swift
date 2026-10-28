@@ -1951,6 +1951,7 @@ private final class LoopbackArtifactHTTPServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "woona.tests.loopback-http")
     private let lock = NSLock()
     private var ready: CheckedContinuation<UInt16, Error>?
+    private var listenerState = "setup"
     private var connections: [NWConnection] = []
     private var recorded: [Request] = []
     var requests: [Request] { lock.lock(); defer { lock.unlock() }; return recorded }
@@ -1968,14 +1969,20 @@ private final class LoopbackArtifactHTTPServer: @unchecked Sendable {
     }
 
     func start() async throws -> String {
+        let startedAt = ProcessInfo.processInfo.systemUptime
         let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
             lock.lock(); ready = continuation; lock.unlock()
             listener.stateUpdateHandler = { [weak self] state in
                 guard let self else { return }
+                self.lock.lock(); self.listenerState = String(describing: state); self.lock.unlock()
                 switch state {
                 case .ready:
                     if let port = self.listener.port { _ = self.finishReady(.success(port.rawValue)) }
-                case .failed(let error): _ = self.finishReady(.failure(error))
+                    else { _ = self.finishReady(.failure(self.startupFailure("ready without a port", startedAt: startedAt))) }
+                case .failed(let error):
+                    _ = self.finishReady(.failure(self.startupFailure(error.localizedDescription, startedAt: startedAt)))
+                case .cancelled:
+                    _ = self.finishReady(.failure(self.startupFailure("listener cancelled", startedAt: startedAt)))
                 default: break
                 }
             }
@@ -1986,12 +1993,23 @@ private final class LoopbackArtifactHTTPServer: @unchecked Sendable {
                 self.receive(connection, buffered: Data())
             }
             listener.start(queue: queue)
-            queue.asyncAfter(deadline: .now() + 5) { [weak self] in
+            // Simulator service startup can exceed five seconds while Xcode boots
+            // multiple test clones. This budget is only for the test listener;
+            // the HTTP request deadline and every download assertion stay strict.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20) { [weak self] in
                 guard let self else { return }
-                if self.finishReady(.failure(URLError(.timedOut))) { self.listener.cancel() }
+                if self.finishReady(.failure(self.startupFailure("20-second bootstrap deadline", startedAt: startedAt))) { self.listener.cancel() }
             }
         }
         return "http://127.0.0.1:\(port)/prefix"
+    }
+
+    private func startupFailure(_ reason: String, startedAt: TimeInterval) -> Error {
+        lock.lock()
+        let state = listenerState, requestCount = recorded.count, connectionCount = connections.count
+        lock.unlock()
+        let elapsed = String(format: "%.3f", ProcessInfo.processInfo.systemUptime - startedAt)
+        return WoonaStoreError.invalidData("Loopback test listener startup failed: \(reason); state=\(state), elapsed=\(elapsed)s, requests=\(requestCount), connections=\(connectionCount)")
     }
 
     private func finishReady(_ result: Result<UInt16, Error>) -> Bool {
