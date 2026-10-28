@@ -144,7 +144,8 @@ jobs:
             *) echo 'Unsupported sanitizer mode' >&2; exit 2 ;;
           esac
           if [[ -n "$WOONA_IOS_TEST_FILTER" ]]; then
-            [[ "$WOONA_IOS_TEST_FILTER" =~ ^WoonaTests(/[A-Za-z0-9_]+){0,2}$ ]] || { echo 'Invalid XCTest filter'; exit 2; }
+            [[ "$WOONA_IOS_TEST_FILTER" =~ ^Woona(Tests|UITests)(/[A-Za-z0-9_]+){0,2}$ ]] || { echo 'Invalid XCTest filter'; exit 2; }
+            [[ "$WOONA_SANITIZER" == 'none' || "$WOONA_IOS_TEST_FILTER" != WoonaUITests* ]] || { echo 'Sanitizer filters must select unit tests'; exit 2; }
             filter_args=(-only-testing:"$WOONA_IOS_TEST_FILTER")
             parallel_args=(-parallel-testing-enabled NO)
           fi
