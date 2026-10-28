@@ -128,18 +128,27 @@ jobs:
         run: |
           simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for devices in json.load(sys.stdin)["devices"].values() for d in devices if d["name"].startswith("iPhone")))')"
           sanitizer_args=()
+          filter_args=()
+          parallel_args=()
           case "$WOONA_SANITIZER" in
             none) ;;
-            address) sanitizer_args=(-enableAddressSanitizer YES -enableThreadSanitizer NO -only-testing:WoonaTests) ;;
-            thread) sanitizer_args=(-enableThreadSanitizer YES -enableAddressSanitizer NO -only-testing:WoonaTests -parallel-testing-enabled NO) ;;
+            address)
+              sanitizer_args=(-enableAddressSanitizer YES -enableThreadSanitizer NO)
+              filter_args=(-only-testing:WoonaTests)
+              ;;
+            thread)
+              sanitizer_args=(-enableThreadSanitizer YES -enableAddressSanitizer NO)
+              filter_args=(-only-testing:WoonaTests)
+              parallel_args=(-parallel-testing-enabled NO)
+              ;;
             *) echo 'Unsupported sanitizer mode' >&2; exit 2 ;;
           esac
-          filter_args=()
           if [[ -n "$WOONA_IOS_TEST_FILTER" ]]; then
             [[ "$WOONA_IOS_TEST_FILTER" =~ ^WoonaTests(/[A-Za-z0-9_]+){0,2}$ ]] || { echo 'Invalid XCTest filter'; exit 2; }
-            filter_args=(-only-testing:"$WOONA_IOS_TEST_FILTER" -parallel-testing-enabled NO)
+            filter_args=(-only-testing:"$WOONA_IOS_TEST_FILTER")
+            parallel_args=(-parallel-testing-enabled NO)
           fi
-          xcodebuild "${sanitizer_args[@]}" "${filter_args[@]}" -project ios/Woona.xcodeproj -scheme Woona -derivedDataPath "$RUNNER_TEMP/WoonaDerived" -resultBundlePath "$RUNNER_TEMP/WoonaTests.xcresult" -destination "platform=iOS Simulator,id=$simulator_id" CODE_SIGNING_ALLOWED=NO test || {
+          xcodebuild "${sanitizer_args[@]}" "${filter_args[@]}" "${parallel_args[@]}" -project ios/Woona.xcodeproj -scheme Woona -derivedDataPath "$RUNNER_TEMP/WoonaDerived" -resultBundlePath "$RUNNER_TEMP/WoonaTests.xcresult" -destination "platform=iOS Simulator,id=$simulator_id" CODE_SIGNING_ALLOWED=NO test || {
             xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/WoonaTests.xcresult" --compact
             exit 1
           }
