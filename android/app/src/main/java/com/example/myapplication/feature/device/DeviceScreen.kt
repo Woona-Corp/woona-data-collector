@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -1564,7 +1565,7 @@ private fun ChartFullscreenControls(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                val sensorItems = if (uiState.v2Ready) {
+                val sensorItems = if (uiState.v2DiscoveryRequested) {
                     listOf("AXL" to 2, "GIR" to 3, "MIC" to 4,
                         "AMB" to 5, "PZ" to 6, "T1" to 7, "T2" to 8).filter { (_, type) ->
                         uiState.v2StreamMask and (1L shl (type - 2)) != 0L
@@ -1882,10 +1883,12 @@ private fun SensorSelector(
             Text(appStringResource(R.string.chart_sensor_selection), style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                modifier = Modifier.fillMaxWidth().then(
+                    if (uiState.v2DiscoveryRequested) Modifier.horizontalScroll(rememberScrollState()) else Modifier,
+                ),
+                horizontalArrangement = if (uiState.v2DiscoveryRequested) Arrangement.spacedBy(4.dp) else Arrangement.SpaceEvenly,
             ) {
-                val sensors = if (uiState.v2Ready) {
+                val sensors = if (uiState.v2DiscoveryRequested) {
                     listOf("AXL" to 2, "GIR" to 3, "MIC" to 4,
                         "AMB" to 5, "PZ" to 6, "T1" to 7, "T2" to 8).filter { (_, type) ->
                         uiState.v2StreamMask and (1L shl (type - 2)) != 0L

@@ -2,6 +2,15 @@ package com.example.myapplication
 
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import com.example.myapplication.feature.device.*
@@ -64,4 +73,49 @@ class V2PreviewUiTest {
         compose.onAllNodesWithText("DISCONNECT").onLast().performClick()
         compose.runOnIdle { assertEquals(1, disconnects) }
     }
+
+    @Test fun allSevenPreviewSensorsRemainSelectableOnNarrowScreen() {
+        val selections = mutableListOf<Int>()
+        setNarrowCharts(DeviceUiState(v2DiscoveryRequested = true, v2Ready = true,
+            v2StreamMask = 0x7f, v2PreviewStage = V2PreviewStage.RUNNING), selections::add)
+        compose.onNodeWithText("T2").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithText("T2").assertIsSelected()
+        compose.onNodeWithText("AXL").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithText("AXL").assertIsSelected()
+        compose.runOnIdle { assertEquals(listOf(8, 2), selections) }
+    }
+
+    @Test fun failedPreviewRetainsAdvertisedSensorsInNormalAndFullscreenCharts() {
+        val selections = mutableListOf<Int>()
+        setNarrowCharts(DeviceUiState(v2DiscoveryRequested = true, v2Ready = false,
+            v2StreamMask = 0x40, v2PreviewStage = V2PreviewStage.FAILED), selections::add)
+        compose.onNodeWithText("T2").assertIsDisplayed().performClick()
+        compose.onNodeWithText("T2").assertIsSelected()
+        compose.onNodeWithText("T").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Open fullscreen chart").performClick()
+        val inFullscreen = hasAnyAncestor(hasTestTag("chart_fullscreen_controls"))
+        compose.onNode(hasText("T2") and inFullscreen).assertIsDisplayed().performClick()
+        compose.onNode(hasText("T") and inFullscreen).assertDoesNotExist()
+        compose.runOnIdle { assertEquals(listOf(8, 8), selections) }
+    }
+
+    private fun setNarrowCharts(initial: DeviceUiState, onSelect: (Int) -> Unit) {
+        compose.setContent {
+            AppLocalizationProvider(AppLanguage.ENGLISH, AppTextResolver(compose.activity) { AppLanguage.ENGLISH }) {
+                MaterialTheme {
+                    var state by remember { mutableStateOf(initial) }
+                    Box(Modifier.width(320.dp).fillMaxHeight()) {
+                        DeviceChartsScreen(state, onSensorSelect = {
+                            state = state.copy(selectedSensorType = it, selectedChannel = 1)
+                            onSelect(it)
+                        }, onChannelSelect = {}, onChartWindowSelect = {}, onFollowLiveChange = {},
+                            onChartPanLeft = {}, onChartPanRight = {}, onChartZoomIn = {},
+                            onChartZoomOut = {}, onChartZoomReset = {}, onChartPanGesture = {},
+                            onChartZoomGesture = { _, _ -> })
+                    }
+                }
+            }
+        }
+    }
+
 }
