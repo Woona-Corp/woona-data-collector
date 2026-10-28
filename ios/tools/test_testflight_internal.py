@@ -1,10 +1,12 @@
 """No-network policy and read-back tests for internal-only TestFlight operations."""
 import copy
+import io
 import json
 import unittest
+from urllib.error import HTTPError
 from unittest.mock import patch
 
-from testflight_internal import AppleClient, SafetyError, jose_signature, run
+from testflight_internal import AppleClient, AppleRequestError, SafetyError, jose_signature, run
 
 
 def row(kind, identity, **attrs):
@@ -26,6 +28,7 @@ class FakeApple:
         self.app_owner = self.app
         self.group_owner = self.app
         self.group_validation_count = 0
+        self.group_collection_reads = 0
         self.turn_external_at = None
         self.next_link = None
         self.list_total = None
@@ -41,33 +44,37 @@ class FakeApple:
             if self.processing_sequence:
                 self.build["attributes"]["processingState"] = self.processing_sequence.pop(0)
             data = [copy.deepcopy(self.build)] if self.build is not None else []
+            detail = row("buildBetaDetails", "detail-1", internalBuildState=self.internal_state_override or
+                         ("IN_BETA_TESTING" if self.assigned else "READY_FOR_BETA_TESTING"))
+            if data:
+                data[0]["relationships"].update({
+                    "app": {"data": {"type": "apps", "id": self.app_owner["id"]}},
+                    "buildBetaDetail": {"data": {"type": "buildBetaDetails", "id": detail["id"]}},
+                    "betaGroups": {"data": [{"type": "betaGroups", "id": g["id"]} for g in self.groups if g["id"] in self.assigned]},
+                })
             if self.extra_build:
                 data.append(row("builds", "another-build"))
-            return {"data": data, "included": [copy.deepcopy(self.release)], "links": {"next": self.next_link},
+            return {"data": data, "included": [copy.deepcopy(self.release), copy.deepcopy(self.app_owner), detail,
+                                                *[copy.deepcopy(g) for g in self.groups if g["id"] in self.assigned]],
+                    "links": {"next": self.next_link},
                     "meta": {"paging": {"total": self.list_total}}}
-        if path == "/v1/builds/build-150/app":
-            return {"data": copy.deepcopy(self.app_owner)}
         if path == "/v1/apps/app-1/betaGroups":
-            return {"data": copy.deepcopy(self.groups)}
-        if path == "/v1/builds/build-150/betaGroups":
-            return {"data": [copy.deepcopy(g) for g in self.groups if g["id"] in self.assigned]}
-        if path == "/v1/builds/build-150/buildBetaDetail":
-            state = "IN_BETA_TESTING" if self.assigned else "READY_FOR_BETA_TESTING"
-            state = self.internal_state_override or state
-            return {"data": row("buildBetaDetails", "detail-1", internalBuildState=state)}
+            self.group_collection_reads += 1
+            self.group_validation_count = self.group_collection_reads - 1
+            groups = copy.deepcopy(self.groups)
+            if self.group_owner["id"] != "app-1":
+                groups = [group for group in groups if group["id"] != "internal-1"]
+            if self.turn_external_at == self.group_validation_count:
+                for group in groups:
+                    if group["id"] == "internal-1":
+                        group["attributes"]["isInternalGroup"] = False
+            return {"data": groups}
         for group in self.groups:
-            if path == "/v1/betaGroups/" + group["id"]:
-                self.group_validation_count += 1
-                answer = copy.deepcopy(group)
-                if self.turn_external_at == self.group_validation_count:
-                    answer["attributes"]["isInternalGroup"] = False
-                return {"data": answer}
-            if path == "/v1/betaGroups/" + group["id"] + "/app":
-                return {"data": copy.deepcopy(self.group_owner)}
             if path == "/v1/betaGroups/" + group["id"] + "/betaTesters":
                 return {"data": [row("betaTesters", "tester-1", email="private@example.invalid", firstName="Private")],
                         "meta": {"paging": {"total": 2}}}
-        raise AssertionError("Unexpected GET " + path)
+        # Related endpoints may be forbidden to the production Developer key.
+        raise HTTPError(path, 403, "FORBIDDEN", {}, None)
 
     def assign_build(self, group_id, build_id):
         self.writes.append(("POST", "/v1/betaGroups/" + group_id + "/relationships/builds",
@@ -111,7 +118,7 @@ class InternalTestFlightTests(unittest.TestCase):
                            {"data": [{"type": "builds", "id": "build-150"}]})], self.client.writes)
         self.assertTrue(report["available_for_internal_testers"])
         self.assertGreaterEqual(self.client.group_validation_count, 2)
-        self.assertEqual(2, sum(path == "/v1/builds/build-150/betaGroups" for path, _ in self.client.gets))
+        self.assertEqual(3, sum(path == "/v1/builds" for path, _ in self.client.gets))
 
     def test_already_assigned_internal_build_needs_no_write(self):
         self.client.assigned.add("internal-1")
@@ -181,6 +188,39 @@ class InternalTestFlightTests(unittest.TestCase):
     def test_build_app_owner_must_match(self):
         self.client.app_owner = row("apps", "foreign-app", bundleId="com.woona.apps")
         self.assertBlocked(assign_internal=True, group_ids=("internal-1",))
+
+    def test_read_only_succeeds_when_related_app_build_and_group_endpoints_are_forbidden(self):
+        self.client.assigned.add("internal-1")
+        self.assertTrue(self.check()["available_for_internal_testers"])
+        self.assertEqual({"/v1/apps", "/v1/builds", "/v1/apps/app-1/betaGroups",
+                          "/v1/betaGroups/internal-1/betaTesters"}, {path for path, _ in self.client.gets})
+        self.assertEqual([], self.client.writes)
+
+    def test_assignment_uses_scoped_group_collection_and_included_build_ownership(self):
+        self.assertTrue(self.check(assign_internal=True, group_ids=("internal-1",))["available_for_internal_testers"])
+        self.assertFalse(any(path.startswith("/v1/builds/") for path, _ in self.client.gets))
+        self.assertFalse(any(path.endswith("/app") for path, _ in self.client.gets))
+        self.assertEqual(1, len(self.client.writes))
+
+    def test_missing_or_wrong_included_app_cannot_weaken_build_ownership_check(self):
+        original = self.client.get
+        def omit_owner(path, query=None):
+            response = original(path, query)
+            if path == "/v1/builds":
+                response["included"] = [item for item in response["included"] if item["type"] != "apps"]
+            return response
+        self.client.get = omit_owner
+        self.assertBlocked(assign_internal=True, group_ids=("internal-1",))
+
+    def test_http_error_diagnostic_contains_only_method_path_and_status(self):
+        client = AppleClient(None, None, None)
+        error = HTTPError("https://example.invalid/private?token=private-query", 403, "private-error",
+                          {"Authorization": "private-header"}, io.BytesIO(b"private-body"))
+        with patch("testflight_internal.token", return_value="private-jwt"), patch("testflight_internal.urlopen", side_effect=error):
+            with self.assertRaises(AppleRequestError) as caught:
+                client.get("/v1/apps", {"private-query": "private-value"})
+        self.assertEqual("App Store Connect GET /v1/apps HTTP 403", str(caught.exception))
+        self.assertNotIn("private", str(caught.exception))
 
     def test_unknown_expiration_is_blocked(self):
         self.client.build["attributes"].pop("expired")

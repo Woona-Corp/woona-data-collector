@@ -25,6 +25,10 @@ class SafetyError(RuntimeError):
     pass
 
 
+class AppleRequestError(RuntimeError):
+    """Sanitized endpoint diagnostics; never include URL queries, headers or bodies."""
+
+
 def identifier(value):
     if not isinstance(value, str) or not ID_PATTERN.fullmatch(value):
         raise SafetyError("Invalid App Store Connect resource identifier")
@@ -93,9 +97,12 @@ class AppleClient:
             "Authorization": "Bearer " + token(self.key_path, self.key_id, self.issuer),
             "Content-Type": "application/json",
         })
-        with urlopen(request, timeout=30) as response:
-            body = response.read()
-            return json.loads(body) if body else None
+        try:
+            with urlopen(request, timeout=30) as response:
+                body = response.read()
+                return json.loads(body) if body else None
+        except HTTPError as error:
+            raise AppleRequestError("App Store Connect " + method + " " + path + " HTTP " + str(error.code)) from None
 
     def get(self, path, query=None):
         return self._request("GET", path, query)
@@ -128,39 +135,46 @@ def resource(response, kind):
     return row
 
 
+def included_resource(build, relationship, kind):
+    reference = build.get("relationships", {}).get(relationship, {}).get("data", {})
+    matches = [item for item in build.get("_included", [])
+               if item.get("type") == kind and item.get("id") == reference.get("id")]
+    if reference.get("type") != kind or len(matches) != 1:
+        raise SafetyError("Included " + relationship + " cannot be confirmed")
+    identifier(matches[0].get("id"))
+    return matches[0]
+
+
 def exact_build(client, app_id, version, build_number):
     result = client.get("/v1/builds", {
         "filter[app]": app_id, "filter[version]": build_number,
-        "filter[preReleaseVersion.version]": version, "include": "preReleaseVersion", "limit": 200,
+        "filter[preReleaseVersion.version]": version,
+        "include": "app,preReleaseVersion,buildBetaDetail,betaGroups", "limit": 200,
     })
     rows = collection(result, "builds")
     if not rows:
         return None
     if len(rows) != 1:
         raise SafetyError("Exact build query is ambiguous")
-    build = rows[0]
-    release = build.get("relationships", {}).get("preReleaseVersion", {}).get("data", {})
-    matches = [item for item in result.get("included", [])
-               if item.get("type") == "preReleaseVersions" and item.get("id") == release.get("id")]
-    if len(matches) != 1 or release.get("type") != "preReleaseVersions":
-        raise SafetyError("Build marketing version cannot be confirmed")
+    build = {**rows[0], "_included": result.get("included", [])}
+    release = included_resource(build, "preReleaseVersion", "preReleaseVersions")
     if (build.get("attributes", {}).get("version") != build_number
-            or matches[0].get("attributes", {}).get("version") != version
-            or matches[0].get("attributes", {}).get("platform") != "IOS"):
+            or release.get("attributes", {}).get("version") != version
+            or release.get("attributes", {}).get("platform") != "IOS"):
         raise SafetyError("Build does not match the exact requested iOS version and number")
-    owner = resource(client.get("/v1/builds/" + build["id"] + "/app"), "apps")
+    owner = included_resource(build, "app", "apps")
     if owner["id"] != app_id or owner.get("attributes", {}).get("bundleId") != BUNDLE_ID:
         raise SafetyError("Build belongs to another app")
     return build
 
 
 def validate_group(client, app_id, group_id):
-    group = resource(client.get("/v1/betaGroups/" + group_id), "betaGroups")
-    if group["id"] != group_id or group.get("attributes", {}).get("isInternalGroup") is not True:
+    # This app-scoped collection proves ownership without requiring a separate
+    # related-resource endpoint that some Developer keys cannot read.
+    groups = collection(client.get("/v1/apps/" + app_id + "/betaGroups", {"limit": 200}), "betaGroups")
+    matches = [group for group in groups if group["id"] == group_id]
+    if len(matches) != 1 or matches[0].get("attributes", {}).get("isInternalGroup") is not True:
         raise SafetyError("Assignment target is not an existing internal group")
-    owner = resource(client.get("/v1/betaGroups/" + group_id + "/app"), "apps")
-    if owner["id"] != app_id or owner.get("attributes", {}).get("bundleId") != BUNDLE_ID:
-        raise SafetyError("Internal group belongs to another app")
 
 
 def inspect(client, app_id, version, build_number):
@@ -171,9 +185,10 @@ def inspect(client, app_id, version, build_number):
     internal = [group for group in groups if group.get("attributes", {}).get("isInternalGroup") is True]
     if not internal:
         raise SafetyError("Woona has no existing internal tester groups")
-    assigned = collection(client.get("/v1/builds/" + build["id"] + "/betaGroups", {"limit": 200}), "betaGroups")
+    relationship = build.get("relationships", {}).get("betaGroups", {})
+    assigned = collection(relationship, "betaGroups")
     assigned_ids = {group["id"] for group in assigned}
-    details = resource(client.get("/v1/builds/" + build["id"] + "/buildBetaDetail"), "buildBetaDetails")
+    details = included_resource(build, "buildBetaDetail", "buildBetaDetails")
     report_groups = []
     for group in internal:
         testers = client.get("/v1/betaGroups/" + group["id"] + "/betaTesters", {"limit": 1})
@@ -270,5 +285,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except HTTPError as error:
-        raise SystemExit("App Store Connect HTTP " + str(error.code)) from None
+    except AppleRequestError as error:
+        raise SystemExit(str(error)) from None
