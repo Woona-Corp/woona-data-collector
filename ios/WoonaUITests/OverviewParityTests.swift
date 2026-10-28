@@ -34,12 +34,14 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(fullscreen.segmentedControls["chart.sensor"].buttons["GIR"].isSelected)
         XCTAssertTrue(fullscreen.segmentedControls["chart.channel"].buttons["Channel 2"].isSelected)
         XCTAssertTrue(fullscreen.segmentedControls["chart.window"].buttons["60s"].isSelected)
+        attachScreen("V2-Charts-Fullscreen-EnglishLight")
         app.buttons["chart.fullscreen.close"].tap()
         attachScreen("V2-Charts-EnglishLight")
         sensor.buttons["T2"].tap()
         XCTAssertTrue(app.segmentedControls["chart.channel"].buttons["Channel 1"].isSelected)
         XCTAssertFalse(app.segmentedControls["chart.channel"].buttons["Channel 2"].exists)
         XCTAssertFalse(app.navigationBars.buttons["Export"].isEnabled)
+        attachScreen("V2-Charts-T2-EnglishLight")
     }
 
     func testV2PickerIsExplicitAndReturnsToRecordAfterClosingWithoutConnecting() {
