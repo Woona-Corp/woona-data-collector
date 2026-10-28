@@ -1,0 +1,54 @@
+name: Verify internal TestFlight availability
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact uploaded marketing version
+        required: true
+        type: string
+      build:
+        description: Exact uploaded build number
+        required: true
+        type: string
+      assign_internal:
+        description: Assign only to explicitly listed existing internal groups
+        type: boolean
+        default: false
+      internal_group_ids:
+        description: Comma-separated IDs from a previous read-only status report; required to assign
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight-internal-status
+  cancel-in-progress: false
+
+jobs:
+  internal-status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify internal-only helper safety tests
+        run: python3 -m unittest discover -s ios/tools -p 'test_testflight_internal.py' -v
+      - name: Inspect exact build and optionally assign existing internal groups
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          CHECK_VERSION: ${{ inputs.version }}
+          CHECK_BUILD: ${{ inputs.build }}
+          ASSIGN_INTERNAL: ${{ inputs.assign_internal }}
+          INTERNAL_GROUP_IDS: ${{ inputs.internal_group_ids }}
+        run: python3 ios/tools/testflight_internal.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: testflight-internal-status
+          path: testflight-internal-status.json
+          if-no-files-found: warn
+          retention-days: 7

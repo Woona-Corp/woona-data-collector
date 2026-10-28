@@ -63,8 +63,21 @@ git push origin ios-v1.3.8
 разверните и проверьте совместимый сервер.
 
 После загрузки проверьте обработку Apple и доступность сборки тестировщикам.
-Внешняя группа TestFlight получает новую сборку после отдельного добавления
-сборки в группу и, если требуется, проверки Apple.
+Текущие сборки предназначены только для внутреннего тестирования.
+Отдельный workflow `Verify internal TestFlight availability` проверяет точные
+marketing version и номер загруженной сборки. По умолчанию он ничего не меняет:
+в отчёте есть Apple processing state, expiration, internal beta state,
+ID внутренних групп, число тестировщиков и подтверждённое членство сборки.
+`available_for_internal_testers=true` требует VALID, non-expired,
+IN_BETA_TESTING и назначенную внутреннюю группу с тестировщиками; установку
+на физический iPhone этот статус не доказывает.
+
+Если автоматического назначения нет, повторите этот workflow с
+`assign_internal=true` и явными `internal_group_ids` из предыдущего отчёта.
+Перед записью helper повторно проверяет принадлежность каждой группы и сборки
+к `com.woona.apps` и `isInternalGroup=true`, затем проверяет результат через API.
+Внешние группы, beta review, приглашения, localizations и список людей он не
+меняет и не выводит. Signing/upload workflow `testflight.yml` остаётся отдельным.
 
 Секреты GitHub Actions: `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY`
 (ключ App Store Connect с ролью Developer), `BUILD_CERTIFICATE_BASE64`,
