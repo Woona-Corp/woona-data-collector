@@ -38,6 +38,12 @@ class RecordingHistoryUiTest {
         compose.onNodeWithText("Show 30 more").performClick()
         compose.runOnIdle { assertEquals(1,requested) }
     }
+    @Test fun deletedRemainingRowsOfferExplicitRefreshWithoutANonfunctionalMoreAction() {
+        compose.setContent { MaterialTheme { ProfilesOverview(emptyList(),null,(0 until 100).map(::recording),AppLanguage.ENGLISH,{},{},{},{},videoState=VideoCaptureState.IDLE,videoOffsetMillis=null,onVideoAction={},section=ProfileScreenSection.RECORDINGS,showingAllRecordings=true,recordingsTotal=105,historyHasMoreRecordings=false) } }
+        compose.onNodeWithTag("recordings.history").performScrollToIndex(101)
+        compose.onNodeWithText("History changed while you were viewing it. Refresh to recount recordings.").assertExists()
+        compose.onNodeWithText("Show 5 more").assertDoesNotExist()
+    }
     @Test fun quotaExplanationKeepsSelectableOriginalRequestDetails() {
         val row=recording(0).copy(serverSyncState="permanent_error",serverSyncError="HTTP 413 storage_quota_exceeded requestId=fixture-id")
         compose.setContent { MaterialTheme { ProfilesOverview(emptyList(),null,listOf(row),AppLanguage.ENGLISH,{},{},{},{},videoState=VideoCaptureState.IDLE,videoOffsetMillis=null,onVideoAction={},section=ProfileScreenSection.RECORDINGS) } }

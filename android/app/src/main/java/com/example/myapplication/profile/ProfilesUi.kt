@@ -132,6 +132,7 @@ fun ProfilesOverview(
     showingAllRecordings: Boolean = false,
     onShowAllRecordings: () -> Unit = {},
     recordingsTotal: Int = recordings.size,
+    historyHasMoreRecordings: Boolean = recordings.size < recordingsTotal,
     recordingsLoading: Boolean = false,
     recordingsError: String? = null,
     onShowMoreRecordings: () -> Unit = {},
@@ -246,7 +247,7 @@ fun ProfilesOverview(
                 }
                 if (showingAllRecordings) {
                     OutlinedButton(onClick = onRefreshRecordings, enabled = !recordingsLoading) { Text(tr(language, "Refresh history", "Обновить историю")) }
-                    Text(tr(language, "Refresh to include newly added recordings. The first 100 will be loaded again.", "Обновите историю, чтобы увидеть новые записи. Снова загрузятся первые 100."), style = MaterialTheme.typography.bodySmall)
+                    Text(tr(language, "The count reflects when history was opened. Refresh history to include added and removed recordings.", "Счётчик относится к моменту открытия. Обновите историю, чтобы учесть добавленные и удалённые записи."), style = MaterialTheme.typography.bodySmall)
                 }
                 if (recordingsLoading) {
                     androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -348,7 +349,8 @@ fun ProfilesOverview(
         }
         val more: @Composable () -> Unit = {
             val remaining = (recordingsTotal - recordings.size).coerceAtLeast(0)
-            if (showingAllRecordings && remaining > 0) OutlinedButton(onClick = onShowMoreRecordings, enabled = !recordingsLoading,
+            if (showingAllRecordings && remaining > 0 && !historyHasMoreRecordings) Text(tr(language, "History changed while you were viewing it. Refresh to recount recordings.", "История изменилась во время просмотра. Обновите её, чтобы пересчитать записи."))
+            if (showingAllRecordings && remaining > 0 && historyHasMoreRecordings) OutlinedButton(onClick = onShowMoreRecordings, enabled = !recordingsLoading,
                 modifier = Modifier.fillMaxWidth().testTag("history.more")) {
                 val amount = minOf(100, remaining)
                 Text(tr(language, "Show $amount more", "Показать ещё $amount"))

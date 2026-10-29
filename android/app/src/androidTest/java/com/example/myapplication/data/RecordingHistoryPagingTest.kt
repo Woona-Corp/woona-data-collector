@@ -67,6 +67,21 @@ class RecordingHistoryPagingTest {
         assertFalse(second.recordings.any {it.id==newest.id})
     }
 
+    @Test fun backdatedLateInsertsAreExcludedAndDeletedRemainingRowsDoNotInventHistory() = withDatabase { database ->
+        val dog=seed(database,205);val first=database.recordingHistoryPage(dog.id)
+        val late=database.beginRecording(dog.id,RecordingSource.LIVE,SessionQuestionnaire(schemaVersion=2,sessionLabel="Late old import",plannedActivities=listOf("Покой"),videoRequested=false))
+        database.writableDatabase.execSQL("UPDATE recordings SET started_at_utc='2020-01-01T00:00:00Z' WHERE id=?",arrayOf(late.id))
+        val removed=UUID(0,1).toString()
+        database.writableDatabase.delete("recordings","id=?",arrayOf(removed))
+        val shown=first.recordings.toMutableList();var cursor=first.nextCursor
+        do {val page=database.recordingHistoryPage(dog.id,after=cursor,knownTotalCount=first.totalCount);shown+=page.recordings;cursor=page.nextCursor} while(cursor!=null)
+        assertEquals(204,shown.size);assertEquals(204,shown.map {it.id}.distinct().size)
+        assertFalse(shown.any {it.id==late.id || it.id==removed})
+        val refresh=database.recordingHistoryPage(dog.id)
+        assertEquals(205,refresh.totalCount)
+        assertTrue(requireNotNull(first.nextCursor).snapshotRowId!=null)
+    }
+
     private fun seed(database:WoonaDatabase,count:Int):DogProfile {
         val dog=database.saveProfile(DogQuestionnaire(schemaVersion=2,animalId="history-fixture",numberOrName="Synthetic history",species="собака"))
         val template=database.beginRecording(dog.id,RecordingSource.LIVE,SessionQuestionnaire(schemaVersion=2,sessionLabel="Template",plannedActivities=listOf("Покой"),videoRequested=false))

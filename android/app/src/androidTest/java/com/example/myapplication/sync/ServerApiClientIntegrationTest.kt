@@ -6,10 +6,12 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import com.example.myapplication.BuildConfig
 import com.example.myapplication.data.ArtifactSyncRecord
@@ -68,6 +70,13 @@ class ServerApiClientIntegrationTest {
         val first = ServerApiClient(settings.copy(accountId = account))
         val other = ServerApiClient(settings.copy(accountId = "$account-other"))
         first.applyAccount(account); other.applyAccount("$account-other")
+        val scopedStorage = first.storageStatus()
+        assertEquals(account, scopedStorage.accountId)
+        assertEquals("$account-other", other.storageStatus().accountId)
+        org.junit.Assert.assertNull(ServerApiClient(settings).storageStatus().accountId)
+        assertTrue(scopedStorage.accountLimitBytes >= 0 && scopedStorage.declaredReservedBytes >= 0)
+        assertTrue(scopedStorage.serverFreeBytes >= scopedStorage.newReservationAvailableBytes)
+        assertTrue(scopedStorage.existingUploadsMayResume)
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val root = File(context.cacheDir, "account-api-${System.nanoTime()}")
         val database = WoonaDatabase(context, root)
@@ -152,8 +161,9 @@ class ServerApiClientIntegrationTest {
                 }
                 fun visible(label: String) = find(automation.rootInActiveWindow, label)
                 fun screenshot(name: String) = File(context.cacheDir, name).outputStream().use { output -> automation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output) }
-                val startDeadline = System.nanoTime() + 10_000_000_000L
-                while (visible("Settings") == null && visible("Настройки") == null && System.nanoTime() < startDeadline) Thread.sleep(100)
+                // Drive Compose's test clock while asynchronous recovery changes the gate.
+                // UiAutomation polling alone can leave its first recovery frame frozen.
+                composeRule.waitUntil(10_000) { visible("Settings") != null || visible("Настройки") != null }
                 screenshot("actual-worker-before-settings.png")
                 var settingsNode = requireNotNull(visible("Settings") ?: visible("Настройки"))
                 while (!settingsNode.isClickable && settingsNode.parent != null) settingsNode = settingsNode.parent
@@ -162,8 +172,8 @@ class ServerApiClientIntegrationTest {
                     composeRule.onAllNodes(hasText("BLE transport profile") or hasText("Профиль BLE-транспорта"))
                         .fetchSemanticsNodes().isNotEmpty()
                 }
-                composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
-                val errorNode = composeRule.onNode(hasText("invalid_bearer_token", substring = true))
+                composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("server.sync.settings"))
+                val errorNode = composeRule.onNode(hasText("invalid_bearer_token", substring = true) and hasAnyAncestor(hasTestTag("server.sync.settings")))
                     .performScrollTo().assertIsDisplayed().fetchSemanticsNode()
                 composeRule.onNode(hasText("Retry uploads") or hasText("Повторить выгрузку"))
                     .performScrollTo().assertIsDisplayed().assertIsEnabled()

@@ -48,6 +48,13 @@ class ServerStorageStatusDeviceTest {
             assertEquals("storage_scope_mismatch",assertThrows(ServerTransferException::class.java) { parseServerStorageStatus(wrong,"account-a") }.code)
         }
         assertThrows(IllegalArgumentException::class.java) { parseServerStorageStatus(fixture().apply {getJSONObject("account").put("declaredReservedBytes",-1)},"account-a") }
+        for (malformed in listOf(-0.5, 1.5, "0", "NaN", "9223372036854775808")) {
+            val value=fixture().apply {getJSONObject("limits").put("accountBytes",malformed)}
+            assertThrows(IllegalArgumentException::class.java) {parseServerStorageStatus(value,"account-a")}
+        }
+        val overflow=JSONObject(fixture().toString().replace("9007199254740993","9223372036854775808"))
+        assertThrows(IllegalArgumentException::class.java) {parseServerStorageStatus(overflow,"account-a")}
+        assertEquals(Long.MAX_VALUE,parseServerStorageStatus(fixture().apply {getJSONObject("limits").put("accountBytes",Long.MAX_VALUE)},"account-a").accountLimitBytes)
         val unassigned=fixture().apply {getJSONObject("checkedScope").put("accountId",JSONObject.NULL).put("unassignedOnly",true)}
         assertNull(parseServerStorageStatus(unassigned,null).accountId)
     }
@@ -90,6 +97,30 @@ class ServerStorageStatusDeviceTest {
         }})
         val error=assertThrows(ServerHttpException::class.java) {client.storageStatus()}
         assertEquals(404,error.status);assertTrue(error.responseBody.contains("old-backend-fixture"))
+    }
+    @Test fun sharedCapturedWireContractMatchesNativeDtoAndFlatQuotaErrors() {
+        val context=androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().context
+        val contract=context.assets.open("storage-api-contract.json").bufferedReader().use {JSONObject(it.readText())}
+        assertEquals(1,contract.getInt("contractVersion"))
+        val status=contract.getJSONObject("storageStatus")
+        assertEquals(200,status.getInt("httpStatus"))
+        val parsed=parseServerStorageStatus(status.getJSONObject("body"),"qa-storage-wire-contract")
+        assertEquals("qa-storage-wire-contract",parsed.accountId);assertTrue(parsed.existingUploadsMayResume)
+        for ((key,code,http,action,retryable) in listOf(
+            listOf("quotaExceeded","storage_quota_exceeded",413,"review_server_storage_limits",false),
+            listOf("reservationUnavailable","storage_reservation_unavailable",507,"retry_after_storage_available",true))) {
+            val response=contract.getJSONObject(key as String);val body=response.getJSONObject("body")
+            assertEquals(http,response.getInt("httpStatus"));assertEquals(code,body.getString("code"))
+            assertEquals(action,body.getString("nextAction"));assertEquals(retryable,body.getBoolean("retryable"))
+            assertFalse("Actual API errors are flat",body.has("detail"))
+            val requestId=body.getString("requestId")
+            assertEquals(requestId,response.getJSONObject("headers").getString("x-request-id"))
+            val failure=ServerHttpException(http as Int,body.toString(),mapOf("X-Request-ID" to listOf(requestId)))
+            assertTrue(failure.responseBody.contains(requestId))
+            val explanation=com.example.myapplication.localization.recordingUploadErrorText(failure.message,AppLanguage.ENGLISH)
+            assertFalse(explanation.contains(code as String));assertTrue(explanation.contains("Local files are preserved."))
+            assertFalse(nextTransferActionText(action as String,false)==action)
+        }
     }
     private val settings get()=ServerSettings("https://invalid.example","synthetic-token","device",false,"account-a")
     private fun fixture()=JSONObject("""{

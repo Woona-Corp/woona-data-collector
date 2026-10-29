@@ -880,7 +880,7 @@ private fun ServerSyncSettingsCard(
     onStorageCheck: () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().testTag("server.sync.settings"),
         colors = appCardColors(),
     ) {
         Column(

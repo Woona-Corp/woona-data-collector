@@ -30,8 +30,12 @@ release schemas or a test of a real historical installation.
 History opens with 10 rows, then loads 100 at a time with a keyset cursor. The
 history screen is a native LazyColumn with each recording as a separate keyed
 item. Explicit refresh loads the first 100 again, including newer records.
-The total is counted once per refresh and reused while paging; new top inserts
-need explicit refresh. Metadata and sync fields are selected in bulk. Artifact requests are chunked
+The total is counted once per refresh and reused while paging. Cursors retain a
+first-page rowid watermark, excluding later imports beyond that boundary. Paging
+is also capped at the opening count, because SQLite can reuse a deleted highest
+rowid. The header explains that the count describes the opening snapshot. If
+rows disappear before the cursor ends, the screen offers explicit refresh and a
+membership-change explanation instead of a nonfunctional More action. Metadata and sync fields are selected in bulk. Artifact requests are chunked
 below SQLite's variable limit. History queries run on a background executor.
 
 The additive expression index sorts mixed historical ISO date formats by SQLite
@@ -58,6 +62,13 @@ it does not advance the global transfer epoch or cancel unrelated uploads.
 Deletion markers are fetched last. HTTP 410 by itself is no longer described as a
 confirmed retirement: a fresh exact marker (or its parent dog marker) is required.
 Unknown 404/410 remains an explicit partial-restore warning.
+
+Byte/count fields require nonnegative signed-64 JSON integers. Fractional values,
+numeric strings, NaN strings, and overflow numeric representations are rejected;
+valid integers above 2^53 retain their exact value. A native test consumes the
+actual captured 200/flat 413/flat 507 response fixture in shared test data
+(server commit `1f97ba7`) and checks scope, request IDs, error explanations,
+retryability, and next actions.
 
 Settings has a manual authenticated server-storage check with separate unchecked,
 loading, checked, unsupported-old-backend (404), and failure/retry states. It
@@ -87,8 +98,21 @@ and the already-running server integrity check. Presentation wording matches iOS
   cancellation checks. Existing app recreation/navigation and file-safety tests
   passed as part of the full runner. This does not prove physical BLE or camera
   hardware behavior; emulator camera/video tests use synthetic inputs.
-- After final wording, error language switching, and count-snapshot refinements,
-  all 13 affected native cases passed again.
+- After final refinements, all 14 affected local native cases passed (4 history
+  database, 4 history UI, 6 storage/parser/shared-wire fixture). They also cover
+  late backdated inserts, deletions, and strict integer parsing.
+- On an exclusively owned disposable API/PostgreSQL fixture, all 4 integration
+  class cases passed: 3 real API/WorkManager cases plus embedded-default settings.
+  They include account/other/unassigned storage scope, invalid/revoked/secondary
+  auth, real worker 401 UI and Retry, persisted injected 503 and automatic retry,
+  timeout recovery, upload/restore, range/ETag resumption and downloaded bytes.
+  Production credential diagnostics remain unexecuted.
+- The existing WorkManager UI case initially produced a harness false positive:
+  Thread.sleep/UiAutomation polling did not advance the Compose test clock;
+  an old hardcoded lazy-list index and global error matcher then targeted the
+  wrong card or two independent 401 messages. Clock-driven waiting uses the
+  original 10-second deadline; semantic card scrolling/scoping proves the actual
+  queue error and Retry action. Product startup locking was not changed.
 - `docker compose config -q` passed.
 - Required `android/tools/check.sh fast` and `full` were attempted. Local lint
   cannot resolve existing Compose 1.7.0 desktop POM metadata from the offline

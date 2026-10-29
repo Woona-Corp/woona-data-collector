@@ -452,6 +452,7 @@ class MainActivity : ComponentActivity() {
                                 onShowAllRecordings = { showingAllRecordings = true; historyRequestedCount = 100; loadRecordingHistory() },
                                 historyListState = historyListState,
                                 recordingsTotal = recordingsTotal,
+                                historyHasMoreRecordings = historyCursor != null,
                                 recordingsLoading = recordingsLoading,
                                 recordingsError = recordingsError,
                                 onShowMoreRecordings = { loadRecordingHistory(append = true) },
@@ -932,7 +933,7 @@ class MainActivity : ComponentActivity() {
             historyCursor = null; historyProfileId = null; recordingsLoading = false
             return
         }
-        if (append && (recordingsLoading || historyCursor == null)) return
+        if (append && (recordingsLoading || historyCursor == null || recentRecordings.size >= recordingsTotal)) return
         val sameProfile = historyProfileId == profileId
         if (!sameProfile) {
             recentRecordings = emptyList(); historyCursor = null; recordingsTotal = 0
@@ -943,7 +944,7 @@ class MainActivity : ComponentActivity() {
         val previous = if (append) recentRecordings else emptyList()
         val after = if (append) historyCursor else null
         val knownTotal = if (append) recordingsTotal else null
-        val wanted = if (append || resetHistory) 100 else if (showingAllRecordings) maxOf(100, historyRequestedCount, recentRecordings.size) else 10
+        val wanted = if (append) minOf(100, recordingsTotal - recentRecordings.size) else if (resetHistory) 100 else if (showingAllRecordings) maxOf(100, historyRequestedCount, recentRecordings.size) else 10
         recordingsLoading = true; recordingsError = null
         backgroundExecutor.execute {
             val result = runCatching {

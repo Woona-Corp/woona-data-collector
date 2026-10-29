@@ -405,7 +405,7 @@ data class Recording(
         get() = remoteOrigin || serverReceiptSha256 != null || serverSyncState in setOf("synced", "remote")
 }
 
-data class RecordingHistoryCursor(val sortTimeMillis: Long, val id: String)
+data class RecordingHistoryCursor(val sortTimeMillis: Long, val id: String, val snapshotRowId: Long? = null)
 
 data class RecordingHistoryPage(
     val recordings: List<Recording>,
@@ -1466,30 +1466,38 @@ class WoonaDatabase(
     fun recordingHistoryPage(profileId: String, limit: Int = 100, after: RecordingHistoryCursor? = null, knownTotalCount: Int? = null): RecordingHistoryPage {
         require(limit in 1..100) { "History page size must be 1–100" }
         require(knownTotalCount == null || knownTotalCount >= 0)
-        val total = knownTotalCount ?: readableDatabase.rawQuery("SELECT COUNT(*) FROM recordings WHERE dog_id=?", arrayOf(profileId)).use {
-            it.moveToFirst(); it.getInt(0)
-        }
-        val rows = recordingRows(profileId, limit + 1, after)
+        // New records (including backdated imports) belong to the next refresh.
+        val firstSnapshot = if (after?.snapshotRowId == null) readableDatabase.rawQuery(
+            "SELECT COUNT(*),COALESCE(MAX(rowid),0) FROM recordings WHERE dog_id=?", arrayOf(profileId),
+        ).use { it.moveToFirst(); it.getInt(0) to it.getLong(1) } else null
+        val watermark = after?.snapshotRowId ?: requireNotNull(firstSnapshot).second
+        val total = knownTotalCount ?: firstSnapshot?.first ?: readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM recordings WHERE dog_id=? AND rowid<=?", arrayOf(profileId,watermark.toString()),
+        ).use { it.moveToFirst(); it.getInt(0) }
+        val rows = recordingRows(profileId, limit + 1, after, watermark)
         val visible = rows.take(limit)
         return RecordingHistoryPage(visible.map { it.recording }, maxOf(total, visible.size), if (rows.size > limit) {
-            visible.last().let { RecordingHistoryCursor(it.sortTimeMillis, it.recording.id) }
+            visible.last().let { RecordingHistoryCursor(it.sortTimeMillis, it.recording.id, watermark) }
         } else null)
     }
 
     private data class HistoryRow(val recording: Recording, val sortTimeMillis: Long)
 
-    private fun recordingRows(profileId: String, limit: Int, after: RecordingHistoryCursor?): List<HistoryRow> {
+    private fun recordingRows(profileId: String, limit: Int, after: RecordingHistoryCursor?, snapshotRowId: Long? = null): List<HistoryRow> {
         if (limit == 0) return emptyList()
         val timeKey = HISTORY_TIME_KEY.replace("started_at_utc", "r.started_at_utc")
         val projection = RECORDING_COLUMNS.dropLast(1).joinToString(",") { if (it == "started_at_utc") "COALESCE(r.started_at_utc,'')" else "r.$it" } +
             ",s.server_receipt_sha256,COALESCE(s.state,'pending')," +
             "CASE WHEN s.state IN ('retryable_error','permanent_error') THEN COALESCE(NULLIF(s.last_error_message,''),s.last_error_code) END,$timeKey"
         val cursorClause = if (after == null) "" else " AND ($timeKey,r.id)<(CAST(? AS INTEGER),?)"
-        val args = if (after == null) arrayOf(profileId, limit.toString()) else
-            arrayOf(profileId, after.sortTimeMillis.toString(), after.id, limit.toString())
+        val watermarkClause = if (snapshotRowId == null) "" else " AND r.rowid<=?"
+        val args = buildList {
+            add(profileId); snapshotRowId?.let { add(it.toString()) }
+            after?.let { add(it.sortTimeMillis.toString()); add(it.id) }; add(limit.toString())
+        }.toTypedArray()
         val rows = readableDatabase.rawQuery(
             "SELECT $projection FROM recordings r LEFT JOIN server_sync_state s ON s.recording_id=r.id " +
-                "WHERE r.dog_id=?$cursorClause ORDER BY $timeKey DESC,r.id DESC LIMIT ?", args,
+                "WHERE r.dog_id=?$watermarkClause$cursorClause ORDER BY $timeKey DESC,r.id DESC LIMIT ?", args,
         ).use { cursor -> buildList {
             while (cursor.moveToNext()) add(HistoryRow(cursor.toRecording().copy(
                 serverSyncState = cursor.getString(17),

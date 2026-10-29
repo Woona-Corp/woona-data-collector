@@ -57,12 +57,22 @@ internal fun parseServerStorageStatus(value: JSONObject, requestedAccountId: Str
     val account = value.getJSONObject("account")
     val server = value.getJSONObject("serverStorage")
     require(server.getString("scope") == "server") { "Storage response is missing the server-wide scope" }
-    fun bytes(obj: JSONObject, key: String): Long = obj.getLong(key).also { require(it >= 0) { "Invalid storage metric: $key" } }
+    fun bytes(obj: JSONObject, key: String): Long {
+        val raw=obj.get(key)
+        val integer=when(raw) {
+            is Byte -> raw.toLong()
+            is Short -> raw.toLong()
+            is Int -> raw.toLong()
+            is Long -> raw
+            else -> throw IllegalArgumentException("Invalid storage metric: $key; expected a signed 64-bit JSON integer")
+        }
+        return integer.also { require(it >= 0) { "Invalid storage metric: $key; expected nonnegative bytes" } }
+    }
     val reasons = value.getJSONObject("admission").getJSONArray("blockingReasons")
     return ServerStorageStatus(accountId,
         bytes(limits,"recordingBytes"), bytes(limits,"accountBytes"),
         bytes(account,"declaredReservedBytes"), bytes(account,"acknowledgedBytes"),
-        if (account.isNull("remainingQuotaBytes")) null else bytes(account,"remainingQuotaBytes"),
+        if (account.get("remainingQuotaBytes") == JSONObject.NULL) null else bytes(account,"remainingQuotaBytes"),
         bytes(account,"recordings"), bytes(account,"artifacts"),
         bytes(server,"totalBytes"), bytes(server,"freeBytes"), bytes(server,"freeSpaceReserveBytes"),
         bytes(server,"pendingReservedBytes"), bytes(server,"pendingArtifacts"), bytes(server,"newReservationAvailableBytes"),
