@@ -1934,7 +1934,15 @@ final class WoonaStore {
     }
 
     private func sqliteError() -> WoonaStoreError {
-        WoonaStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+#if DEBUG
+        // Distinguish filesystem/locking failures during native QA without
+        // logging SQL, paths, account identifiers or credentials.
+        let extended = sqlite3_extended_errcode(database)
+        let system = sqlite3_system_errno(database)
+        return WoonaStoreError.sqlite("\(String(cString: sqlite3_errmsg(database))) [sqliteExtended=\(extended), systemErrno=\(system)]")
+#else
+        return WoonaStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+#endif
     }
 
     private func columnText(_ statement: OpaquePointer?, _ index: Int32) -> String {
