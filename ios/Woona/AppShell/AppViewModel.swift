@@ -549,7 +549,13 @@ final class AppViewModel: ObservableObject {
                     _ = try await client.restoreRecordings(dogIDs: restored.map(\.id), into: store)
                     reloadProfiles()
                     await reloadServerRecordings()
-                } catch { showError("Account restore failed; retry Apply", error: error) }
+                } catch {
+                    // A later detail can fail after earlier profiles were saved.
+                    // Show those durable results even when background reconciliation
+                    // is also offline or unauthorized and cannot refresh the UI.
+                    reloadProfiles(selecting: selectedDogProfile?.id)
+                    showError("Account restore failed; retry Apply", error: error)
+                }
             }
         } catch { showError("Invalid account", error: error) }
     }

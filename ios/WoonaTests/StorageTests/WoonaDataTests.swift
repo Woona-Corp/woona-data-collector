@@ -741,6 +741,80 @@ final class WoonaDataTests: XCTestCase {
     }
 
     @MainActor
+    func testApplyAccountShowsProfilesSavedBeforeLaterRestoreFailureEvenWhenBackgroundCheckAlsoFails() async throws {
+        let oldAccount = UserDefaults.standard.string(forKey: "selectedAccountID")
+        defer {
+            if let oldAccount { UserDefaults.standard.set(oldAccount, forKey: "selectedAccountID") }
+            else { UserDefaults.standard.removeObject(forKey: "selectedAccountID") }
+        }
+        for unauthorized in [true, false] {
+            try await networkSource { root, _ in
+                let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+                let original = try store.saveProfile(self.completeDog())
+                let dogA = UUID(), dogB = UUID(), versionA = UUID()
+                var answers = self.completeDog(); answers.numberOrName = "Partially restored A"
+                let json = try WoonaStore.dogQuestionnaireData(answers)
+                let time = "2026-10-29T10:00:00.123456Z"
+                let version: [String: Any] = ["id": versionA.uuidString, "schemaVersion": answers.schemaVersion,
+                    "validationState": "complete", "questionnaire": try JSONSerialization.jsonObject(with: json),
+                    "contentSha256": WoonaStore.sha256(json), "clientCreatedAtUtc": time]
+                let detail: [String: Any] = ["id": dogA.uuidString, "numberOrName": answers.numberOrName, "revision": 1,
+                    "accountId": "scope-partial", "updatedAtUtc": time, "profileVersion": version, "profileVersions": [version]]
+                let detailData = try JSONSerialization.data(withJSONObject: detail)
+                let page = try JSONSerialization.data(withJSONObject: ["items": [["id": dogA.uuidString], ["id": dogB.uuidString]]])
+                let backgroundFailed = self.expectation(description: "The later background reconciliation also fails")
+                NetworkFaultProtocol.handler = { request in
+                    let path = request.url!.path
+                    if path == "/v1/accounts/scope-partial", request.httpMethod == "PUT" {
+                        return .init(body: Data(#"{"identifier":"scope-partial"}"#.utf8))
+                    }
+                    if path == "/v1/dogs" { return .init(body: page) }
+                    if path == "/v1/dogs/" + dogA.uuidString { return .init(body: detailData) }
+                    if path == "/v1/dogs/" + dogB.uuidString {
+                        if unauthorized { return .init(status: 401, body: Data(#"{"code":"invalid_bearer_token"}"#.utf8)) }
+                        throw URLError(.timedOut)
+                    }
+                    if path == "/v1/deletions" {
+                        backgroundFailed.fulfill()
+                        if unauthorized { return .init(status: 401, body: Data(#"{"code":"invalid_bearer_token"}"#.utf8)) }
+                        throw URLError(.notConnectedToInternet)
+                    }
+                    throw ServerSyncError.responseInvalid
+                }
+                let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { account in
+                    let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [NetworkFaultProtocol.self]
+                    return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
+                })
+                try await awaitHistoryForTesting(model)
+                model.serverBaseURL = "https://network.test"
+                model.updateTransferNetworkPath(available: true, unmetered: true)
+                let initialReadyDeadline = Date().addingTimeInterval(10)
+                while !model.canChangeAccount, Date() < initialReadyDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
+                XCTAssertTrue(model.canChangeAccount)
+                model.serverToken = "fixture"; model.accountInput = " SCOPE-PARTIAL "
+                model.applyAccount()
+                await self.fulfillment(of: [backgroundFailed], timeout: 20)
+                let deadline = Date().addingTimeInterval(20)
+                while (!model.canChangeAccount || model.isHistoryLoading), Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+                XCTAssertTrue(model.canChangeAccount)
+                XCTAssertEqual(model.retirementCheckState, "failed")
+                XCTAssertNotNil(model.retirementCheckError)
+                XCTAssertEqual(model.selectedAccountID, "scope-partial")
+                XCTAssertEqual(model.accountInput, "scope-partial")
+                XCTAssertEqual(UserDefaults.standard.string(forKey: "selectedAccountID"), "scope-partial")
+                XCTAssertEqual(model.dogProfiles.map(\.id), [dogA], "Durably restored A must be visible without another Apply or restart")
+                XCTAssertEqual(model.selectedDogProfile?.id, dogA)
+                XCTAssertEqual(model.hiddenProfileCount, 1)
+                XCTAssertTrue(model.errorMessage?.contains("Account restore failed") == true)
+                XCTAssertEqual(try store.profile(dogID: dogA, versionID: versionA)?.accountID, "scope-partial")
+                XCTAssertEqual(try store.profile(dogID: dogA, versionID: versionA)?.questionnaire.numberOrName, "Partially restored A")
+                XCTAssertEqual(Set(try store.profiles().map(\.id)), [original.id, dogA])
+                XCTAssertEqual(try store.profile(dogID: original.id, versionID: original.profileVersionID)?.contentSha256, original.contentSha256)
+            }
+        }
+    }
+
+    @MainActor
     func testProfileOnlyQueueIsAwaitedScopedAndStopsAutomaticIdentityConflictRetry() async throws {
         try await networkSource { root, _ in
             let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
