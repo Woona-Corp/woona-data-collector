@@ -85,6 +85,7 @@ private func errorText(_ language: AppLanguage, _ ru: String, _ en: String) -> S
 }
 
 private let serverReasons: [String: (String, String)] = [
+    "server_capacity_reserved": ("Место зарезервировано другими загрузками", "Capacity is reserved by other uploads"),
     "storage_quota_exceeded": ("Превышен лимит хранения аккаунта или записи. Локальные файлы сохранены. Проверьте лимиты сервера; автоматический повтор не устранит ограничение.", "The account or recording storage limit was exceeded. Local files are preserved. Review the server storage limits; automatic retries cannot resolve this limit."),
     "storage_reservation_unavailable": ("На сервере недостаточно незарезервированного места для этой загрузки. Локальные файлы сохранены. Повторите отправку после освобождения места или завершения других загрузок.", "The server has insufficient unreserved storage for this upload. Local files are preserved. Retry after space is freed or other uploads finish."),
     "integrity_check_busy": ("Проверка целостности уже выполняется. Локальные файлы сохранены; повторите позже.", "An integrity check is already running. Local files are preserved; retry later."),
@@ -374,6 +375,7 @@ func transferStateText(_ value: String, ru: Bool) -> String {
 func transferNextAction(_ value: String, ru: Bool) -> String {
     switch value {
     case "none": return ru ? "не требуется" : "none required"
+    case "continue_upload": return ru ? "продолжите отправку с устройства-источника" : "continue uploads on the source device"
     case "resume_upload": return ru ? "возобновите выгрузку с устройства-источника" : "resume uploads on the source device"
     case "upload_manifest": return ru ? "отправьте метаданные и список файлов с устройства-источника" : "upload metadata and the file manifest from the source device"
     case "verify_file", "verify_files", "finalize_recording": return ru ? "повторите выгрузку для проверки файлов и завершения сессии" : "retry upload to verify files and finalize the session"

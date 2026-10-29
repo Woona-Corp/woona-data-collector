@@ -549,6 +549,26 @@ final class WoonaServerClient {
         return true
     }
 
+    // Only the current four-item batch is in flight. Fetches overlap while
+    // decoding, retirement checks and SQLite effects retain server list order.
+    private func restoreDetails(paths: [String]) async throws -> [Result<Data, Error>] {
+        precondition(paths.count <= 4)
+        try ensureActive()
+        let results = await withTaskGroup(of: (Int, Result<Data, Error>).self) { group in
+            for (index, path) in paths.enumerated() {
+                group.addTask { @MainActor [self] in
+                    do { return (index, .success(try await self.boundedMetadata(path: path, timeout: 20))) }
+                    catch { return (index, .failure(error)) }
+                }
+            }
+            var ordered: [Int: Result<Data, Error>] = [:]
+            for await (index, result) in group { ordered[index] = result }
+            return paths.indices.map { ordered[$0] ?? .failure(ServerSyncError.responseInvalid) }
+        }
+        try ensureActive()
+        return results
+    }
+
     func restoreProfiles(into store: WoonaStore) async throws -> [DogProfile] {
         struct Dog: Decodable {
             let id: UUID
@@ -566,28 +586,26 @@ final class WoonaServerClient {
         repeat {
             let suffix = cursor.map { "?limit=200&cursor=\($0.uuidString)" } ?? "?limit=200"
             let page: Page = try await json(method: "GET", path: "/v1/dogs\(suffix)", body: Optional<Data>.none, as: Page.self)
-            for summary in page.items {
-                let dog: Dog
-                do { dog = try await json(
-                    method: "GET",
-                    path: "/v1/dogs/\(summary.id.uuidString)",
-                    body: Optional<Data>.none,
-                    as: Dog.self
-                ) } catch {
-                    if try await skipMissingRestoreEntity(after: error, kind: "dog", id: summary.id) { continue }
-                    throw error
-                }
-                _ = try store.upsertRemoteProfile(
-                    dogID: dog.id,
-                    profileVersionID: dog.profileVersion.id,
-                    revision: dog.revision,
-                    questionnaire: dog.profileVersion.questionnaire,
-                    contentSha256: dog.profileVersion.contentSha256,
-                    updatedAtUTC: dog.updatedAtUtc ?? dog.profileVersion.clientCreatedAtUtc,
-                    accountID: dog.accountId
-                )
-                for version in dog.profileVersions where version.id != dog.profileVersion.id {
-                    try store.restoreRemoteProfileVersion(dogID: dog.id, version: version)
+            for start in stride(from: 0, to: page.items.count, by: 4) {
+                let batch = Array(page.items[start..<min(start + 4, page.items.count)])
+                let fetched = try await restoreDetails(paths: batch.map { "/v1/dogs/\($0.id.uuidString)" })
+                for (summary, result) in zip(batch, fetched) {
+                    try ensureActive()
+                    let dog: Dog
+                    do { dog = try JSONDecoder().decode(Dog.self, from: result.get()) }
+                    catch {
+                        if try await skipMissingRestoreEntity(after: error, kind: "dog", id: summary.id) { continue }
+                        throw error
+                    }
+                    guard dog.id == summary.id, dog.accountId == accountID else { throw ServerSyncError.responseInvalid }
+                    _ = try store.upsertRemoteProfile(
+                        dogID: dog.id, profileVersionID: dog.profileVersion.id, revision: dog.revision,
+                        questionnaire: dog.profileVersion.questionnaire, contentSha256: dog.profileVersion.contentSha256,
+                        updatedAtUTC: dog.updatedAtUtc ?? dog.profileVersion.clientCreatedAtUtc, accountID: dog.accountId
+                    )
+                    for version in dog.profileVersions where version.id != dog.profileVersion.id {
+                        try store.restoreRemoteProfileVersion(dogID: dog.id, version: version)
+                    }
                 }
             }
             cursor = page.nextCursor
@@ -629,18 +647,20 @@ final class WoonaServerClient {
                     if try await skipMissingRestoreEntity(after: error, kind: "dog", id: dogID) { break }
                     throw error
                 }
-                for summary in page.items {
-                    let detail: ServerRecordingDetail
-                    do { detail = try await json(
-                        method: "GET",
-                        path: "/v1/recordings/\(summary.id.uuidString)",
-                        body: Optional<Data>.none,
-                        as: ServerRecordingDetail.self
-                    ) } catch {
-                        if try await skipMissingRestoreEntity(after: error, kind: "recording", id: summary.id) { continue }
-                        throw error
+                for start in stride(from: 0, to: page.items.count, by: 4) {
+                    let batch = Array(page.items[start..<min(start + 4, page.items.count)])
+                    let fetched = try await restoreDetails(paths: batch.map { "/v1/recordings/\($0.id.uuidString)" })
+                    for (summary, result) in zip(batch, fetched) {
+                        try ensureActive()
+                        let detail: ServerRecordingDetail
+                        do { detail = try JSONDecoder().decode(ServerRecordingDetail.self, from: result.get()) }
+                        catch {
+                            if try await skipMissingRestoreEntity(after: error, kind: "recording", id: summary.id) { continue }
+                            throw error
+                        }
+                        guard detail.id == summary.id, detail.dogId == dogID, detail.accountId == accountID else { throw ServerSyncError.responseInvalid }
+                        if try store.restoreRemoteRecording(detail) { restored += 1 }
                     }
-                    if try store.restoreRemoteRecording(detail) { restored += 1 }
                 }
                 cursor = page.nextCursor
                 if let cursor, !seenCursors.insert(cursor).inserted {

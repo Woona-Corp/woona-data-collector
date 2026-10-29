@@ -108,6 +108,82 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertEqual(storageAdmissionText("account_quota_reached", russian: false), "Account storage limit reached")
     }
 
+    @MainActor
+    func testLargeRestoreFetchesFourDetailsAtATimeAcrossPagesAndAppliesAllMetadata() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(self.completeDog())
+            let ids = (1...205).map { UUID(uuidString: String(format: "00000000-0000-0000-0001-%012d", $0))! }
+            let version: [String: Any] = ["id": profile.profileVersionID.uuidString, "schemaVersion": 1,
+                "validationState": "complete", "questionnaire": try JSONSerialization.jsonObject(with: WoonaStore.dogQuestionnaireData(profile.questionnaire)),
+                "contentSha256": profile.contentSha256, "clientCreatedAtUtc": profile.updatedAtUTC]
+            let questionnaire = try JSONSerialization.jsonObject(with: WoonaStore.sessionQuestionnaireData(self.completeSession()))
+            func summary(_ id: UUID) -> [String: Any] {
+                ["id": id.uuidString, "source": "live", "captureStatus": "completed", "ingestStatus": "uploading",
+                 "startedAtUtc": "2026-10-27T13:49:03.123456Z", "sessionLabel": id.uuidString, "videoRequested": false]
+            }
+            var details: [String: Data] = [:]
+            for id in ids {
+                let value = summary(id).merging(["dogId": profile.id.uuidString, "profileVersion": version,
+                    "timezone": "UTC", "questionnaireSchemaVersion": 1, "questionnaireValidationState": "complete",
+                    "sessionQuestionnaire": questionnaire, "sync": ["offsetUs": -12345, "deviceTimer": 9_007_199_254_740_993 as Int64], "artifacts": []]) { _, new in new }
+                details["/v1/recordings/" + id.uuidString] = try JSONSerialization.data(withJSONObject: value)
+            }
+            let first = try JSONSerialization.data(withJSONObject: ["items": ids.prefix(200).map(summary), "nextCursor": ids[199].uuidString])
+            let last = try JSONSerialization.data(withJSONObject: ["items": ids.suffix(5).map(summary)])
+            RestoreConcurrencyProtocol.reset { request in
+                let url = try XCTUnwrap(request.url)
+                if url.path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                if url.path.hasSuffix("/recordings") { return .init(body: url.query?.contains("cursor=") == true ? last : first) }
+                guard let body = details[url.path] else { throw URLError(.badServerResponse) }
+                // Deliberately complete each four-item batch in another order.
+                return .init(body: body, delay: url.path.hasSuffix("1") ? 0.04 : 0.015)
+            }
+            defer { RestoreConcurrencyProtocol.reset(nil) }
+            let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [RestoreConcurrencyProtocol.self]
+            let client = try WoonaServerClient(configuration: .init(baseURL: "https://restore.test", wifiOnly: false), token: "fixture", sessionConfiguration: config)
+            let started = ProcessInfo.processInfo.systemUptime
+            let restored = try await client.restoreRecordings(dogIDs: [profile.id], into: store)
+            XCTAssertEqual(restored, 205); XCTAssertEqual(try store.localInventory().recordings, 205)
+            XCTAssertGreaterThan(RestoreConcurrencyProtocol.maximumActive, 1)
+            XCTAssertLessThanOrEqual(RestoreConcurrencyProtocol.maximumActive, 4)
+            XCTAssertEqual(RestoreConcurrencyProtocol.finishedCount, 208, "205 detail GETs + two pages + one final deletion reconciliation")
+            XCTAssertEqual(Set(try store.recentRecordings(dogID: profile.id, limit: nil).map(\.id)), Set(ids))
+            let raw = try XCTUnwrap(store.syncJSON(recordingID: ids[0]))
+            XCTAssertTrue(String(decoding: raw, as: UTF8.self).contains("9007199254740993"))
+            XCTAssertNil(try store.recording(id: ids[0])?.endedAtUTC)
+            XCTAssertTrue(client.restoreWarnings.isEmpty)
+            print("Restore benchmark:205details+2pages, max4 concurrent, \(ProcessInfo.processInfo.systemUptime - started)s")
+        }
+    }
+
+    @MainActor
+    func testRestoreCancellationCancelsOnlyCurrentBatchAndAppliesNoLateDetails() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(self.completeDog())
+            let ids = (0..<9).map { _ in UUID() }
+            let page = try JSONSerialization.data(withJSONObject: ["items": ids.map { ["id": $0.uuidString] }])
+            RestoreConcurrencyProtocol.reset { request in
+                if request.url?.path == "/v1/dogs" { return .init(body: page) }
+                return .init(body: Data("{}".utf8), delay: 5)
+            }
+            defer { RestoreConcurrencyProtocol.reset(nil) }
+            let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [RestoreConcurrencyProtocol.self]
+            let client = try WoonaServerClient(configuration: .init(baseURL: "https://restore.test", wifiOnly: false), token: "fixture", sessionConfiguration: config)
+            let operation = Task { try await client.restoreProfiles(into: store) }
+            let deadline = Date().addingTimeInterval(5)
+            while RestoreConcurrencyProtocol.maximumActive < 4, Date() < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
+            XCTAssertEqual(RestoreConcurrencyProtocol.maximumActive, 4)
+            operation.cancel()
+            do { _ = try await operation.value; XCTFail("Cancelled restore must stop before applying fetched details") }
+            catch is CancellationError {}
+            XCTAssertEqual(try store.profiles().map(\.id), [profile.id])
+            XCTAssertEqual(try store.localInventory().recordings, 0)
+            XCTAssertLessThanOrEqual(RestoreConcurrencyProtocol.maximumActive, 4)
+        }
+    }
+
     func testLargeHistoryReadsAreBoundedBulkQueriesWithStableKeysetPages() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -2611,4 +2687,56 @@ private func awaitStorageCheck(_ model: AppViewModel) async throws {
     let deadline = ProcessInfo.processInfo.systemUptime + 5
     while model.serverStorageCheck == "checking", ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
     XCTAssertNotEqual(model.serverStorageCheck, "checking")
+}
+
+
+private final class RestoreConcurrencyProtocol: URLProtocol, @unchecked Sendable {
+    struct Reply { var body: Data; var delay: TimeInterval = 0 }
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handler: ((URLRequest) throws -> Reply)?
+    nonisolated(unsafe) private static var active = 0
+    nonisolated(unsafe) private static var peak = 0
+    nonisolated(unsafe) private static var finished = 0
+    nonisolated(unsafe) private static var generation: UInt64 = 0
+    private var generation: UInt64 = 0
+    private var settled = false
+    private var work: DispatchWorkItem?
+    static func reset(_ handler: ((URLRequest) throws -> Reply)?) {
+        lock.lock(); defer { lock.unlock() }
+        self.handler = handler; active = 0; peak = 0; finished = 0; generation &+= 1
+    }
+    static var maximumActive: Int { lock.lock(); defer { lock.unlock() }; return peak }
+    static var finishedCount: Int { lock.lock(); defer { lock.unlock() }; return finished }
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "restore.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.lock(); self.generation = Self.generation; let handler = Self.handler; Self.active += 1; Self.peak = max(Self.peak, Self.active); Self.lock.unlock()
+        do {
+            guard let handler else { throw URLError(.badServerResponse) }
+            let reply = try handler(request)
+            let work = DispatchWorkItem { [self] in
+                guard settle(completed: true) else { return }
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: reply.body)
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            Self.lock.lock(); self.work = work; let cancelled = settled; Self.lock.unlock()
+            if cancelled { work.cancel() } else { DispatchQueue.global().asyncAfter(deadline: .now() + reply.delay, execute: work) }
+        } catch { if settle(completed: false) { client?.urlProtocol(self, didFailWithError: error) } }
+    }
+    private func settle(completed: Bool) -> Bool {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard !settled else { return false }
+        settled = true; work = nil
+        guard generation == Self.generation else { return false }
+        Self.active -= 1
+        if completed { Self.finished += 1 }
+        return true
+    }
+    override func stopLoading() {
+        _ = settle(completed: false)
+        Self.lock.lock(); let work = self.work; self.work = nil; Self.lock.unlock()
+        work?.cancel()
+    }
 }
