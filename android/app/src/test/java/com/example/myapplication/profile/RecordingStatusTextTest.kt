@@ -13,6 +13,11 @@ class RecordingStatusTextTest {
     private val ru = AppLanguage.RUSSIAN
     private val en = AppLanguage.ENGLISH
 
+    @Test fun integrityBusyExplainsRetryWithoutLosingOriginalFiles() {
+        assertTrue(recordingUploadErrorText("HTTP 429 integrity_check_busy", en).contains("retry later"))
+        assertTrue(recordingUploadErrorText("integrity_check_busy", ru).contains("Локальные файлы сохранены"))
+    }
+
     @Test fun quotaAndReservedSpaceGiveDifferentActionsAndPreserveRawDetails() {
         val quota = recordingUploadErrorText("HTTP 413 storage_quota_exceeded requestId=fixture-id", en)
         assertTrue(quota.contains("storage limit")); assertTrue(quota.contains("automatic retries"))

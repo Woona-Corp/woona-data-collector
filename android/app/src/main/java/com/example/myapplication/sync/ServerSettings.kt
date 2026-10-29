@@ -64,6 +64,7 @@ data class ServerSyncUiState(
     val connectionError: String? = null,
     val operationMessage: String? = null,
     val accountId: String? = null,
+    val storage: ServerStorageUiState = ServerStorageUiState(),
 ) {
     val isConfigured: Boolean get() = status != ServerSyncStatus.NOT_CONFIGURED
 }

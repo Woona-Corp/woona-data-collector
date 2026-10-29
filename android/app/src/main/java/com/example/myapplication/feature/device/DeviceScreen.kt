@@ -339,6 +339,7 @@ fun DeviceSettingsScreen(
     onServerRetryPending: () -> Unit = {},
     onServerRestore: () -> Unit = {},
     onServerCheck: () -> Unit = {},
+    onServerStorageCheck: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(
@@ -396,6 +397,7 @@ fun DeviceSettingsScreen(
                 onRetryPending = onServerRetryPending,
                 onRestore = onServerRestore,
                 onCheck = onServerCheck,
+                onStorageCheck = onServerStorageCheck,
             )
         }
     }
@@ -875,6 +877,7 @@ private fun ServerSyncSettingsCard(
     onRetryPending: () -> Unit,
     onRestore: () -> Unit,
     onCheck: () -> Unit,
+    onStorageCheck: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -901,6 +904,7 @@ private fun ServerSyncSettingsCard(
             OutlinedButton(onClick = onCheck, enabled = state.isConfigured && state.connectionCheck != com.example.myapplication.sync.ConnectionCheck.CHECKING) {
                 Text(if (language == AppLanguage.RUSSIAN) "Проверить соединение" else "Check connection")
             }
+            com.example.myapplication.sync.ServerStorageSection(state.storage, state.isConfigured, language, onStorageCheck)
             Text(if (language == AppLanguage.RUSSIAN) "Фоновые задачи: ${state.workersRunning} выполняются, ${state.workersQueued} ожидают. Счётчики ниже включают анкеты и сессии." else "Background jobs: ${state.workersRunning} running, ${state.workersQueued} queued. Counts below include profiles and sessions.", style = MaterialTheme.typography.bodySmall)
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -2507,6 +2511,7 @@ object DeviceScreenEntryPoint {
         onServerRetryPending: () -> Unit = {},
         onServerRestore: () -> Unit = {},
     onServerCheck: () -> Unit = {},
+    onServerStorageCheck: () -> Unit = {},
         modifier: Modifier = Modifier,
     ) {
         DeviceSettingsScreen(
@@ -2522,6 +2527,7 @@ object DeviceScreenEntryPoint {
             onServerRetryPending = onServerRetryPending,
             onServerRestore = onServerRestore,
             onServerCheck = onServerCheck,
+            onServerStorageCheck = onServerStorageCheck,
             modifier = modifier,
         )
     }

@@ -1463,9 +1463,10 @@ class WoonaDatabase(
         recordingRows(profileId, limit.coerceAtLeast(0), null).map { it.recording }
 
     /** Bounded keyset pages: new captures cannot shift offsets and duplicate old rows. */
-    fun recordingHistoryPage(profileId: String, limit: Int = 100, after: RecordingHistoryCursor? = null): RecordingHistoryPage {
+    fun recordingHistoryPage(profileId: String, limit: Int = 100, after: RecordingHistoryCursor? = null, knownTotalCount: Int? = null): RecordingHistoryPage {
         require(limit in 1..100) { "History page size must be 1–100" }
-        val total = readableDatabase.rawQuery("SELECT COUNT(*) FROM recordings WHERE dog_id=?", arrayOf(profileId)).use {
+        require(knownTotalCount == null || knownTotalCount >= 0)
+        val total = knownTotalCount ?: readableDatabase.rawQuery("SELECT COUNT(*) FROM recordings WHERE dog_id=?", arrayOf(profileId)).use {
             it.moveToFirst(); it.getInt(0)
         }
         val rows = recordingRows(profileId, limit + 1, after)

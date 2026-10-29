@@ -6,6 +6,7 @@ import java.io.File
 import java.time.Instant
 import java.time.ZoneId
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -1033,16 +1034,18 @@ class WoonaDatabaseTest {
             .put("sync",manifest.getJSONObject("sync")).put("artifacts",org.json.JSONArray()).put("receiptSha256","a".repeat(64)).put("serverVerifiedAtUtc","2026-10-27T00:00:00Z")
         fun page(vararg ids:String)=JSONObject().put("items",org.json.JSONArray(ids.map {JSONObject().put("id",it)})).put("nextCursor",JSONObject.NULL)
         fun hash(id:String)=java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray()).joinToString(""){"%02x".format(it)}
-        val requested=mutableListOf<String>();val headers=mutableListOf<String?>()
+        val unknownGone=java.util.UUID.randomUUID().toString()
+        val requested=java.util.Collections.synchronizedList(mutableListOf<String>());val headers=java.util.Collections.synchronizedList(mutableListOf<String?>())
         val client=syntheticRestoreClient({url->
             val path=url.file;requested+=path
             when(path) {
                 "/v1/dogs?limit=200"->200 to page(dogId,retiredDog).toString()
                 "/v1/dogs/$dogId"->200 to dog.toString()
                 "/v1/dogs/$retiredDog"->410 to "{}"
-                "/v1/dogs/$dogId/recordings?limit=200"->200 to page(recordId,retiredRecord,original.id).toString()
+                "/v1/dogs/$dogId/recordings?limit=200"->200 to page(recordId,retiredRecord,original.id,unknownGone).toString()
                 "/v1/recordings/$recordId"->200 to record.toString()
                 "/v1/recordings/$retiredRecord"->410 to "{}"
+                "/v1/recordings/$unknownGone"->410 to "{}"
                 "/v1/recordings/${original.id}"->404 to "{}"
                 "/v1/deletions"->200 to JSONObject().put("entities",org.json.JSONArray(listOf(JSONObject().put("kind","dog").put("id_sha256",hash(retiredDog)),JSONObject().put("kind","recording").put("id_sha256",hash(retiredRecord))))).toString()
                 else->error("Unexpected fixture path $path")
@@ -1050,7 +1053,8 @@ class WoonaDatabaseTest {
         },headers)
         val snapshot=client.fetchRestoreSnapshot()
         assertEquals(1,snapshot.dogs.size);assertEquals(1,snapshot.recordings.size)
-        assertEquals(3,snapshot.warnings.size);assertEquals(1,snapshot.warnings.count {!it.confirmedRetirement})
+        assertEquals(4,snapshot.warnings.size);assertEquals(2,snapshot.warnings.count {!it.confirmedRetirement})
+        assertFalse(snapshot.warnings.single { it.id == unknownGone }.confirmedRetirement)
         assertEquals("/v1/deletions",requested.last());assertTrue(headers.all {it=="account-a"})
         assertTrue(requireNotNull(com.example.myapplication.sync.restoreWarningsText(snapshot.warnings,com.example.myapplication.localization.AppLanguage.ENGLISH)).contains("partially"))
         database.restoreServerMetadata(snapshot.dogs,snapshot.recordings);database.applyServerDeletions(snapshot.deletions)
@@ -1072,7 +1076,7 @@ class WoonaDatabaseTest {
         assertEquals("pagination_stalled",error.code);assertEquals(2,calls)
     }
 
-    private fun syntheticRestoreClient(response:(java.net.URL)->Pair<Int,String>,headers:MutableList<String?> = mutableListOf()) =
+    private fun syntheticRestoreClient(response:(java.net.URL)->Pair<Int,String>,headers:MutableList<String?> = java.util.Collections.synchronizedList(mutableListOf<String?>())) =
         com.example.myapplication.sync.ServerApiClient(com.example.myapplication.sync.ServerSettings("https://invalid.example","synthetic","device",true,"account-a"),connectionFactory={url->
             val reply=response(url)
             object:java.net.HttpURLConnection(url) {

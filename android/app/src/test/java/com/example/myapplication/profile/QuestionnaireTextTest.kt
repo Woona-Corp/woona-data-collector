@@ -25,6 +25,28 @@ class QuestionnaireTextTest {
         assertEquals("Поле должно быть пустым", questionnaireText("Must be empty", AppLanguage.RUSSIAN))
     }
 
+    @Test fun everyCurrentFormLiteralAndValidationBranchHasPresentationCoverage() {
+        fun source(path: String): String {
+            val candidates = listOf("src/main/java/", "app/src/main/java/", "android/app/src/main/java/")
+                .map { java.io.File(it + "com/example/myapplication/" + path) }
+            return requireNotNull(candidates.firstOrNull { it.isFile }) { "Questionnaire source fixture is unavailable: $path" }.readText()
+        }
+        val forms = source("profile/ProfilesUi.kt").substringAfter("fun DogQuestionnaireDialog(")
+        val literals = Regex("\"([^\"\n]*[А-Яа-яЁё][^\"\n]*)\"").findAll(forms).map { it.groupValues[1] }.toSet()
+        assertTrue("Long-form source was not inventoried", literals.size > 150)
+        literals.forEach { text ->
+            assertFalse("Untranslated form label/option: $text", questionnaireText(text, AppLanguage.ENGLISH).any { it in 'А'..'я' || it == 'Ё' || it == 'ё' })
+        }
+        val validation = listOf("data/SheetQuestionnaires.kt", "data/HeartQuestionnaire.kt", "data/WoonaData.kt").flatMap { path ->
+            Regex("errors\\[[^\\n]*?\\] = \"([^\"]*)\"").findAll(source(path)).map { it.groupValues[1].replace("${'$'}max", "150") }.toList()
+        }.toSet()
+        assertTrue(validation.size > 30)
+        validation.forEach { message ->
+            assertFalse("Untranslated validation: $message", questionnaireText(message, AppLanguage.ENGLISH).any { it in 'А'..'я' || it == 'Ё' || it == 'ё' })
+            assertTrue("Missing Russian validation: $message", questionnaireText(message, AppLanguage.RUSSIAN).any { it in 'А'..'я' || it == 'Ё' || it == 'ё' } || message == "BCS: 1–9")
+        }
+    }
+
     @Test fun heartOptionTitlesTranslateWithoutMutatingCanonicalKeysOrTexts() {
         val before = HEART_OPTIONS.mapValues { (_, values) -> values.toList() }
         HEART_OPTIONS.values.flatten().forEach { (_, russianTitle) ->

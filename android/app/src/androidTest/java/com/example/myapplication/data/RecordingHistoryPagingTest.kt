@@ -20,11 +20,12 @@ class RecordingHistoryPagingTest {
         assertEquals(10, database.recentRecordings(dog.id).size)
         val rows = mutableListOf<Recording>()
         var cursor: RecordingHistoryCursor? = null
+        var total: Int? = null
         val bulkNs = measureNanoTime {
             do {
-                val page = database.recordingHistoryPage(dog.id, after = cursor)
+                val page = database.recordingHistoryPage(dog.id, after = cursor, knownTotalCount = total)
                 assertTrue(page.recordings.size <= 100)
-                rows += page.recordings; cursor = page.nextCursor
+                rows += page.recordings; cursor = page.nextCursor; total = page.totalCount
             } while (cursor != null)
         }
         assertEquals(1205, rows.size); assertEquals(1205, rows.map { it.id }.distinct().size)
@@ -57,8 +58,11 @@ class RecordingHistoryPagingTest {
     @Test fun insertionAheadOfCursorDoesNotRepeatPreviouslyShownRows() = withDatabase { database ->
         val dog=seed(database,205);val first=database.recordingHistoryPage(dog.id)
         val newest=database.beginRecording(dog.id,RecordingSource.LIVE,SessionQuestionnaire(schemaVersion=2,sessionLabel="New capture",plannedActivities=listOf("Покой"),videoRequested=false))
-        val second=database.recordingHistoryPage(dog.id,after=first.nextCursor)
-        assertEquals(206,second.totalCount);assertEquals(100,second.recordings.size)
+        val second=database.recordingHistoryPage(dog.id,after=first.nextCursor,knownTotalCount=first.totalCount)
+        assertEquals(205,second.totalCount);
+        val refreshed=database.recordingHistoryPage(dog.id)
+        assertEquals(206,refreshed.totalCount);assertEquals(newest.id,refreshed.recordings.first().id)
+        assertEquals(100,second.recordings.size)
         assertTrue(first.recordings.map {it.id}.intersect(second.recordings.map {it.id}.toSet()).isEmpty())
         assertFalse(second.recordings.any {it.id==newest.id})
     }

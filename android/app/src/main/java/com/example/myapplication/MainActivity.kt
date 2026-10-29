@@ -106,6 +106,9 @@ class MainActivity : ComponentActivity() {
     private var dogProfiles by mutableStateOf<List<DogProfile>>(emptyList())
     private var selectedProfileId by mutableStateOf<String?>(null)
     private var recentRecordings by mutableStateOf<List<Recording>>(emptyList())
+    private val storageRequests = com.example.myapplication.sync.StorageRequestEpoch()
+    private var storageUi = com.example.myapplication.sync.ServerStorageUiState()
+
     private var showingAllRecordings by mutableStateOf(false)
     private var recordingsTotal by mutableStateOf(0)
     private var recordingsLoading by mutableStateOf(false)
@@ -367,6 +370,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onServerRestore = ::restoreServerData,
                         onServerCheck = ::checkServerConnection,
+                        onServerStorageCheck = ::checkServerStorage,
                         onDisconnect = ::stopSession,
                         onV2Discovery = deviceFeatureController::onV2DiscoveryRequested,
                         onV2PreviewConnect = ::connectV2Preview,
@@ -938,19 +942,20 @@ class MainActivity : ComponentActivity() {
         val generation = historyGeneration.incrementAndGet()
         val previous = if (append) recentRecordings else emptyList()
         val after = if (append) historyCursor else null
+        val knownTotal = if (append) recordingsTotal else null
         val wanted = if (append || resetHistory) 100 else if (showingAllRecordings) maxOf(100, historyRequestedCount, recentRecordings.size) else 10
         recordingsLoading = true; recordingsError = null
         backgroundExecutor.execute {
             val result = runCatching {
                 val loaded = mutableListOf<Recording>()
                 var cursor = after
-                var total = 0
+                var total: Int? = knownTotal
                 do {
                     if (Thread.currentThread().isInterrupted || historyGeneration.get() != generation) throw java.util.concurrent.CancellationException()
-                    val page = woonaDatabase.recordingHistoryPage(profileId, minOf(100, wanted - loaded.size), cursor)
+                    val page = woonaDatabase.recordingHistoryPage(profileId, minOf(100, wanted - loaded.size), cursor, total)
                     loaded += page.recordings; total = page.totalCount; cursor = page.nextCursor
                 } while (cursor != null && loaded.size < wanted)
-                Triple(loaded.toList(), total, cursor)
+                Triple(loaded.toList(), total ?: 0, cursor)
             }
             runOnUiThread {
                 if (isDestroyed || generation != historyGeneration.get() || selectedProfileId != profileId) return@runOnUiThread
@@ -998,6 +1003,7 @@ class MainActivity : ComponentActivity() {
             connectionCheck = com.example.myapplication.sync.ConnectionCheck.NOT_CHECKED
             connectionCheckedAt = null; connectionCheckError = null
         }
+        if (storageRequests.configure(settings)) storageUi = com.example.myapplication.sync.ServerStorageUiState()
         val counts = woonaDatabase.serverSyncCounts()
         val cleanup = woonaDatabase.retirementCleanupStatus()
         serverSyncState = ServerSyncUiState(
@@ -1033,6 +1039,7 @@ class MainActivity : ComponentActivity() {
             checkedAtUtc = connectionCheckedAt,
             connectionError = connectionCheckError,
             accountId = settings.accountId,
+            storage = storageUi,
             operationMessage = serverSyncState.operationMessage,
         )
     }
@@ -1085,6 +1092,32 @@ class MainActivity : ComponentActivity() {
                     onSuccess = { if (selectedLanguage == AppLanguage.RUSSIAN) "Сервер отключён, токен удалён с устройства. Локальные данные и очередь сохранены. Для продолжения укажите токен." else "Server disconnected and token removed from this device. Local data and queue are preserved. Enter a token to resume." },
                     onFailure = { (if (selectedLanguage == AppLanguage.RUSSIAN) "Отключение не завершено; локальные данные сохранены. Повторите действие.\n" else "Disconnection did not complete; local data is preserved. Retry.\n") + (it.message ?: it.javaClass.simpleName) },
                 ))
+                refreshServerState()
+            }
+        }
+    }
+
+    private fun checkServerStorage() {
+        val settings = serverSettingsStore.get()
+        if (!settings.isConfigured || storageUi.check == com.example.myapplication.sync.StorageCheck.CHECKING) return
+        val ticket = storageRequests.begin(settings)
+        storageUi = com.example.myapplication.sync.ServerStorageUiState(check = com.example.myapplication.sync.StorageCheck.CHECKING)
+        refreshServerState()
+        backgroundExecutor.execute {
+            val result = runCatching { ServerApiClient(settings).storageStatus() }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                val current = serverSettingsStore.get()
+                if (storageRequests.configure(current)) storageUi = com.example.myapplication.sync.ServerStorageUiState()
+                if (!storageRequests.accepts(ticket, current)) { refreshServerState(); return@runOnUiThread }
+                val failure = result.exceptionOrNull()
+                val unavailable = (failure as? com.example.myapplication.sync.ServerHttpException)?.status == 404
+                storageUi = com.example.myapplication.sync.ServerStorageUiState(
+                    check = if (result.isSuccess) com.example.myapplication.sync.StorageCheck.CHECKED else if (unavailable) com.example.myapplication.sync.StorageCheck.UNAVAILABLE else com.example.myapplication.sync.StorageCheck.FAILED,
+                    checkedAtUtc = java.time.Instant.now().toString(),
+                    result = result.getOrNull(),
+                    error = failure?.message?.replace(settings.token, "[redacted]"),
+                )
                 refreshServerState()
             }
         }

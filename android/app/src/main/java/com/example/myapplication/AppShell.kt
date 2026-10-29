@@ -101,6 +101,7 @@ fun DeviceAppShell(
     onServerRetryPending: () -> Unit = {},
     onServerRestore: () -> Unit = {},
     onServerCheck: () -> Unit = {},
+    onServerStorageCheck: () -> Unit = {},
     onDisconnect: () -> Unit,
     onV2Discovery: () -> Unit = {},
     onV2PreviewConnect: (String) -> Unit = {},
@@ -253,6 +254,7 @@ fun DeviceAppShell(
                         onServerRetryPending = onServerRetryPending,
                         onServerRestore = onServerRestore,
             onServerCheck = onServerCheck,
+            onServerStorageCheck = onServerStorageCheck,
                     )
                 }
                 }
@@ -685,6 +687,7 @@ object AppShellEntryPoint {
         onServerRetryPending: () -> Unit = {},
         onServerRestore: () -> Unit = {},
     onServerCheck: () -> Unit = {},
+    onServerStorageCheck: () -> Unit = {},
         onDisconnect: () -> Unit,
         onV2Discovery: () -> Unit = {},
         onV2PreviewConnect: (String) -> Unit = {},
@@ -733,6 +736,7 @@ object AppShellEntryPoint {
             onServerRetryPending = onServerRetryPending,
             onServerRestore = onServerRestore,
             onServerCheck = onServerCheck,
+            onServerStorageCheck = onServerStorageCheck,
             onDisconnect = onDisconnect,
             onV2Discovery = onV2Discovery,
             onV2PreviewConnect = onV2PreviewConnect,

@@ -86,6 +86,7 @@ fun transferStateText(value: String, ru: Boolean): String = when (value) {
     else -> value
 }
 fun nextTransferActionText(value: String, ru: Boolean): String = when (value) {
+    "continue_upload" -> if (ru) "продолжите отправку с устройства-источника" else "continue uploads on the source device"
     "none" -> if (ru) "не требуется" else "none required"
     "resume_upload" -> if (ru) "возобновите выгрузку с устройства-источника" else "resume uploads on the source device"
     "upload_manifest" -> if (ru) "отправьте метаданные и список файлов с устройства-источника" else "upload metadata and the file manifest from the source device"

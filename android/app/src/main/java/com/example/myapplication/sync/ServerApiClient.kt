@@ -66,6 +66,12 @@ class ServerApiClient(
     },
 ) {
     private var authenticatedDeviceId: String? = null
+    private val activeRequests = java.util.concurrent.ConcurrentHashMap.newKeySet<HttpURLConnection>()
+    private fun release(connection: HttpURLConnection) { activeRequests.remove(connection); ServerTransferRegistry.release(connection) }
+    private fun abortRequests() {
+        val active = activeRequests.toList()
+        active.forEach { connection -> Thread({ runCatching { connection.disconnect() } }, "woona-restore-abort").apply { isDaemon = true }.start() }
+    }
 
     init {
         require(settings.isConfigured)
@@ -195,7 +201,7 @@ class ServerApiClient(
         } catch (failure: ServerTransferException) {
             if (failure.code == "download_size_invalid") partial.delete()
             throw failure
-        } finally { ServerTransferRegistry.release(connection) }
+        } finally { release(connection) }
         ensureTransferActive()
         if (sha256(partial, ::ensureTransferActive) != expectedSha256) {
             partial.delete()
@@ -237,48 +243,58 @@ class ServerApiClient(
     }
 
     fun fetchRestoreSnapshot(): ServerRestoreSnapshot {
+        val aborted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val client = ServerApiClient(settings, connectTimeoutMillis, readTimeoutMillis, chunkBytes, connectionFactory) {
+            checkCancelled()
+            if (aborted.get()) throw java.util.concurrent.CancellationException("Restore stopped; local data is preserved")
+        }
+        fun abort() { aborted.set(true); client.abortRequests() }
         val dogs = mutableListOf<RemoteDog>()
         val recordings = mutableListOf<RemoteRecording>()
-        val skipped = mutableListOf<RestoreSkippedEntity>()
+        val skipped = java.util.Collections.synchronizedList(mutableListOf<RestoreSkippedEntity>())
         fun detail(path: String, kind: String, id: String, dogId: String? = null): JSONObject? = try {
-            jsonRequest("GET", path, null)
+            client.jsonRequest("GET", path, null)
         } catch (error: ServerHttpException) {
             if (error.status !in setOf(404,410)) throw error
             skipped += RestoreSkippedEntity(kind,id,error.status,dogId)
             null
         }
-        var dogCursor: String? = null
-        val dogCursors = TransferCursorGuard()
-        do {
-            val page = jsonRequest("GET", "/v1/dogs?limit=200${dogCursor?.let { "&cursor=$it" }.orEmpty()}", null)
-            val items = page.getJSONArray("items")
-            repeat(items.length()) { index ->
-                val dogId = items.getJSONObject(index).getString("id")
-                val value = detail("/v1/dogs/$dogId", "dog", dogId) ?: return@repeat
-                dogs += parseDog(value)
-                var recordingCursor: String? = null
-                val recordingCursors = TransferCursorGuard()
-                do {
-                    val recordingPage = detail("/v1/dogs/$dogId/recordings?limit=200${recordingCursor?.let { "&cursor=$it" }.orEmpty()}", "dog", dogId) ?: break
-                    val recordingItems = recordingPage.getJSONArray("items")
-                    repeat(recordingItems.length()) recording@{ recordingIndex ->
-                        val id = recordingItems.getJSONObject(recordingIndex).getString("id")
-                        val recording = detail("/v1/recordings/$id", "recording", id, dogId) ?: return@recording
-                        recordings += parseRecording(recording)
-                    }
-                    recordingCursor = recordingCursors.next(recordingPage.nullableString("nextCursor"))
-                } while (recordingCursor != null)
-            }
-            dogCursor = dogCursors.next(page.nullableString("nextCursor"))
-        } while (dogCursor != null)
-        // Fetch negative knowledge last: an item can be retired between list and detail.
-        val deletions = fetchDeletions()
-        val markers = deletions.toSet()
-        fun hasMarker(kind: String, id: String): Boolean = kind to java.security.MessageDigest.getInstance("SHA-256")
-            .digest(id.lowercase().toByteArray()).joinToString("") { "%02x".format(it) } in markers
-        return ServerRestoreSnapshot(dogs, recordings, deletions, skipped.map {
-            it.copy(confirmedRetirement = it.status == 410 || hasMarker(it.kind,it.id) || it.dogId?.let { dog -> hasMarker("dog",dog) } == true)
-        })
+        try {
+            var dogCursor: String? = null
+            val dogCursors = TransferCursorGuard()
+            do {
+                client.ensureTransferActive()
+                val page = client.jsonRequest("GET", "/v1/dogs?limit=200${dogCursor?.let { "&cursor=$it" }.orEmpty()}", null)
+                val items = page.getJSONArray("items")
+                val ids = (0 until items.length()).map { items.getJSONObject(it).getString("id") }
+                val details = boundedRestoreMap(ids, ::abort) { id -> detail("/v1/dogs/$id", "dog", id)?.let(client::parseDog) }
+                details.filterNotNull().forEach { dog ->
+                    dogs += dog
+                    val dogId = dog.id
+                    var recordingCursor: String? = null
+                    val recordingCursors = TransferCursorGuard()
+                    do {
+                        client.ensureTransferActive()
+                        val recordingPage = detail("/v1/dogs/$dogId/recordings?limit=200${recordingCursor?.let { "&cursor=$it" }.orEmpty()}", "dog", dogId) ?: break
+                        val recordingItems = recordingPage.getJSONArray("items")
+                        val recordingIds = (0 until recordingItems.length()).map { recordingItems.getJSONObject(it).getString("id") }
+                        recordings += boundedRestoreMap(recordingIds, ::abort) { id ->
+                            detail("/v1/recordings/$id", "recording", id, dogId)?.let(client::parseRecording)
+                        }.filterNotNull()
+                        recordingCursor = recordingCursors.next(recordingPage.nullableString("nextCursor"))
+                    } while (recordingCursor != null)
+                }
+                dogCursor = dogCursors.next(page.nullableString("nextCursor"))
+            } while (dogCursor != null)
+            // Negative knowledge is fresh and fetched only after all detail workers finish.
+            val deletions = client.fetchDeletions()
+            val markers = deletions.toSet()
+            fun hasMarker(kind: String, id: String): Boolean = kind to java.security.MessageDigest.getInstance("SHA-256")
+                .digest(id.lowercase().toByteArray()).joinToString("") { "%02x".format(it) } in markers
+            return ServerRestoreSnapshot(dogs, recordings, deletions, skipped.sortedWith(compareBy({ it.kind }, { it.id }, { it.status })).map {
+                it.copy(confirmedRetirement = hasMarker(it.kind,it.id) || it.dogId?.let { dog -> hasMarker("dog",dog) } == true)
+            })
+        } catch (error: Throwable) { abort(); throw error }
     }
 
     fun fetchDeletions(): List<Pair<String, String>> {
@@ -299,10 +315,12 @@ class ServerApiClient(
         try {
             val status = connection.responseCode
             if (status !in 200..299) throw error(connection, status)
-        } finally { ServerTransferRegistry.release(connection) }
+        } finally { release(connection) }
         // Readiness is public; an authenticated read verifies the token and account too.
         jsonRequest("GET", "/v1/dogs?limit=1", null)
     }
+
+    fun storageStatus(): ServerStorageStatus = parseServerStorageStatus(jsonRequest("GET", "/v1/storage-status", null), settings.accountId)
 
     fun syncStatus(recordingId: String): org.json.JSONObject =
         jsonRequest("GET", "/v1/recordings/$recordingId/sync-status", null)
@@ -312,7 +330,7 @@ class ServerApiClient(
         return try {
             connection.responseCode == HttpURLConnection.HTTP_OK
         } finally {
-            ServerTransferRegistry.release(connection)
+            release(connection)
         }
     }
 
@@ -350,7 +368,7 @@ class ServerApiClient(
             val offset = requiredOffset(connection)
             if (offset !in 0..size) throw ServerTransferException("upload_offset_invalid", "HEAD returned $offset bytes for a $size-byte artifact")
             offset
-        } finally { ServerTransferRegistry.release(connection) }
+        } finally { release(connection) }
     }
 
     private fun requiredOffset(connection: HttpURLConnection): Long = connection.getHeaderField("Upload-Offset")?.toLongOrNull()
@@ -380,7 +398,7 @@ class ServerApiClient(
                 if (status !in 200..299) throw error(connection, status)
                 requiredOffset(connection)
             }
-        } finally { ServerTransferRegistry.release(connection) }
+        } finally { release(connection) }
     }
 
     private fun jsonRequest(method: String, path: String, body: JSONObject?): JSONObject {
@@ -398,7 +416,7 @@ class ServerApiClient(
             if (status !in 200..299) throw error(connection, status)
             val response = connection.inputStream.bufferedReader().use { it.readText() }
             if (response.isBlank()) JSONObject() else JSONObject(response)
-        } finally { ServerTransferRegistry.release(connection) }
+        } finally { release(connection) }
     }
 
     private fun ensureTransferActive() {
@@ -418,6 +436,8 @@ class ServerApiClient(
             if (authenticated) setRequestProperty("Authorization", "Bearer ${settings.token}")
             settings.accountId?.let { setRequestProperty("X-Woona-Account", it) }
             ServerTransferRegistry.register(this, settings.transferGeneration)
+            activeRequests += this
+            try { ensureTransferActive() } catch (error: Throwable) { release(this); throw error }
         }
     }
 
