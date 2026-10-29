@@ -447,6 +447,8 @@ final class AppShellTests: XCTestCase {
     }
 
     func testHeartCapturePromptOwnsFreshFinalizedRecordAndDoesNotReopenAfterDismissal() async throws {
+        let originalSelection = heartPromptSelectionPreferences()
+        defer { restoreHeartPromptSelectionPreferences(originalSelection) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = try WoonaStore(rootDirectory: root)
         let profile = try makeHeartPromptProfile(store, name: "owner")
@@ -498,6 +500,8 @@ final class AppShellTests: XCTestCase {
     }
 
     func testHeartCapturePromptClearsPresentedAndQueuedOwnersOnScopeChange() async throws {
+        let originalSelection = heartPromptSelectionPreferences()
+        defer { restoreHeartPromptSelectionPreferences(originalSelection) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = try WoonaStore(rootDirectory: root)
         let first = try makeHeartPromptProfile(store, name: "scope-a")
@@ -529,6 +533,8 @@ final class AppShellTests: XCTestCase {
     }
 
     func testHeartPresenterRechecksCompletedAnswersAndManualOpeningUsesFreshRecord() async throws {
+        let originalSelection = heartPromptSelectionPreferences()
+        defer { restoreHeartPromptSelectionPreferences(originalSelection) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = try WoonaStore(rootDirectory: root)
         _ = try makeHeartPromptProfile(store, name: "fresh")
@@ -554,6 +560,8 @@ final class AppShellTests: XCTestCase {
 
     func testRetiredHeartCaptureNeverPromptsIncludingDeferredRetirementSQLFailure() async throws {
         for failRetirement in [false, true] {
+            let originalSelection = heartPromptSelectionPreferences()
+            defer { restoreHeartPromptSelectionPreferences(originalSelection) }
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             let store = try WoonaStore(rootDirectory: root)
             let profile = try makeHeartPromptProfile(store, name: "retired")
@@ -596,6 +604,8 @@ final class AppShellTests: XCTestCase {
     }
 
     func testHeartPromptWaitsForDurableFinalizationAndFailedWriteCanBeRetried() async throws {
+        let originalSelection = heartPromptSelectionPreferences()
+        defer { restoreHeartPromptSelectionPreferences(originalSelection) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = try WoonaStore(rootDirectory: root)
         _ = try makeHeartPromptProfile(store, name: "failed-finalizer")
@@ -621,6 +631,8 @@ final class AppShellTests: XCTestCase {
     }
 
     func testNewHeartPromptAndLocalSaveDoNotWaitForUnrelatedPendingNetworkWork() async throws {
+        let originalSelection = heartPromptSelectionPreferences()
+        defer { restoreHeartPromptSelectionPreferences(originalSelection) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = try WoonaStore(rootDirectory: root)
         let profile = try makeHeartPromptProfile(store, name: "held-network")
@@ -1156,6 +1168,23 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(viewModel.chart.viewportStartMillis, 1_969_980)
         XCTAssertEqual(viewModel.chart.viewportEndMillis, 1_999_980)
     }
+    private func heartPromptSelectionPreferences() -> [String: Any] {
+        var original: [String: Any] = [:]
+        for key in ["selectedAccountID", "selectedDogID"] {
+            if let value = UserDefaults.standard.object(forKey: key) { original[key] = value }
+        }
+        return original
+    }
+
+    private func restoreHeartPromptSelectionPreferences(_ original: [String: Any]) {
+        // Each fixture settles its owned work before exiting. Restore the exact
+        // original object/absence instead of leaking its synthetic account scope.
+        for key in ["selectedAccountID", "selectedDogID"] {
+            if let value = original[key] { UserDefaults.standard.set(value, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+    }
+
     private func cleanupHeartPromptFixture(_ root: URL, model: AppViewModel) {
         guard model.activeRecording == nil, model.canChangeAccount, !model.isHistoryLoading, model.canStartNewSession else {
             NSLog("Synthetic heart fixture retained because owned work has not finished: %@", root.lastPathComponent)
