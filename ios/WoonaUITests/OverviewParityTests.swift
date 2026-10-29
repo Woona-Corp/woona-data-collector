@@ -14,6 +14,34 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
     }
 
+    func testEnglishLongDogFormPresentsTranslatedOptionsAndRetainsCanonicalAnswersAcrossLanguageChange() {
+        app.buttons["dog.new"].tap()
+        XCTAssertTrue(app.navigationBars["Dog questionnaire"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ID and name are required. Leave unknown answers blank."].exists)
+        let size = app.buttons["questionnaire.choice.Size"]
+        XCTAssertTrue(size.waitForExistence(timeout: 5))
+        size.tap(); app.buttons["Small"].tap()
+        app.textFields["dog.editor.animalID"].tap(); app.textFields["dog.editor.animalID"].typeText("english-sheet-fixture")
+        app.textFields["dog.editor.name"].tap(); app.textFields["dog.editor.name"].typeText("English fixture")
+        app.buttons["dog.editor.save"].tap()
+        XCTAssertTrue(app.buttons["dog.edit"].waitForExistence(timeout: 5))
+        app.buttons["dog.edit"].tap()
+        XCTAssertTrue(app.buttons["questionnaire.choice.Size"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["questionnaire.choice.Size"].label.contains("Small"))
+        attachScreen("Questionnaire-English-CanonicalOption")
+        app.buttons["dog.editor.cancel"].tap()
+        app.buttons["tab.settings"].tap()
+        let russian = app.buttons["language.ru"]
+        if !russian.isHittable { app.swipeUp() }
+        russian.tap()
+        app.buttons["tab.overview"].tap()
+        app.buttons["dog.edit"].tap()
+        XCTAssertTrue(app.navigationBars["Анкета собаки"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["questionnaire.choice.Size"].label.contains("мелкий"), "Changing presentation language must not store the translated answer")
+        attachScreen("Questionnaire-Russian-CanonicalOption")
+        app.buttons["dog.editor.cancel"].tap()
+    }
+
     func testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls() {
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
         app.buttons["tab.session"].tap()

@@ -30,7 +30,8 @@ struct AccountControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(russian ? "Аккаунт" : "Account").font(.caption).foregroundStyle(.secondary)
-            TextField(russian ? "Аккаунт" : "Account", text: $appState.accountInput)
+            TextField(russian ? "Аккаунт" : "Account", text: $appState.accountInput,
+                      prompt: Text(russian ? "Аккаунт" : "Account").foregroundStyle(Color.woonaMuted))
                 .textFieldStyle(.roundedBorder)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()

@@ -1,10 +1,63 @@
 import XCTest
 import SQLite3
 import UIKit
+import SwiftUI
 @testable import Woona
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    func testSheetPresentationUsesEnglishWithoutChangingCanonicalQuestionnaireData() throws {
+        var dog = DogQuestionnaire()
+        dog.schemaVersion = 2; dog.animalId = "presentation-fixture"
+        dog.numberOrName = "Fixture"; dog.species = "собака"; dog.size = "мелкий"; dog.sex = "самец"
+        let original = try WoonaStore.dogQuestionnaireData(dog)
+        for (canonical, english) in englishQuestionnaireText {
+            XCTAssertEqual(questionnaireDisplayText(canonical, language: .russian), canonical)
+            XCTAssertEqual(questionnaireDisplayText(canonical, language: .english), english)
+            XCTAssertNil(english.range(of: "[А-Яа-яЁё]", options: .regularExpression), canonical)
+        }
+        XCTAssertEqual(questionnaireDisplayText(dog.size, language: .english), "Small")
+        XCTAssertEqual(questionnaireDisplayText(dog.sex, language: .english), "Male")
+        XCTAssertEqual(dog.size, "мелкий"); XCTAssertEqual(dog.sex, "самец")
+        XCTAssertEqual(try WoonaStore.dogQuestionnaireData(dog), original)
+        XCTAssertEqual(questionnaireDisplayText("Unrecognized operator note", language: .english), "Unrecognized operator note")
+    }
+
+    func testSheetAndHeartValidationMessagesAreLocalizedIncludingDynamicLimitsAndFormats() {
+        var dog = DogQuestionnaire(); dog.schemaVersion = 2
+        var session = SessionQuestionnaire(); session.schemaVersion = 2
+        let errors = Array(dog.validate().errors.values) + Array(session.validate().errors.values)
+            + Array(HeartQuestionnaire().validate().errors.values) + Array(ReferenceMetadata().validate().errors.values)
+        XCTAssertFalse(errors.isEmpty)
+        for error in errors {
+            let presented = questionnaireValidationError(error, language: .english)
+            XCTAssertNil(presented.range(of: "[А-Яа-яЁё]", options: .regularExpression), error)
+        }
+        XCTAssertEqual(questionnaireDisplayText("Максимум 157 символов", language: .english), "Maximum 157 characters")
+        XCTAssertEqual(questionnaireDisplayText("Формат: yyyy-MM-dd", language: .english), "Format: yyyy-MM-dd")
+        XCTAssertEqual(questionnaireValidationError("Maximum 157 characters", language: .russian), "Максимум 157 символов")
+        XCTAssertEqual(questionnaireFieldTitle("animalId", language: .english), "Animal number/ID *")
+        XCTAssertEqual(questionnaireFieldTitle("not-a-public-field", language: .english), "Questionnaire")
+    }
+
+    func testAccountPromptPaletteKeepsReadableContrastInBothThemes() {
+        func luminance(_ color: UIColor) -> Double {
+            var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+            XCTAssertTrue(color.getRed(&red, green: &green, blue: &blue, alpha: &alpha))
+            func linear(_ component: CGFloat) -> Double {
+                let value = Double(component)
+                return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+        }
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let traits = UITraitCollection(userInterfaceStyle: style)
+            let text = luminance(UIColor(Color.woonaMuted).resolvedColor(with: traits))
+            let surface = luminance(UIColor(Color.woonaSurface).resolvedColor(with: traits))
+            XCTAssertGreaterThanOrEqual((max(text, surface) + 0.05) / (min(text, surface) + 0.05), 4.5)
+        }
+    }
+
     @MainActor
     func testCancelledQueuedV2ConnectCannotConnectOrOverwriteTheCancelledPreview() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
