@@ -585,7 +585,8 @@ final class WoonaServerClient {
         var seenCursors = Set<UUID>()
         repeat {
             let suffix = cursor.map { "?limit=200&cursor=\($0.uuidString)" } ?? "?limit=200"
-            let page: Page = try await json(method: "GET", path: "/v1/dogs\(suffix)", body: Optional<Data>.none, as: Page.self)
+            let pageData = try await boundedMetadata(path: "/v1/dogs\(suffix)", timeout: 20)
+            let page = try JSONDecoder().decode(Page.self, from: pageData)
             for start in stride(from: 0, to: page.items.count, by: 4) {
                 let batch = Array(page.items[start..<min(start + 4, page.items.count)])
                 let fetched = try await restoreDetails(paths: batch.map { "/v1/dogs/\($0.id.uuidString)" })
@@ -638,12 +639,10 @@ final class WoonaServerClient {
             repeat {
                 let suffix = cursor.map { "?limit=200&cursor=\($0.uuidString)" } ?? "?limit=200"
                 let page: Page
-                do { page = try await json(
-                    method: "GET",
-                    path: "/v1/dogs/\(dogID.uuidString)/recordings\(suffix)",
-                    body: Optional<Data>.none,
-                    as: Page.self
-                ) } catch {
+                do {
+                    let data = try await boundedMetadata(path: "/v1/dogs/\(dogID.uuidString)/recordings\(suffix)", timeout: 20)
+                    page = try JSONDecoder().decode(Page.self, from: data)
+                } catch {
                     if try await skipMissingRestoreEntity(after: error, kind: "dog", id: dogID) { break }
                     throw error
                 }

@@ -163,6 +163,23 @@ final class WoonaDataTests: XCTestCase {
     }
 
     @MainActor
+    func testRestoreListCancellationDoesNotWaitForAHangingMetadataTransport() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(self.completeDog())
+            let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [HangingRetirementProtocol.self]
+            let client = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test", wifiOnly: false), token: "fixture", sessionConfiguration: config)
+            let operation = Task { try await client.restoreProfiles(into: store) }
+            try await Task.sleep(nanoseconds: 20_000_000)
+            let start = ProcessInfo.processInfo.systemUptime; operation.cancel()
+            do { _ = try await operation.value; XCTFail("Restore page cancellation must not await an uncooperative callback") }
+            catch is CancellationError {}
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 2)
+            XCTAssertEqual(try store.profiles().map(\.id), [profile.id])
+        }
+    }
+
+    @MainActor
     func testRestoreCancellationCancelsOnlyCurrentBatchAndAppliesNoLateDetails() async throws {
         try await networkSource { root, _ in
             let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
