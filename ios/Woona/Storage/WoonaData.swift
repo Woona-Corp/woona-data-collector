@@ -1659,6 +1659,12 @@ final class WoonaStore {
     }
 
     private func migrate() throws {
+        // DDL and queue seeding are one transaction: an interrupted/failed upgrade
+        // must not leave a partly upgraded database or advance user_version.
+        try transaction { try migrateSchema() }
+    }
+
+    private func migrateSchema() throws {
         try execute(
             """
             CREATE TABLE IF NOT EXISTS dogs(

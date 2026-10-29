@@ -5,6 +5,123 @@ import CryptoKit
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    func testEveryDocumentedHistoricalSchemaMigratesWithoutChangingOriginalDataOrFiles() throws {
+        for schema in HistoricalIOSSchema.allCases {
+            try XCTContext.runActivity(named: "Historical iOS \(schema), version \(schema.version)") { _ in
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: root) }
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                var database: OpaquePointer?
+                XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+                defer { sqlite3_close(database) }
+                try fixtureSQL(database, schema.sql)
+                let dogID = UUID(), oldVersion = UUID(), currentVersion = UUID()
+                let recordID = UUID(), activeID = UUID(), packetID = UUID(), syncID = UUID(), referenceID = UUID()
+                let time = "2026-10-01T10:00:00.123456Z"
+                var older = completeDog(); older.numberOrName = "Historical name"
+                var current = older; current.numberOrName = "Current name"
+                let oldJSON = String(decoding: try WoonaStore.dogQuestionnaireData(older), as: UTF8.self)
+                let currentJSON = String(decoding: try WoonaStore.dogQuestionnaireData(current), as: UTF8.self)
+                let sessionJSON = String(decoding: try WoonaStore.sessionQuestionnaireData(completeSession()), as: UTF8.self)
+                let directory = "recordings/\(dogID.uuidString)/2026-10-01/\(recordID.uuidString)"
+                let packet = Data("Original historical packet bytes".utf8)
+                let clock = Data(#"{"monotonicClock":"ios.CMClock.hostTime","sessionZeroMonotonicNs":9007199254740993,"videoOffsetFromSensorNs":-7001,"captureErrorCode":"gatt_error","captureErrorMessage":"GATT status 8"}"#.utf8)
+                let folder = root.appendingPathComponent(directory)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try packet.write(to: folder.appendingPathComponent("packets.bin"))
+                try clock.write(to: folder.appendingPathComponent("sync.json"))
+                let note = Data("Unregistered original note".utf8)
+                try note.write(to: folder.appendingPathComponent("operator-note.txt"))
+                try fixtureSQL(database, "INSERT INTO dogs VALUES(\(fixtureSQLText(dogID.uuidString)),\(fixtureSQLText(currentVersion.uuidString)),'Current name',7,\(fixtureSQLText(time)),\(fixtureSQLText(time)),NULL\(schema.hasAccount ? ", 'fixture-clinic'" : ""));")
+                for (id, json, superseded) in [(oldVersion, oldJSON, fixtureSQLText(time)), (currentVersion, currentJSON, "NULL")] {
+                    try fixtureSQL(database, "INSERT INTO dog_profile_versions VALUES(\(fixtureSQLText(id.uuidString)),\(fixtureSQLText(dogID.uuidString)),1,'complete',\(fixtureSQLText(json)),\(fixtureSQLText(WoonaStore.sha256(Data(json.utf8)))),\(fixtureSQLText(time)),\(superseded));")
+                }
+                for (id, status, end, state) in [(recordID, "completed", fixtureSQLText(time), "synced"), (activeID, "recording", "NULL", "pending")] {
+                    let suffix = (schema.hasAppVersion ? ",'historical-build'" : "") + (schema.hasAccount ? ",4,1" : "")
+                    let path = id == recordID ? directory : directory + "-active"
+                    try fixtureSQL(database, "INSERT INTO recordings VALUES(\(fixtureSQLText(id.uuidString)),\(fixtureSQLText(dogID.uuidString)),\(fixtureSQLText(oldVersion.uuidString)),'live',\(fixtureSQLText(status)),'Historical session',0,\(fixtureSQLText(time)),\(end),'Europe/Moscow',\(fixtureSQLText(sessionJSON)),\(fixtureSQLText(path)),\(fixtureSQLText(state))\(suffix));")
+                }
+                try fixtureSQL(database, "INSERT INTO recording_sync VALUES(\(fixtureSQLText(recordID.uuidString)),\(fixtureSQLText(String(decoding: clock, as: UTF8.self))),\(fixtureSQLText(time)));")
+                for (id, kind, name, bytes) in [(packetID, "packet", "packets.bin", packet), (syncID, "sync", "sync.json", clock)] {
+                    try fixtureSQL(database, "INSERT INTO artifacts VALUES(\(fixtureSQLText(id.uuidString)),\(fixtureSQLText(recordID.uuidString)),\(fixtureSQLText(kind)),\(fixtureSQLText(name)),\(fixtureSQLText(directory + "/" + name)),'application/octet-stream',\(bytes.count),\(fixtureSQLText(WoonaStore.sha256(bytes))),'available',\(bytes.count),\(fixtureSQLText(time))\(schema.hasReference ? ",NULL" : ""));")
+                }
+                var reference = ReferenceMetadata()
+                reference.source = "Synthetic reference"; reference.startedAtUtc = time
+                reference.endedAtUtc = time; reference.offsetFromRecordingMs = -7.001; reference.notes = "Original reference metadata"
+                if schema.hasReference {
+                    let bytes = Data("time,value\n0,1\n".utf8)
+                    try bytes.write(to: folder.appendingPathComponent("ecg.csv"))
+                    let json = String(decoding: try JSONEncoder().encode(reference), as: UTF8.self)
+                    try fixtureSQL(database, "INSERT INTO artifacts VALUES(\(fixtureSQLText(referenceID.uuidString)),\(fixtureSQLText(recordID.uuidString)),'ecg','ecg.csv',\(fixtureSQLText(directory + "/ecg.csv")),'text/csv',\(bytes.count),\(fixtureSQLText(WoonaStore.sha256(bytes))),'available',\(bytes.count),\(fixtureSQLText(time)),\(fixtureSQLText(json)));")
+                }
+                try fixtureSQL(database, "INSERT INTO server_sync_state VALUES(\(fixtureSQLText(recordID.uuidString)),'synced',3,NULL,NULL,NULL,'immutable-receipt',\(fixtureSQLText(time)));")
+                if schema.hasProfileQueue {
+                    try fixtureSQL(database, "INSERT INTO profile_sync_state VALUES(\(fixtureSQLText(currentVersion.uuidString)),'synced',NULL,\(fixtureSQLText(time)));")
+                    try fixtureSQL(database, "INSERT INTO profile_sync_state VALUES(\(fixtureSQLText(oldVersion.uuidString)),'permanent_error','original failure',\(fixtureSQLText(time)));")
+                }
+                if schema.hasRetirementQueue {
+                    try fixtureSQL(database, "INSERT INTO local_deletion_outbox VALUES('existing-cleanup','recordings/already-retired/source.bin','file',\(fixtureSQLText(time)),'original cleanup error');")
+                    try fixtureSQL(database, "INSERT INTO deferred_retirements VALUES('recording','unmatched-authoritative-marker',\(fixtureSQLText(time)));")
+                }
+                for _ in 0..<2 {
+                    let store = try WoonaStore(rootDirectory: root)
+                    XCTAssertEqual(try fixtureScalar(database, "PRAGMA user_version"), "8")
+                    XCTAssertEqual(try fixtureScalar(database, "PRAGMA integrity_check"), "ok")
+                    XCTAssertEqual(try fixtureScalar(database, "SELECT COUNT(*) FROM dog_profile_versions"), "2")
+                    XCTAssertEqual(try store.localInventory().recordings, 2)
+                    let profile = try XCTUnwrap(store.profiles().first)
+                    XCTAssertEqual(profile.id, dogID); XCTAssertEqual(profile.profileVersionID, currentVersion)
+                    XCTAssertEqual(profile.questionnaire, current); XCTAssertEqual(profile.revision, 7)
+                    XCTAssertEqual(profile.accountID, schema.hasAccount ? "fixture-clinic" : nil)
+                    XCTAssertEqual(try store.profile(dogID: dogID, versionID: oldVersion)?.questionnaire, older)
+                    let saved = try XCTUnwrap(store.recording(id: recordID))
+                    XCTAssertEqual(saved.profileVersionID, oldVersion); XCTAssertEqual(saved.startedAtUTC, time)
+                    XCTAssertEqual(saved.endedAtUTC, time); XCTAssertEqual(saved.relativeDirectory, directory)
+                    XCTAssertEqual(saved.serverSyncState, "synced"); XCTAssertEqual(saved.captureErrorCode, "gatt_error")
+                    XCTAssertEqual(saved.questionnaireRevision, schema.hasAccount ? 4 : 1)
+                    XCTAssertEqual(saved.questionnaireDirty, schema.hasAccount)
+                    XCTAssertEqual(saved.appVersion, schema.hasAppVersion ? "historical-build" : nil)
+                    let active = try XCTUnwrap(store.recording(id: activeID))
+                    XCTAssertEqual(active.status, "recording"); XCTAssertNil(active.endedAtUTC)
+                    XCTAssertEqual(try store.syncJSON(recordingID: recordID), clock)
+                    XCTAssertEqual(try fixtureScalar(database, "SELECT server_receipt_sha256 FROM server_sync_state"), "immutable-receipt")
+                    XCTAssertEqual(try store.profileSyncState(versionID: currentVersion), schema.hasProfileQueue ? "synced" : "pending")
+                    XCTAssertEqual(try store.profileSyncState(versionID: oldVersion), schema.hasProfileQueue ? "permanent_error" : "pending")
+                    if schema.hasProfileQueue { XCTAssertEqual(try fixtureScalar(database, "SELECT last_error FROM profile_sync_state WHERE profile_version_id=\(fixtureSQLText(oldVersion.uuidString))"), "original failure") }
+                    let artifacts = try store.artifacts(recordingID: recordID)
+                    XCTAssertEqual(Set(artifacts.map(\.id)), Set([packetID, syncID] + (schema.hasReference ? [referenceID] : [])))
+                    if schema.hasReference { XCTAssertEqual(artifacts.first { $0.id == referenceID }?.referenceMetadata, reference) }
+                    XCTAssertTrue(artifacts.allSatisfy { $0.uploadState == "available" && $0.uploadedBytes == $0.sizeBytes })
+                    XCTAssertEqual(try WoonaStore.sha256File(folder.appendingPathComponent("packets.bin")), WoonaStore.sha256(packet))
+                    XCTAssertEqual(try Data(contentsOf: folder.appendingPathComponent("sync.json")), clock)
+                    XCTAssertEqual(try Data(contentsOf: folder.appendingPathComponent("operator-note.txt")), note)
+                    XCTAssertEqual(try store.retirementCleanupStatus().pendingCount, schema.hasRetirementQueue ? 1 : 0)
+                    XCTAssertEqual(try fixtureScalar(database, "SELECT COUNT(*) FROM deferred_retirements"), schema.hasRetirementQueue ? "1" : "0")
+                }
+            }
+        }
+    }
+
+    func testFailedHistoricalUpgradeRollsBackCreatedTablesAndPreservesFilesAndSchemaVersion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let original = Data("Preserved original before failed migration".utf8)
+        let source = root.appendingPathComponent("original.bin"); try original.write(to: source)
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        try fixtureSQL(database, HistoricalIOSSchema.initial5.sql)
+        // Fault injection: a view cannot receive ALTER TABLE; old metadata remains available.
+        try fixtureSQL(database, "ALTER TABLE artifacts RENAME TO original_artifacts; CREATE VIEW artifacts AS SELECT * FROM original_artifacts;")
+        XCTAssertThrowsError(try WoonaStore(rootDirectory: root))
+        XCTAssertEqual(try fixtureScalar(database, "PRAGMA user_version"), "5")
+        XCTAssertEqual(try fixtureScalar(database, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('profile_sync_state','local_deletion_outbox','deferred_retirements')"), "0")
+        XCTAssertEqual(try fixtureScalar(database, "SELECT type FROM sqlite_master WHERE name='artifacts'"), "view")
+        XCTAssertEqual(try fixtureScalar(database, "PRAGMA integrity_check"), "ok")
+        XCTAssertEqual(try Data(contentsOf: source), original)
+    }
+
     func testServerBaseURLAllowsHttpsAndOnlyExactLocalHttpHosts() throws {
         for input in ["https://example.test", "HTTPS://Example.test:8443/api/root", "https://[2001:db8::1]:8443/api%20root",
                       "http://10.0.2.2:8080", "http://localhost:18088", "http://127.0.0.1:18088", "http://[::1]:18088"] {
@@ -2147,4 +2264,94 @@ private final class NetworkFaultProtocol: URLProtocol, @unchecked Sendable {
         }
         return result
     }
+}
+
+// Provenance is real Git DDL, not a current database with a reduced user_version.
+// iOS was first published at schema 5 (73a0beb); source for versions 1–4 is absent.
+private enum HistoricalIOSSchema: Int, CaseIterable {
+    case initial5, reference5, appVersion5, accounts6, profileQueue7, retirement8
+    var version: Int { self.rawValue < 3 ? 5 : self.rawValue == 3 ? 6 : self.rawValue == 4 ? 7 : 8 }
+    var hasReference: Bool { rawValue >= Self.reference5.rawValue }
+    var hasAppVersion: Bool { rawValue >= Self.appVersion5.rawValue }
+    var hasAccount: Bool { rawValue >= Self.accounts6.rawValue }
+    var hasProfileQueue: Bool { rawValue >= Self.profileQueue7.rawValue }
+    var hasRetirementQueue: Bool { self == .retirement8 }
+    var sql: String {
+        var sql = """
+        CREATE TABLE IF NOT EXISTS dogs(
+        id TEXT PRIMARY KEY,current_profile_version_id TEXT NOT NULL,
+        number_or_name TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 0,
+        created_at_utc TEXT NOT NULL,updated_at_utc TEXT NOT NULL,
+        archived_at_utc TEXT
+        );
+        CREATE TABLE IF NOT EXISTS dog_profile_versions(
+        id TEXT PRIMARY KEY,dog_id TEXT NOT NULL REFERENCES dogs(id),
+        schema_version INTEGER NOT NULL,validation_state TEXT NOT NULL,
+        questionnaire_json TEXT NOT NULL,content_sha256 TEXT NOT NULL,
+        client_created_at_utc TEXT NOT NULL,superseded_at_utc TEXT
+        );
+        CREATE TABLE IF NOT EXISTS recordings(
+        id TEXT PRIMARY KEY,dog_id TEXT NOT NULL REFERENCES dogs(id),
+        dog_profile_version_id TEXT NOT NULL REFERENCES dog_profile_versions(id),
+        source TEXT NOT NULL CHECK(source IN ('live','replay')),
+        status TEXT NOT NULL CHECK(status IN ('preparing','recording','completed','failed','interrupted')),
+        session_label TEXT NOT NULL,video_requested INTEGER NOT NULL,
+        started_at_utc TEXT NOT NULL,ended_at_utc TEXT,timezone TEXT NOT NULL,
+        questionnaire_json TEXT NOT NULL,relative_directory TEXT NOT NULL UNIQUE,
+        server_sync_state TEXT NOT NULL DEFAULT 'pending'
+        );
+        CREATE TABLE IF NOT EXISTS recording_sync(
+        recording_id TEXT PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,
+        sync_json TEXT NOT NULL,updated_at_utc TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS artifacts(
+        id TEXT PRIMARY KEY,recording_id TEXT NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,file_name TEXT NOT NULL,relative_path TEXT NOT NULL,
+        mime_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,
+        upload_state TEXT NOT NULL DEFAULT 'pending',uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+        created_at_utc TEXT NOT NULL,UNIQUE(recording_id,relative_path)
+        );
+        CREATE TABLE IF NOT EXISTS server_sync_state(
+        recording_id TEXT PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,
+        state TEXT NOT NULL DEFAULT 'pending',attempt_count INTEGER NOT NULL DEFAULT 0,
+        next_retry_at_utc TEXT,last_error_code TEXT,last_error_message TEXT,
+        server_receipt_sha256 TEXT,updated_at_utc TEXT NOT NULL
+        );
+        """
+        // reference5: c6a6a5a; appVersion5: 0109d3a; accounts6: d584261.
+        if hasReference { sql += "ALTER TABLE artifacts ADD COLUMN reference_metadata_json TEXT;" }
+        if hasAppVersion { sql += "ALTER TABLE recordings ADD COLUMN app_version TEXT;" }
+        if hasAccount {
+            sql += "ALTER TABLE dogs ADD COLUMN account_id TEXT;"
+            sql += "ALTER TABLE recordings ADD COLUMN questionnaire_revision INTEGER NOT NULL DEFAULT 1;"
+            sql += "ALTER TABLE recordings ADD COLUMN questionnaire_dirty INTEGER NOT NULL DEFAULT 0;"
+        }
+        // profileQueue7: f83fa3b; retirement8: 860cc2b.
+        if hasProfileQueue {
+            sql += "CREATE TABLE profile_sync_state(profile_version_id TEXT PRIMARY KEY REFERENCES dog_profile_versions(id) ON DELETE CASCADE,state TEXT NOT NULL DEFAULT 'pending',last_error TEXT,updated_at_utc TEXT NOT NULL);"
+        }
+        if hasRetirementQueue {
+            sql += "CREATE TABLE local_deletion_outbox(id TEXT PRIMARY KEY,relative_path TEXT NOT NULL,entry_kind TEXT NOT NULL CHECK(entry_kind IN ('directory','file')),created_at_utc TEXT NOT NULL,last_error TEXT,UNIQUE(relative_path,entry_kind));"
+            sql += "CREATE TABLE deferred_retirements(kind TEXT NOT NULL,id_sha256 TEXT NOT NULL,received_at_utc TEXT NOT NULL,PRIMARY KEY(kind,id_sha256));"
+        }
+        return sql + "PRAGMA user_version=\(version);"
+    }
+}
+
+private func fixtureSQL(_ database: OpaquePointer?, _ sql: String) throws {
+    guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+        throw WoonaStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+    }
+}
+
+private func fixtureSQLText(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "''") + "'" }
+
+private func fixtureScalar(_ database: OpaquePointer?, _ sql: String) throws -> String {
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+        throw WoonaStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+    }
+    defer { sqlite3_finalize(statement) }
+    guard sqlite3_step(statement) == SQLITE_ROW else { return "" }
+    return sqlite3_column_type(statement, 0) == SQLITE_NULL ? "" : String(cString: sqlite3_column_text(statement, 0))
 }
