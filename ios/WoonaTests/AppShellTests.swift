@@ -461,7 +461,7 @@ final class AppShellTests: XCTestCase {
         model.setSessionQuestionnairePresented(true)
         let id = try beginHeartPromptReplay(model, root: root, label: "New owned heart")
         try await waitUntil("durable heart completion while preparation sheet is still closing", timeout: 15) {
-            model.activeRecording == nil && model.canStartNewSession && !model.isHistoryLoading && model.pendingPostCaptureHeartQuestionnaire?.id == id
+            model.activeRecording == nil && model.canStartNewSession && model.canChangeAccount && !model.isHistoryLoading && model.pendingPostCaptureHeartQuestionnaire?.id == id
         }
         XCTAssertFalse(model.canPresentPendingHeartQuestionnaire)
         model.presentPendingHeartQuestionnaire()
