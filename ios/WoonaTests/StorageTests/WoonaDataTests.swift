@@ -1306,7 +1306,7 @@ final class WoonaDataTests: XCTestCase {
     }
 
     @MainActor
-    func testTerminalImportedSessionWithoutMachineEndCanRemoveVerifiedFilesButNotAnActiveSession() throws {
+    func testTerminalImportedSessionWithoutMachineEndCanRemoveVerifiedFilesButNotAnActiveSession() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try WoonaStore(rootDirectory: root)
@@ -1330,6 +1330,7 @@ final class WoonaDataTests: XCTestCase {
         record = try XCTUnwrap(store.recording(id: record.id))
         XCTAssertNil(record.endedAtUTC)
         let model = AppViewModel(store: store, uiTesting: true)
+        try await awaitHistoryForTesting(model)
         XCTAssertTrue(model.canRemoveLocalRecording(record))
         try store.markRecording(record.id, status: "recording")
         XCTAssertFalse(model.canRemoveLocalRecording(try XCTUnwrap(store.recording(id: record.id))))
