@@ -658,7 +658,9 @@ final class WoonaDataTests: XCTestCase {
             let previousClient = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test/" + previousOwner, wifiOnly: false), token: "fixture", sessionConfiguration: previousConfig)
             let previous = Task { try await previousClient.deletions() }
             defer { previous.cancel() }
-            try await Task.sleep(nanoseconds: 20_000_000)
+            let previousStartDeadline = Date().addingTimeInterval(2)
+            while !HangingRetirementProtocol.hasStarted(owner: previousOwner), Date() < previousStartDeadline { try await Task.sleep(nanoseconds: 1_000_000) }
+            XCTAssertTrue(HangingRetirementProtocol.hasStarted(owner: previousOwner), "The old request must actually enter startLoading before owner reset")
             let owner = HangingRetirementProtocol.reset()
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [HangingRetirementProtocol.self]
@@ -2697,18 +2699,23 @@ private final class HangingRetirementProtocol: URLProtocol, @unchecked Sendable 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var stopped = 0
     nonisolated(unsafe) private static var owner: String?
+    nonisolated(unsafe) private static var startedOwners: Set<String> = []
     private var didStop = false
     @discardableResult
     static func reset() -> String {
         lock.lock(); defer { lock.unlock() }
         let owner = UUID().uuidString
-        Self.owner = owner; stopped = 0
+        Self.owner = owner; stopped = 0; startedOwners = []
         return owner
     }
     static var stoppedCount: Int { lock.lock(); defer { lock.unlock() }; return stopped }
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "retirement.test" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func startLoading() {}
+    static func hasStarted(owner: String) -> Bool { lock.lock(); defer { lock.unlock() }; return startedOwners.contains(owner) }
+    override func startLoading() {
+        guard let owner = request.url?.pathComponents.dropFirst().first else { return }
+        Self.lock.lock(); Self.startedOwners.insert(owner); Self.lock.unlock()
+    }
     override func stopLoading() {
         Self.lock.lock(); defer { Self.lock.unlock() }
         guard !didStop else { return }
