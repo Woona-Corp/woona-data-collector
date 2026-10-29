@@ -260,7 +260,7 @@ final class WoonaDataTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try WoonaStore(rootDirectory: root)
         let profile = try store.saveProfile(completeDog())
-        _ = try seedHistory(root: root, profile: profile, count: 205)
+        let originalIDs = try seedHistory(root: root, profile: profile, count: 205)
         var other = completeDog(); other.numberOrName = "Another animal"
         let second = try store.saveProfile(other)
         let model = AppViewModel(store: store, uiTesting: true)
@@ -271,11 +271,23 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertEqual(model.recentRecordings.count, 100); XCTAssertEqual(model.historyTotalCount, 205)
         let prefix = model.recentRecordings.map(\.id)
         let inserted = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+        let lateOlder = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        try fixtureSQL(database, "UPDATE recordings SET started_at_utc='1970-01-01T00:00:00Z' WHERE id=\(fixtureSQLText(lateOlder.id.uuidString))")
         model.showMoreRecordings(); try await awaitHistoryForTesting(model)
         XCTAssertEqual(model.recentRecordings.count, 200)
         XCTAssertEqual(model.historyTotalCount, 205, "Unseen new top items must not inflate the current cursor snapshot")
         XCTAssertEqual(Array(model.recentRecordings.prefix(100)).map(\.id), prefix)
+        XCTAssertFalse(model.recentRecordings.contains { $0.id == inserted.id || $0.id == lateOlder.id }, "Neither new top nor new older rows belong to the original page membership")
         XCTAssertEqual(model.nextHistoryPageCount, 5)
+        let removed = fixtureSQLText(originalIDs[0].uuidString)
+        try fixtureSQL(database, "DELETE FROM artifacts WHERE recording_id=\(removed); DELETE FROM recording_sync WHERE recording_id=\(removed); DELETE FROM server_sync_state WHERE recording_id=\(removed); DELETE FROM recordings WHERE id=\(removed)")
+        model.showMoreRecordings(); try await awaitHistoryForTesting(model)
+        XCTAssertEqual(model.recentRecordings.count, 204)
+        XCTAssertEqual(model.historyTotalCount, 205, "A deletion keeps the as-of count until explicit Refresh")
+        XCTAssertFalse(model.hasMoreRecordings)
         model.refreshRecordingHistory(); try await awaitHistoryForTesting(model)
         XCTAssertEqual(model.recentRecordings.count, 100)
         XCTAssertEqual(model.historyTotalCount, 206)
@@ -296,6 +308,30 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertEqual(model.selectedDogProfile?.id, second.id)
         XCTAssertTrue(model.recentRecordings.isEmpty, "The old animal's late read must not repopulate the new animal")
         XCTAssertEqual(model.historyTotalCount, 0)
+    }
+
+    @MainActor
+    func testReusedSQLiteRowIDCannotMakeTheFrozenHistoryCounterImpossible() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        let ids = try seedHistory(root: root, profile: profile, count: 105)
+        let model = AppViewModel(store: store, uiTesting: true)
+        try await awaitHistoryForTesting(model)
+        model.showAllRecordings(); try await awaitHistoryForTesting(model)
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        let removed = fixtureSQLText(ids.last!.uuidString)
+        try fixtureSQL(database, "DELETE FROM artifacts WHERE recording_id=\(removed); DELETE FROM recording_sync WHERE recording_id=\(removed); DELETE FROM server_sync_state WHERE recording_id=\(removed); DELETE FROM recordings WHERE id=\(removed)")
+        let inserted = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+        try fixtureSQL(database, "UPDATE recordings SET started_at_utc='1970-01-01T00:00:00Z' WHERE id=\(fixtureSQLText(inserted.id.uuidString))")
+        model.showMoreRecordings(); try await awaitHistoryForTesting(model)
+        XCTAssertEqual(model.recentRecordings.count, 105)
+        XCTAssertEqual(model.historyTotalCount, 105)
+        XCTAssertFalse(model.hasMoreRecordings)
+        XCTAssertFalse(model.recentRecordings.contains { $0.id == inserted.id }, "A reused ROWID must not add a 106th row to a 105-item snapshot")
     }
 
     @MainActor

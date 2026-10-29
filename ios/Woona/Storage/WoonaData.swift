@@ -500,6 +500,7 @@ enum CaptureFinalizer {
 struct RecordingHistoryCursor: Sendable {
     let sortMillis: Int64
     let id: UUID
+    let rowIDWatermark: Int64
 }
 
 struct RecordingHistoryFiles: Sendable {
@@ -1068,11 +1069,14 @@ final class WoonaStore {
         "COALESCE(CAST(ROUND((CASE WHEN \(column) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN julianday(\(column)) END-2440587.5)*86400000.0) AS INTEGER),-9223372036854775807)"
     }
 
-    func recentRecordings(dogID: UUID, limit: Int? = 10, after: RecordingHistoryCursor? = nil) throws -> [WoonaRecording] {
+    func recentRecordings(dogID: UUID, limit: Int? = 10, after: RecordingHistoryCursor? = nil, rowIDWatermark: Int64? = nil) throws -> [WoonaRecording] {
         let sort = Self.historySortSQL("r.started_at_utc")
         let cursorFilter = after == nil ? "" : " AND (\(sort),r.id)<(?,?)"
+        let watermark = after?.rowIDWatermark ?? rowIDWatermark
+        let watermarkFilter = watermark == nil ? "" : " AND r.rowid<=?"
         var arguments: [SQLiteValue] = [.text(dogID.uuidString)]
         if let after { arguments += [.integer(after.sortMillis), .text(after.id.uuidString)] }
+        if let watermark { arguments.append(.integer(watermark)) }
         arguments.append(.integer(Int64(limit.map { max($0, 0) } ?? -1)))
         let statement = try prepare(
             """
@@ -1083,7 +1087,7 @@ final class WoonaStore {
             FROM recordings r
             LEFT JOIN recording_sync clock ON clock.recording_id=r.id
             LEFT JOIN server_sync_state state ON state.recording_id=r.id
-            WHERE r.dog_id=?\(cursorFilter) ORDER BY \(sort) DESC,r.id DESC LIMIT ?
+            WHERE r.dog_id=?\(cursorFilter)\(watermarkFilter) ORDER BY \(sort) DESC,r.id DESC LIMIT ?
             """,
             arguments
         )
@@ -1106,18 +1110,25 @@ final class WoonaStore {
         try execute("BEGIN")
         do {
             try Task.checkCancellation()
-            let fetched = try recentRecordings(dogID: dogID, limit: max(0, limit) + 1, after: after)
+            let watermark: Int64
+            if let after { watermark = after.rowIDWatermark }
+            else {
+                let statement = try prepare("SELECT COALESCE(MAX(rowid),0) FROM recordings")
+                guard sqlite3_step(statement) == SQLITE_ROW else { let error = sqliteError(); sqlite3_finalize(statement); throw error }
+                watermark = sqlite3_column_int64(statement, 0); sqlite3_finalize(statement)
+            }
+            let fetched = try recentRecordings(dogID: dogID, limit: max(0, limit) + 1, after: after, rowIDWatermark: watermark)
             let rows = Array(fetched.prefix(max(0, limit)))
             var cursor: RecordingHistoryCursor?
             if let last = rows.last {
                 let key = try prepare("SELECT \(Self.historySortSQL()) FROM recordings WHERE id=?", [.text(last.id.uuidString)])
-                if sqlite3_step(key) == SQLITE_ROW { cursor = RecordingHistoryCursor(sortMillis: sqlite3_column_int64(key, 0), id: last.id) }
+                if sqlite3_step(key) == SQLITE_ROW { cursor = RecordingHistoryCursor(sortMillis: sqlite3_column_int64(key, 0), id: last.id, rowIDWatermark: watermark) }
                 sqlite3_finalize(key)
             }
             let total: Int
             if let knownTotalCount { total = knownTotalCount }
             else {
-                let totalStatement = try prepare("SELECT COUNT(*) FROM recordings WHERE dog_id=?", [.text(dogID.uuidString)])
+                let totalStatement = try prepare("SELECT COUNT(*) FROM recordings WHERE dog_id=? AND rowid<=?", [.text(dogID.uuidString), .integer(watermark)])
                 guard sqlite3_step(totalStatement) == SQLITE_ROW else {
                     let error = sqliteError(); sqlite3_finalize(totalStatement); throw error
                 }

@@ -1603,7 +1603,8 @@ final class AppViewModel: ObservableObject {
             return
         }
         let root = store.rootDirectory, dogID = selectedDogProfile?.id, accountID = selectedAccountID
-        let limit = append ? 100 : historyLimit, cursor = append ? historyCursor : nil
+        let limit = append ? min(100, max(0, historyTotalCount - recentRecordings.count)) : historyLimit
+        let cursor = append ? historyCursor : nil
         let knownTotalCount = append ? historyTotalCount : nil
         historyWasAppending = append
         isHistoryLoading = true; historyLoadError = nil
@@ -1645,7 +1646,8 @@ final class AppViewModel: ObservableObject {
                     self.historyLimit = self.recentRecordings.count
                 } else { self.recentRecordings = snapshot.recordings }
                 if !append { self.historyTotalCount = snapshot.totalCount }
-                self.historyCursor = snapshot.cursor; self.historyHasMore = snapshot.hasMore
+                self.historyCursor = snapshot.cursor
+                self.historyHasMore = snapshot.hasMore && self.recentRecordings.count < self.historyTotalCount
                 self.retirementCleanupStatus = snapshot.cleanup
                 self.uploadPending = snapshot.queue.pending; self.uploadRunning = snapshot.queue.uploading
                 self.uploadSynced = snapshot.queue.synced; self.uploadFailed = snapshot.queue.failed; self.uploadLastError = snapshot.queue.lastError
