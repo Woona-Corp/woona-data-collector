@@ -108,8 +108,13 @@ Timer/service templates удалены из текущей конфигурац�
   Ошибки missing/size/hash/unreadable показываются отдельно, без server paths.
   Одновременно работает не более одного audit во всём API/PG cluster; между
   SHA scans по умолчанию минимум 1 second. `429 integrity_check_busy` содержит
-  phase и Retry-After. Миграция 0009 добавляет только одну техническую budget row,
+  phase и Retry-After. Миграция 0009 добавляет только техническую таблицу integrity_check_budget,
   не меняет clinical metadata и не создаёт фонового задания.
+  При откате API на образ до0009 его стандартный CMD с `alembic upgrade head`
+  не запустится: этот старый код не знает текущую revision0009. Существующие
+  clinical tables совместимы со старым API; операторский rollback требует явно
+  запустить старый uvicorn без startup migration. Не выполнять автоматический
+  downgrade/stamp и не удалять таблицу бюджетов ради смены образа.
 - `storage_space_low` / `storage_full` (507) — upload offset не подтверждается
   вперёд. Сохранить исходники, проверить место и после `Retry-After` повторить
   HEAD перед продолжением. По умолчанию сервер оставляет 256 MiB свободного
