@@ -801,6 +801,48 @@ final class WoonaDataTests: XCTestCase {
     }
 
     @MainActor
+    func testProfileQueueAutomaticallyContinuesWhenRecoveryGateClearsAfterNetworkArrival() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(self.completeDog(), accountID: "scope-a")
+            let uploaded = self.expectation(description: "Recovery releases automatic scoped profile upload")
+            uploaded.assertForOverFulfill = true
+            NetworkFaultProtocol.handler = { request in
+                if request.url?.path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                XCTAssertEqual(request.httpMethod, "PUT")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "X-Woona-Account"), "scope-a")
+                XCTAssertTrue(request.url?.path.hasSuffix(profile.profileVersionID.uuidString) == true)
+                uploaded.fulfill()
+                return .init(body: Data(#"{"dogRevision":7}"#.utf8))
+            }
+            let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { account in
+                let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [NetworkFaultProtocol.self]
+                return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
+            })
+            try await awaitHistoryForTesting(model)
+            model.serverToken = "fixture"
+            model.recoverLocalData()
+            XCTAssertTrue(model.isLocalRecoveryRunning)
+            model.updateTransferNetworkPath(available: true, unmetered: true)
+            XCTAssertFalse(model.transferNetworkAllowsWork, "The recovery gate must hold uploads even after network arrival")
+            await self.fulfillment(of: [uploaded], timeout: 20)
+            let deadline = Date().addingTimeInterval(20)
+            while Date() < deadline {
+                if !model.isLocalRecoveryRunning, model.canChangeAccount,
+                   try store.profileSyncState(versionID: profile.profileVersionID) == "synced" { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            XCTAssertFalse(model.isLocalRecoveryRunning)
+            XCTAssertTrue(model.transferNetworkAllowsWork)
+            XCTAssertTrue(model.canChangeAccount, model.serverMutationBlockedReason ?? "Automatic upload did not become idle")
+            XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "synced", model.diagnosticMessages.joined(separator: "\n"))
+            XCTAssertEqual(try store.profiles().first?.revision, 7)
+            XCTAssertEqual(model.profileUploadPending, 0)
+            XCTAssertEqual(model.profileUploadFailed, 0)
+        }
+    }
+
+    @MainActor
     func testBackgroundFirstPathOwnsAndAwaitsAProfileOnlyQueueWithoutSpawningAutosync() async throws {
         try await networkSource { root, _ in
             let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
