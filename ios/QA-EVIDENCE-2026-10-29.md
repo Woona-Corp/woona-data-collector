@@ -177,3 +177,110 @@ installation succeeded before archive. Its log records `ARCHIVE SUCCEEDED` at
 App Store Connect. The upload response states that the package is processing;
 Apple processing completion and internal tester availability require the separate
 exact-version/build status record and are not established by upload success alone.
+
+
+## Apple availability confirmed
+
+[Read-only verification 40951055459](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40951055459)
+confirmed exact version **1.5.1 (13501)** as `VALID`, not expired,
+`IN_BETA_TESTING`, and `available_for_internal_testers=true`. The existing internal
+group contains two testers. No assignment, invitation or role change was requested;
+physical installation is unverified.
+
+During processing, Apple can return a null `buildBetaDetail` relationship. The
+status checker now treats missing optional beta detail as unconfirmed availability
+while retaining mandatory app/version ownership checks. All 32 checker tests and
+the real read-only workflow passed. This is tooling only and changes no app code.
+
+
+## UI startup readiness follow-up
+
+The separate main run40906157293 failed one New UI case (303/304) although the
+same runtime passed the complete release run304/304. Its hierarchy/video did
+not establish the exact cause of the missed initial tap. Test-only `edef729`
+waits for New to exist, be enabled and be hittable after startup, instead of
+using account-field existence as action readiness. It preserves every editor,
+save, new-ID and original-profile assertion and the original editor deadline;
+there is no sleep or repeated tap. A pre-tap hierarchy is retained.
+
+[Focused native run40953077016](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40953077016)
+passed **1/1**, zero failures, **82.058s**. The separate full main run40953076878
+passed 290 unit tests and 13 UI tests, but the new generic setup incorrectly
+required enabled New in the running V2 fixture. This fixture sets
+`isV2PreviewActive=true`, which deliberately makes `canSelectAnimal=false`.
+Test-only `cc28784` excludes only that fixture from animal-action readiness;
+all V2 navigation/chart assertions and deadlines remain unchanged. An independent
+read-only review verified this condition against the fixture and callers.
+
+The first focused pass validates the revised New fixture, not a proven cause of
+every intermittent UI failure; the previous failures remain recorded. These diagnostic changes did not alter Release behavior; the subsequent
+production heart-flow correction below has its own verified1.5.2 release.
+
+
+The next full run40955417805, attempt1, passed 290 unit tests and 13 UI tests,
+including New and V2. The first UI test failed within `app.launch`, before any
+UI assertion. Its exported XCTest session records app PID9574 launched at
+21:18:05.674 UTC and foreground state at21:18:21. The launch-progress request
+started21:18:12.503 but Xcode logged receipt21:19:05.824; the status1 response
+arrived21:19:13.827, **1.277s after** the60.047s waiter timeout. No crash/spin/sample
+report exists among the502 exported diagnostics; the remote interface cannot
+provide a spindump. This demonstrates a delayed launch-progress response, not
+failed New/V2 assertions. Foreground state and absent crash reports alone do
+not prove main-thread responsiveness without a stack. The next launch and all
+remaining13UI cases passed. Only the failed iOS job was rerun on the same source;
+no app change, relaxed assertion, timeout extension or test-level retry was added.
+
+
+## Completed internal follow-up: iOS1.5.2(13601)
+
+The native baseline [40961534011](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40961534011)
+proved a real defect: selecting a dog with a preexisting incomplete heart record
+opened its questionnaire without a new capture. The fixed flow creates one event
+only after that exact capture's durable finalization. One model/root presenter
+handles automatic and manual opening. Fresh recording/profile-version/account and
+pending-retirement checks fence stale targets; dismiss/history cannot recreate an
+event. A profile-version update for the same dog retains the capture owner.
+
+Unrelated queued networking cannot block local post-capture editing or Save; the
+target's own queued/running transfer still fences it. The root waits for actual
+SessionQuestionnaireEditor dismissal before presenting the captured heart form.
+No DB schema or client/server wire format changed. Android1.5.1 already has the
+same capture-owned behavior and does not require another release for this fix.
+
+Verified evidence:
+
+- AppShell [40964460954](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40964460954):56/56 PASS, including actual finalizer, scope/version changes, duplicate stop,
+  fresh manual data, SQL retirement/finalization failure and retry, held unrelated
+  networking plus local Save. Later modal/retirement refinements are covered by
+  the final full gates below.
+- Fixed old-history/manual UI [40964298725](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40964298725):1/1 PASS112.568s; exact persisted record and manual action loaded before the
+  final no-autoform assertion. This does not claim four hidden-tab presenters.
+- Actual preparation-editor handoff [40966993722](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40966993722):1/1 PASS68.050s. The real editor selects Heartbeat/314159 and Continue; an
+  empty synthetic replay exercises failed durable finalization, followed by the
+  root heart form, Later, Animals origin and history with both old/new records.
+  No BLE/camera hardware behavior is claimed.
+- ASan [40967541135](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40967541135)
+  and TSan [40967541042](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40967541042):296/296 each, no sanitizer report. Earlier d6 failures in two export tests were
+  a new fixture's leaked selectedAccountID, not new HTTP401 requests or missing
+  production files. All six new fixtures now restore exact prior account/dog
+  preference values/absence after owned work; original export assertions pass.
+- Full main [40969007238](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40969007238)
+  and release [40969011554](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40969011554):both296unit+16UI=312/312 PASS. Independent session ZIP/SQLite/size/SHA/CRC
+  verification also passed. The final release code is357273b, tag
+  ios-v1.5.2-internal.1; later changes are documentation only.
+
+The signed archive succeeded29Oct23:10:21UTC and upload/export23:11:42UTC.
+The actual uploaded version is **1.5.2**, build **13601**. Read-only Apple
+verification [40971538845](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40971538845)
+confirmed VALID/notexpired/IN_BETA_TESTING and available_for_internal_testers=true;
+the existing internal group has two assigned testers. No assignments, invitations,
+roles or external review were requested. physical_installation_verified=false.
+
+CI now waits for completed simulator boot before xcodebuild, with a180s bound;
+native control40963681018 passed the first Account UI case33.204s after the
+simulator reported93s DataMigration/SystemApp initialization. This does not prove
+all prior first-tap causes or physical-device behavior. The owner cannot currently
+check the real iPhone; physical BLE/camera/background/clock alignment and the
+firmware board remain separate acceptance checks. Authentic iOS schema1–4
+fixtures remain unavailable. Additional discoveries are deferred to the next
+update by the owner's explicit scope freeze.
