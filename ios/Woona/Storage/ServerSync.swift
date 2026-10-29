@@ -32,7 +32,6 @@ struct ServerStorageStatus: Decodable, Sendable {
     }
     struct Admission: Decodable, Sendable {
         let blockingReasons: [String]
-        let existingUploadsMayResume: Bool
     }
     let checkedScope: CheckedScope
     let limits: Limits
@@ -41,6 +40,7 @@ struct ServerStorageStatus: Decodable, Sendable {
     let status: String
     let nextAction: String
     let admission: Admission
+    let existingUploadsMayResume: Bool
 
     func validate(accountID: String?) throws {
         guard checkedScope.accountId == accountID,

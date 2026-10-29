@@ -12,7 +12,8 @@ final class WoonaDataTests: XCTestCase {
             "limits": ["recordingBytes": unlimited ? 0 : 21_474_836_480, "accountBytes": unlimited ? 0 : 107_374_182_400, "freeSpaceReserveBytes": 1_073_741_824],
             "account": ["declaredReservedBytes": 8_589_934_592, "acknowledgedBytes": 1_073_741_824, "remainingQuotaBytes": remaining, "recordings": 6, "artifacts": 18],
             "serverStorage": ["totalBytes": 214_748_364_800, "freeBytes": 21_474_836_480, "freeSpaceReserveBytes": 1_073_741_824, "pendingReservedBytes": 7_516_192_768, "pendingArtifacts": 2, "newReservationAvailableBytes": 12_884_901_888, "scope": "server"],
-            "status": "ready", "nextAction": "none", "admission": ["blockingReasons": [], "existingUploadsMayResume": true]
+            "status": "ready", "nextAction": "continue_upload", "existingUploadsMayResume": true,
+            "admission": ["blockingReasons": [], "newArtifactUpperBoundBytes": 12_884_901_888]
         ])
     }
 
@@ -29,6 +30,7 @@ final class WoonaDataTests: XCTestCase {
         let client = try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: "scope-a"), token: "fixture", sessionConfiguration: config)
         let value = try await client.storageStatus()
         XCTAssertEqual(value.account.acknowledgedBytes, 1_073_741_824)
+        XCTAssertTrue(value.existingUploadsMayResume)
         XCTAssertNil(value.account.remainingQuotaBytes)
         XCTAssertEqual(storageByteText(value.limits.accountBytes, unlimitedWhenZero: true, russian: false), "Unlimited")
         XCTAssertEqual(storageByteText(value.account.remainingQuotaBytes, russian: true), "Без ограничений")
@@ -97,13 +99,16 @@ final class WoonaDataTests: XCTestCase {
 
     func testStorageErrorsRetainQuotaDetailsAndRequestIDWhileUsingLocalizedReasons() throws {
         for (status, code, action) in [(413, "storage_quota_exceeded", "review_server_storage_limits"), (507, "storage_reservation_unavailable", "retry_after_storage_available"), (429, "integrity_check_busy", "retry_later")] {
-            let data = try JSONSerialization.data(withJSONObject: ["detail": ["code": code, "message": "fixture", "requestId": "req-quota-fixture", "nextAction": action, "quotaScope": "account", "limitBytes": 123, "reservedBytes": 100, "requestedBytes": 24]])
-            let raw = ServerSyncError.responseError(status: status, data: data).localizedDescription
-            XCTAssertTrue(raw.contains("req-quota-fixture")); XCTAssertTrue(raw.contains("limitBytes")); XCTAssertTrue(raw.contains(action))
-            XCTAssertNotEqual(recordingUploadErrorText(raw, language: .english), raw)
-            XCTAssertNotEqual(recordingUploadErrorText(raw, language: .russian), raw)
-            XCTAssertNotEqual(transferNextAction(action, ru: false), action)
-            XCTAssertNotEqual(transferNextAction(action, ru: true), action)
+            let detail: [String: Any] = ["code": code, "message": "fixture", "requestId": "req-quota-fixture", "nextAction": action, "quotaScope": "account", "limitBytes": 123, "reservedBytes": 100, "requestedBytes": 24]
+            for body in [detail, ["detail": detail] as [String: Any]] {
+                let data = try JSONSerialization.data(withJSONObject: body)
+                let raw = ServerSyncError.responseError(status: status, data: data).localizedDescription
+                XCTAssertTrue(raw.contains("req-quota-fixture")); XCTAssertTrue(raw.contains("limitBytes")); XCTAssertTrue(raw.contains(action))
+                XCTAssertNotEqual(recordingUploadErrorText(raw, language: .english), raw)
+                XCTAssertNotEqual(recordingUploadErrorText(raw, language: .russian), raw)
+                XCTAssertNotEqual(transferNextAction(action, ru: false), action)
+                XCTAssertNotEqual(transferNextAction(action, ru: true), action)
+            }
         }
         XCTAssertEqual(storageAdmissionText("account_quota_reached", russian: false), "Account storage limit reached")
     }

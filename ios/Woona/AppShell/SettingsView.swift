@@ -310,7 +310,7 @@ private struct ServerStorageDetails: View {
                 }
                 Text(t("Следующее действие: ", "Next action: ") + transferNextAction(value.nextAction, ru: russian))
                 Text(t("Лимиты учитывают заявленные байты незавершённых загрузок. Эти объёмы не подтверждают целостность файлов.", "Quotas include declared bytes of unfinished uploads. These volumes do not verify file integrity.")).font(.caption)
-                if value.admission.existingUploadsMayResume {
+                if value.existingUploadsMayResume {
                     Text(t("Ранее принятые загрузки могут продолжаться.", "Previously accepted uploads may resume.")).font(.caption)
                 }
             }
