@@ -537,13 +537,17 @@ final class WoonaStore {
             .appendingPathComponent("Woona", isDirectory: true)
         self.rootDirectory = base
         if !readOnly { try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true) }
-        let flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) | SQLITE_OPEN_FULLMUTEX
+        // Readers need a lock-capable descriptor beside the app's writer on
+        // Darwin. Enforce read-only SQL with query_only; never CREATE a missing
+        // database or run migrations for a reader connection.
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | (readOnly ? 0 : SQLITE_OPEN_CREATE)
         guard sqlite3_open_v2(base.appendingPathComponent("woona.sqlite").path, &database, flags, nil) == SQLITE_OK else {
             throw WoonaStoreError.sqlite("Unable to open woona.sqlite")
         }
         try execute("PRAGMA foreign_keys=ON")
         sqlite3_busy_timeout(database, 5_000)
-        if !readOnly { try migrate() }
+        if readOnly { try execute("PRAGMA query_only=ON") }
+        else { try migrate() }
     }
 
     deinit { sqlite3_close(database) }

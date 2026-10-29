@@ -242,6 +242,86 @@ final class WoonaDataTests: XCTestCase {
         }
     }
 
+    func testHistoryQueryOnlyConnectionRejectsWritesAndDoesNotCreateMissingDatabase() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            let writer = try WoonaStore(rootDirectory: root)
+            let original = try writer.saveProfile(completeDog())
+            let reader = try WoonaStore(rootDirectory: root, readOnly: true)
+            XCTAssertEqual(try reader.profiles(), [original])
+            XCTAssertThrowsError(try reader.saveProfile(completeDog())) { error in
+                XCTAssertTrue(error.localizedDescription.lowercased().contains("readonly"), error.localizedDescription)
+            }
+            XCTAssertEqual(try writer.profiles(), [original])
+        }
+        let missing = root.appendingPathComponent("missing")
+        XCTAssertThrowsError(try WoonaStore(rootDirectory: missing, readOnly: true))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.appendingPathComponent("woona.sqlite").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path))
+    }
+
+    @MainActor
+    func testQueryOnlyHistoryConnectionChurnDoesNotBreakWriterFileLocks() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let iterations = 256
+        @MainActor func exercise(legacyDescriptor: Bool) async throws -> [String] {
+            let directory = root.appendingPathComponent(legacyDescriptor ? "legacy-control" : "query-only")
+            let writer = try WoonaStore(rootDirectory: directory)
+            let profile = try writer.saveProfile(self.completeDog())
+            let entered = self.expectation(description: "History connection churn ready")
+            let release = DispatchSemaphore(value: 0)
+            let reader = Task.detached(priority: .userInitiated) { () -> [String] in
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 10)
+                var errors: [String] = []
+                for _ in 0..<iterations {
+                    if Task.isCancelled { break }
+                    do {
+                        if legacyDescriptor {
+                            if let error = legacyReadOnlyHistoryOnce(directory) { errors.append(error) }
+                        } else {
+                            let store = try WoonaStore(rootDirectory: directory, readOnly: true)
+                            _ = try store.retirementCleanupStatus()
+                            _ = try store.syncOverview()
+                        }
+                    } catch { errors.append("reader: " + error.localizedDescription) }
+                    await Task.yield()
+                }
+                return errors
+            }
+            defer { reader.cancel(); release.signal() }
+            await self.fulfillment(of: [entered], timeout: 5)
+            release.signal()
+            var writerErrors: [String] = []
+            for _ in 0..<iterations {
+                do { _ = try writer.applyServerDeletions([]) }
+                catch { writerErrors.append("writer: " + error.localizedDescription) }
+                await Task.yield()
+            }
+            let readerErrors = await reader.value
+            if !legacyDescriptor {
+                XCTAssertEqual(try writer.profile(dogID: profile.id, versionID: profile.profileVersionID), profile)
+                XCTAssertEqual(try writer.localInventory().profiles, 1)
+                XCTAssertEqual(try writer.localInventory().recordings, 0)
+            }
+            return writerErrors + readerErrors
+        }
+        let protected = try await exercise(legacyDescriptor: false)
+        XCTAssertTrue(protected.isEmpty, protected.prefix(10).joined(separator: "\n"))
+        // The original failure is timing-dependent. Report the legacy control
+        // without requiring an intermittent platform bug to reproduce every run.
+        let control = try await exercise(legacyDescriptor: true)
+        XCTContext.runActivity(named: "History descriptor negative control") { activity in
+            let report = "iterations=\(iterations) queryOnlyErrors=\(protected.count) legacyDescriptorErrors=\(control.count)\n" + control.prefix(10).joined(separator: "\n")
+            let attachment = XCTAttachment(string: report)
+            attachment.name = "history-lock-churn-control"
+            attachment.lifetime = .keepAlways
+            activity.add(attachment)
+        }
+    }
+
     func testLargeHistoryReadsAreBoundedBulkQueriesWithStableKeysetPages() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -3154,4 +3234,20 @@ private final class RestoreConcurrencyProtocol: URLProtocol, @unchecked Sendable
         Self.lock.lock(); let work = self.work; self.work = nil; Self.lock.unlock()
         work?.cancel()
     }
+}
+
+
+// Negative-control reproduction of the former history descriptor mode. Every
+// handle and statement belongs to this one synchronous call; no raw file I/O.
+private func legacyReadOnlyHistoryOnce(_ root: URL) -> String? {
+    var database: OpaquePointer?
+    let opened = sqlite3_open_v2(root.appendingPathComponent("woona.sqlite").path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+    defer { sqlite3_close(database) }
+    guard opened == SQLITE_OK else { return "legacy open: \(opened)" }
+    sqlite3_busy_timeout(database, 5_000)
+    let sql = "PRAGMA foreign_keys=ON; SELECT count(*) FROM local_deletion_outbox; SELECT count(*) FROM deferred_retirements; SELECT last_error FROM local_deletion_outbox LIMIT 1; SELECT count(*) FROM recordings;"
+    guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+        return "legacy reader: \(String(cString: sqlite3_errmsg(database))) [sqliteExtended=\(sqlite3_extended_errcode(database)), systemErrno=\(sqlite3_system_errno(database))]"
+    }
+    return nil
 }
