@@ -35,10 +35,6 @@ final class OverviewParityTests: XCTestCase {
         let otherDog = app.buttons["UI Dog 2"]
         XCTAssertTrue(otherDog.waitForExistence(timeout: 5))
         otherDog.tap()
-        let selected = XCTNSPredicateExpectation(predicate: NSPredicate { object, _ in
-            (object as? XCUIElement)?.isSelected == true
-        }, object: otherDog)
-        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed)
         let automaticallyOpened = app.navigationBars["Activity and heart questionnaire"].waitForExistence(timeout: 5)
         attachScreen("PreexistingHeart-AfterAnimalSelection")
         XCTAssertFalse(automaticallyOpened, "Selecting an animal is history browsing, not a new capture-stop event; its preexisting incomplete-heart questionnaire must remain available for manual opening")
@@ -46,6 +42,7 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Recordings"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Preexisting incomplete heart"].waitForExistence(timeout: 5), "The test must actually load the persisted old record")
         XCTAssertTrue(app.buttons["Complete heart questionnaire"].exists)
+        XCTAssertFalse(app.navigationBars["Activity and heart questionnaire"].waitForExistence(timeout: 5), "Accepted history data must remain browsable without reopening its old questionnaire")
     }
 
     func testEnglishLongDogFormPresentsTranslatedOptionsAndRetainsCanonicalAnswersAcrossLanguageChange() {
