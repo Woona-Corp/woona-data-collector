@@ -1604,6 +1604,7 @@ final class AppViewModel: ObservableObject {
         }
         let root = store.rootDirectory, dogID = selectedDogProfile?.id, accountID = selectedAccountID
         let limit = append ? 100 : historyLimit, cursor = append ? historyCursor : nil
+        let knownTotalCount = append ? historyTotalCount : nil
         historyWasAppending = append
         isHistoryLoading = true; historyLoadError = nil
 #if DEBUG
@@ -1621,10 +1622,10 @@ final class AppViewModel: ObservableObject {
                         files: [:], syncErrors: [:], cleanup: try reader.retirementCleanupStatus(), queue: try reader.syncOverview())
                 }
                 var rows: [WoonaRecording] = [], files: [UUID: RecordingHistoryFiles] = [:], errors: [UUID: String] = [:]
-                var nextCursor = cursor, remaining = limit, total: Int?, last: RecordingHistorySnapshot?
+                var nextCursor = cursor, remaining = limit, total = knownTotalCount, last: RecordingHistorySnapshot?
                 repeat {
                     try Task.checkCancellation()
-                    let page = try reader.recordingHistorySnapshot(dogID: dogID, limit: min(100, max(1, remaining)), after: nextCursor)
+                    let page = try reader.recordingHistorySnapshot(dogID: dogID, limit: min(100, max(1, remaining)), after: nextCursor, knownTotalCount: total)
                     if total == nil { total = page.totalCount }
                     rows += page.recordings; files.merge(page.files) { _, new in new }; errors.merge(page.syncErrors) { _, new in new }
                     remaining -= page.recordings.count; nextCursor = page.cursor; last = page

@@ -1100,7 +1100,7 @@ final class WoonaStore {
         return result
     }
 
-    func recordingHistorySnapshot(dogID: UUID, limit: Int, after: RecordingHistoryCursor? = nil) throws -> RecordingHistorySnapshot {
+    func recordingHistorySnapshot(dogID: UUID, limit: Int, after: RecordingHistoryCursor? = nil, knownTotalCount: Int? = nil) throws -> RecordingHistorySnapshot {
         // One read transaction keeps record rows, queue messages and artifact
         // progress consistent. Bound IN lists below Apple's older SQLite limits.
         try execute("BEGIN")
@@ -1114,12 +1114,16 @@ final class WoonaStore {
                 if sqlite3_step(key) == SQLITE_ROW { cursor = RecordingHistoryCursor(sortMillis: sqlite3_column_int64(key, 0), id: last.id) }
                 sqlite3_finalize(key)
             }
-            let totalStatement = try prepare("SELECT COUNT(*) FROM recordings WHERE dog_id=?", [.text(dogID.uuidString)])
-            guard sqlite3_step(totalStatement) == SQLITE_ROW else {
-                let error = sqliteError(); sqlite3_finalize(totalStatement); throw error
+            let total: Int
+            if let knownTotalCount { total = knownTotalCount }
+            else {
+                let totalStatement = try prepare("SELECT COUNT(*) FROM recordings WHERE dog_id=?", [.text(dogID.uuidString)])
+                guard sqlite3_step(totalStatement) == SQLITE_ROW else {
+                    let error = sqliteError(); sqlite3_finalize(totalStatement); throw error
+                }
+                total = Int(sqlite3_column_int64(totalStatement, 0))
+                sqlite3_finalize(totalStatement)
             }
-            let total = Int(sqlite3_column_int64(totalStatement, 0))
-            sqlite3_finalize(totalStatement)
             let ids = rows.map(\.id)
             var files: [UUID: RecordingHistoryFiles] = Dictionary(uniqueKeysWithValues: ids.map { ($0, RecordingHistoryFiles()) })
             var errors: [UUID: String] = [:]
