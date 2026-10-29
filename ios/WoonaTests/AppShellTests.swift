@@ -679,14 +679,16 @@ final class AppShellTests: XCTestCase {
         XCTAssertFalse(model.canOpenSessionExport, "Preview controls never offer a false recording export")
     }
 
+    // These shell/chart/packet tests do not use the recording database. Keep
+    // persistent SQLite, NWPathMonitor and automatic recovery out of their setup.
     func testInitialTabIsOverview() {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
 
         XCTAssertEqual(viewModel.selectedTab, .overview)
     }
 
     func testCanSelectEachTopLevelTab() {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
 
         for tab in [AppViewModel.AppTab.overview, .session, .video, .recordings, .settings] {
             viewModel.selectedTab = tab
@@ -701,7 +703,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testReplaySessionDoesNotMarkBleAsConnected() {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
 
         viewModel.applyConnectionState(isConnected: true)
         viewModel.addFoundDevice(BleDevice(id: UUID(), name: "Woona Sensor"))
@@ -720,7 +722,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testFoundDevicesDeduplicateByIdentifier() {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
         let identifier = UUID()
 
         viewModel.addFoundDevice(BleDevice(id: identifier, name: "Original"))
@@ -730,7 +732,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testSettingsSelectionsUpdateState() {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
 
         viewModel.selectedThemeMode = .dark
         viewModel.selectedLanguage = .russian
@@ -742,7 +744,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testRussianLocalizationResolverUpdatesVisibleShellText() {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
 
         XCTAssertEqual(viewModel.text(.overview), "Overview")
         XCTAssertEqual(viewModel.text(.live), "Live")
@@ -757,7 +759,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testInvalidReplayFileDoesNotResetCurrentSession() async throws {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
         let key = ChartStreamKey(sensorType: 2, channel: 1)
         let point = ChartPoint(timeMillis: 1_000, value: 12)
         let fileURL = FileManager.default.temporaryDirectory
@@ -788,7 +790,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testFinishCaptureProcessingDrainsAppQueuedBleFragments() async throws {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
         let packet = makeTestPacket(
             counter: 10,
             timerMillis: 50,
@@ -806,7 +808,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testFailedBleStateFinishesOpenCaptureProcessing() async throws {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
         let packet = makeTestPacket(
             counter: 11,
             timerMillis: 55,
@@ -830,7 +832,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testRestartingCaptureAfterFailureAcceptsNewFragments() async throws {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
         let firstPacket = makeTestPacket(
             counter: 21,
             timerMillis: 100,
@@ -862,7 +864,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testChartSelectionPanZoomAndReset() {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
         let key = ChartStreamKey(sensorType: 2, channel: 1)
         let points = (0..<2_000).map { index in
             ChartPoint(timeMillis: UInt64(index * 1_000), value: Float(index % 200) - 100)
@@ -910,7 +912,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testChartStateRetainsRecentHighVolumeDataOnly() {
-        let viewModel = AppViewModel()
+        let viewModel = AppViewModel(store: nil, uiTesting: true)
         let key = ChartStreamKey(sensorType: 2, channel: 1)
         let points = (0..<100_000).map { index in
             ChartPoint(timeMillis: UInt64(index * 20), value: Float(index % 512) - 256)
