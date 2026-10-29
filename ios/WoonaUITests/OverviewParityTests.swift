@@ -21,8 +21,8 @@ final class OverviewParityTests: XCTestCase {
         // Running V2 intentionally locks animal actions; that scenario waits for
         // its own session/chart controls rather than requiring New to be enabled.
         if app.launchArguments.contains("--ui-testing-v2-charts") { return }
-        // The account field can render before local startup recovery releases
-        // the animal actions. Existence alone does not make a tap actionable.
+        // The account field can render before the animal controls are actionable.
+        // Check the actual control instead of treating field existence as readiness.
         let newDogReady = XCTNSPredicateExpectation(
             predicate: NSPredicate { object, _ in
                 guard let button = object as? XCUIElement else { return false }
@@ -31,7 +31,7 @@ final class OverviewParityTests: XCTestCase {
             object: app.buttons["dog.new"]
         )
         XCTAssertEqual(XCTWaiter.wait(for: [newDogReady], timeout: 15), .completed,
-                       "New dog must become enabled and hittable after local startup recovery")
+                       "New dog must become enabled and hittable after launch")
     }
 
     func testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire() {
