@@ -497,21 +497,52 @@ enum CaptureFinalizer {
     }
 }
 
+struct RecordingHistoryCursor: Sendable {
+    let sortMillis: Int64
+    let id: UUID
+}
+
+struct RecordingHistoryFiles: Sendable {
+    var local = 0
+    var total = 0
+    var uploadedBytes: Int64 = 0
+    var totalBytes: Int64 = 0
+    var verified = 0
+    var needsDownload = false
+}
+
+// The snapshot contains copied value models only. SQLite handles remain on their
+// owning worker and never cross to MainActor.
+struct RecordingHistorySnapshot: @unchecked Sendable {
+    let recordings: [WoonaRecording]
+    let totalCount: Int
+    let cursor: RecordingHistoryCursor?
+    let hasMore: Bool
+    let files: [UUID: RecordingHistoryFiles]
+    let syncErrors: [UUID: String]
+    let cleanup: RetirementCleanupStatus
+    let queue: (pending: Int, uploading: Int, synced: Int, failed: Int, lastError: String?)
+}
+
 final class WoonaStore {
     private var database: OpaquePointer?
+#if DEBUG
+    private(set) var queryCountForTesting = 0
+#endif
     let rootDirectory: URL
 
-    init(rootDirectory: URL? = nil) throws {
+    init(rootDirectory: URL? = nil, readOnly: Bool = false) throws {
         let base = rootDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Woona", isDirectory: true)
         self.rootDirectory = base
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        guard sqlite3_open(base.appendingPathComponent("woona.sqlite").path, &database) == SQLITE_OK else {
+        if !readOnly { try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true) }
+        let flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(base.appendingPathComponent("woona.sqlite").path, &database, flags, nil) == SQLITE_OK else {
             throw WoonaStoreError.sqlite("Unable to open woona.sqlite")
         }
         try execute("PRAGMA foreign_keys=ON")
         sqlite3_busy_timeout(database, 5_000)
-        try migrate()
+        if !readOnly { try migrate() }
     }
 
     deinit { sqlite3_close(database) }
@@ -1033,20 +1064,100 @@ final class WoonaStore {
         } catch { try? FileManager.default.removeItem(at: target); throw error }
     }
 
-    func recentRecordings(dogID: UUID, limit: Int? = 10) throws -> [WoonaRecording] {
+    private static func historySortSQL(_ column: String = "started_at_utc") -> String {
+        "COALESCE(CAST(ROUND((CASE WHEN \(column) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN julianday(\(column)) END-2440587.5)*86400000.0) AS INTEGER),-9223372036854775807)"
+    }
+
+    func recentRecordings(dogID: UUID, limit: Int? = 10, after: RecordingHistoryCursor? = nil) throws -> [WoonaRecording] {
+        let sort = Self.historySortSQL("r.started_at_utc")
+        let cursorFilter = after == nil ? "" : " AND (\(sort),r.id)<(?,?)"
+        var arguments: [SQLiteValue] = [.text(dogID.uuidString)]
+        if let after { arguments += [.integer(after.sortMillis), .text(after.id.uuidString)] }
+        arguments.append(.integer(Int64(limit.map { max($0, 0) } ?? -1)))
         let statement = try prepare(
             """
-            SELECT id,dog_id,dog_profile_version_id,source,status,session_label,
-                   video_requested,started_at_utc,ended_at_utc,timezone,
-                   questionnaire_json,relative_directory,server_sync_state,app_version,questionnaire_revision,questionnaire_dirty
-            FROM recordings WHERE dog_id=? ORDER BY started_at_utc DESC LIMIT ?
+            SELECT r.id,r.dog_id,r.dog_profile_version_id,r.source,r.status,r.session_label,
+                   r.video_requested,r.started_at_utc,r.ended_at_utc,r.timezone,
+                   r.questionnaire_json,r.relative_directory,r.server_sync_state,r.app_version,r.questionnaire_revision,r.questionnaire_dirty,
+                   clock.sync_json,COALESCE(state.last_error_code,'')
+            FROM recordings r
+            LEFT JOIN recording_sync clock ON clock.recording_id=r.id
+            LEFT JOIN server_sync_state state ON state.recording_id=r.id
+            WHERE r.dog_id=?\(cursorFilter) ORDER BY \(sort) DESC,r.id DESC LIMIT ?
             """,
-            [.text(dogID.uuidString), .integer(Int64(limit.map { max($0, 0) } ?? -1))]
+            arguments
         )
         defer { sqlite3_finalize(statement) }
         var result: [WoonaRecording] = []
-        while sqlite3_step(statement) == SQLITE_ROW { result.append(try decodeRecording(statement)) }
+        while true {
+                    let step = sqlite3_step(statement)
+                    if step == SQLITE_DONE { break }
+                    guard step == SQLITE_ROW else { throw sqliteError() }
+            try Task.checkCancellation()
+            let sync = columnOptionalText(statement, 16).map { Data($0.utf8) }
+            result.append(try decodeRecording(statement, syncData: sync, needsRecoveryReview: columnText(statement, 17) == "capture_recovery_requires_review"))
+        }
         return result
+    }
+
+    func recordingHistorySnapshot(dogID: UUID, limit: Int, after: RecordingHistoryCursor? = nil) throws -> RecordingHistorySnapshot {
+        // One read transaction keeps record rows, queue messages and artifact
+        // progress consistent. Bound IN lists below Apple's older SQLite limits.
+        try execute("BEGIN")
+        do {
+            try Task.checkCancellation()
+            let fetched = try recentRecordings(dogID: dogID, limit: max(0, limit) + 1, after: after)
+            let rows = Array(fetched.prefix(max(0, limit)))
+            var cursor: RecordingHistoryCursor?
+            if let last = rows.last {
+                let key = try prepare("SELECT \(Self.historySortSQL()) FROM recordings WHERE id=?", [.text(last.id.uuidString)])
+                if sqlite3_step(key) == SQLITE_ROW { cursor = RecordingHistoryCursor(sortMillis: sqlite3_column_int64(key, 0), id: last.id) }
+                sqlite3_finalize(key)
+            }
+            let totalStatement = try prepare("SELECT COUNT(*) FROM recordings WHERE dog_id=?", [.text(dogID.uuidString)])
+            guard sqlite3_step(totalStatement) == SQLITE_ROW else {
+                let error = sqliteError(); sqlite3_finalize(totalStatement); throw error
+            }
+            let total = Int(sqlite3_column_int64(totalStatement, 0))
+            sqlite3_finalize(totalStatement)
+            let ids = rows.map(\.id)
+            var files: [UUID: RecordingHistoryFiles] = Dictionary(uniqueKeysWithValues: ids.map { ($0, RecordingHistoryFiles()) })
+            var errors: [UUID: String] = [:]
+            for start in stride(from: 0, to: ids.count, by: 500) {
+                try Task.checkCancellation()
+                let page = Array(ids[start..<min(start + 500, ids.count)])
+                let placeholders = Array(repeating: "?", count: page.count).joined(separator: ",")
+                let values = page.map { SQLiteValue.text($0.uuidString) }
+                let artifacts = try prepare("SELECT recording_id,relative_path,size_bytes,uploaded_bytes,upload_state FROM artifacts WHERE recording_id IN (\(placeholders))", values)
+                defer { sqlite3_finalize(artifacts) }
+                while true {
+                    let step = sqlite3_step(artifacts)
+                    if step == SQLITE_DONE { break }
+                    guard step == SQLITE_ROW else { throw sqliteError() }
+                    try Task.checkCancellation()
+                    guard let id = UUID(uuidString: columnText(artifacts, 0)) else { throw WoonaStoreError.invalidData("Invalid history artifact recording ID") }
+                    var summary = files[id] ?? RecordingHistoryFiles()
+                    let exists = FileManager.default.fileExists(atPath: rootDirectory.appendingPathComponent(columnText(artifacts, 1)).path)
+                    let size = max(0, sqlite3_column_int64(artifacts, 2))
+                    summary.total += 1; summary.local += exists ? 1 : 0
+                    summary.totalBytes += size; summary.uploadedBytes += min(max(0, sqlite3_column_int64(artifacts, 3)), size)
+                    if columnText(artifacts, 4) == "available" { summary.verified += 1; summary.needsDownload = summary.needsDownload || !exists }
+                    files[id] = summary
+                }
+                let state = try prepare("SELECT recording_id,COALESCE(NULLIF(last_error_message,''),last_error_code) FROM server_sync_state WHERE state IN ('retryable_error','permanent_error') AND recording_id IN (\(placeholders))", values)
+                defer { sqlite3_finalize(state) }
+                while true {
+                    let step = sqlite3_step(state)
+                    if step == SQLITE_DONE { break }
+                    guard step == SQLITE_ROW else { throw sqliteError() }
+                    try Task.checkCancellation()
+                    if let id = UUID(uuidString: columnText(state, 0)), let error = columnOptionalText(state, 1) { errors[id] = error }
+                }
+            }
+            let snapshot = RecordingHistorySnapshot(recordings: rows, totalCount: total, cursor: cursor, hasMore: fetched.count > rows.count, files: files, syncErrors: errors, cleanup: try retirementCleanupStatus(), queue: try syncOverview())
+            try execute("COMMIT")
+            return snapshot
+        } catch { try? execute("ROLLBACK"); throw error }
     }
 
     func acceptServerProfile(dogID: UUID, version: ServerProfileVersion) throws {
@@ -1611,15 +1722,15 @@ final class WoonaStore {
     }
 
     private func decodeRecording(_ statement: OpaquePointer?) throws -> WoonaRecording {
+        guard let id = UUID(uuidString: columnText(statement, 0)) else { throw WoonaStoreError.invalidData("Invalid recording UUID") }
+        return try decodeRecording(statement, syncData: syncJSON(recordingID: id), needsRecoveryReview: captureRecoveryRequiresReview(id))
+    }
+
+    private func decodeRecording(_ statement: OpaquePointer?, syncData: Data?, needsRecoveryReview: Bool) throws -> WoonaRecording {
         guard let id = UUID(uuidString: columnText(statement, 0)),
               let dogID = UUID(uuidString: columnText(statement, 1)),
-              let versionID = UUID(uuidString: columnText(statement, 2)) else {
-            throw WoonaStoreError.invalidData("Invalid recording UUID")
-        }
-        let sync = try syncJSON(recordingID: id).flatMap {
-            (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
-        }
-        let needsRecoveryReview = try captureRecoveryRequiresReview(id)
+              let versionID = UUID(uuidString: columnText(statement, 2)) else { throw WoonaStoreError.invalidData("Invalid recording UUID") }
+        let sync = syncData.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         return WoonaRecording(
             id: id,
             dogID: dogID,
@@ -1764,6 +1875,7 @@ final class WoonaStore {
             sqlite3_finalize(columns)
             if !found { try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)") }
         }
+        try execute("CREATE INDEX IF NOT EXISTS recordings_history_order ON recordings(dog_id,\(Self.historySortSQL()) DESC,id DESC)")
         try execute("PRAGMA user_version=8")
     }
 
@@ -1790,6 +1902,9 @@ final class WoonaStore {
     }
 
     private func prepare(_ sql: String, _ values: [SQLiteValue] = []) throws -> OpaquePointer? {
+#if DEBUG
+        queryCountForTesting += 1
+#endif
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { throw sqliteError() }
         for (offset, value) in values.enumerated() {

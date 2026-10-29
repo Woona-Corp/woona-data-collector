@@ -419,7 +419,7 @@ struct OverviewView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
+                LazyVStack(alignment: .leading, spacing: 8) {
                 if section == .animals { AccountControls() }
                 if appState.errorMessage != nil {
                     AppCard(title: appState.selectedLanguage == .russian ? "Ошибка" : "Error") {
@@ -508,10 +508,26 @@ struct OverviewView: View {
                 }
 
                 if section == .recordings, let profile = appState.selectedDogProfile {
-                    AppCard(title: appState.selectedLanguage == .russian
-                            ? (appState.showingAllRecordings ? "Все записи" : "Последние 10 записей")
-                            : (appState.showingAllRecordings ? "All recordings" : "Last 10 recordings")) {
-                        if appState.recentRecordings.isEmpty && appState.serverRecordings.isEmpty {
+                    Text(russian ? (appState.showingAllRecordings ? "История записей" : "Последние 10 записей") : (appState.showingAllRecordings ? "Recording history" : "Last 10 recordings"))
+                        .font(.headline)
+                        .accessibilityIdentifier("history.title")
+                    if appState.showingAllRecordings {
+                        Text(russian ? "Показано \(appState.recentRecordings.count) из \(appState.historyTotalCount)" : "Shown \(appState.recentRecordings.count) of \(appState.historyTotalCount)")
+                            .font(.caption).accessibilityIdentifier("history.progress")
+                        Text(russian ? "Новые записи появляются после обновления истории." : "Refresh history to load new recordings.").font(.caption).foregroundStyle(.secondary)
+                        Button(russian ? "Обновить историю" : "Refresh history") { appState.refreshRecordingHistory() }
+                            .disabled(appState.isHistoryLoading).accessibilityIdentifier("history.refresh")
+                    }
+                    if appState.isHistoryLoading {
+                        ProgressView(russian ? "Загрузка истории…" : "Loading history…").accessibilityIdentifier("history.loading")
+                    }
+                    if let error = appState.historyLoadError {
+                        Text((russian ? "История не обновлена. Данные сохранены.\n" : "History could not be refreshed. Data is preserved.\n") + error)
+                            .font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                        Button(russian ? "Повторить загрузку истории" : "Retry loading history") { appState.retryLoadingHistory() }
+                            .accessibilityIdentifier("history.retry").disabled(appState.isHistoryLoading)
+                    }
+                        if !appState.isHistoryLoading && appState.historyLoadError == nil && appState.recentRecordings.isEmpty && appState.serverRecordings.isEmpty {
                             Text(appState.selectedLanguage == .russian ? "У этой собаки пока нет записей" : "No recordings for this dog")
                                 .foregroundStyle(.secondary)
                         }
@@ -519,7 +535,7 @@ struct OverviewView: View {
                             let remote = appState.serverRecordings.first { $0.id == recording.id }
                             let captureCode = recording.captureErrorCode ?? remote?.captureErrorCode
                             let captureMessage = recording.captureErrorMessage ?? remote?.captureErrorMessage
-                            VStack(alignment: .leading, spacing: 8) {
+                            AppCard(title: recording.sessionLabel) {
                                 if ["completed", "failed", "interrupted"].contains(recording.status) {
                                     Button(appState.selectedLanguage == .russian ? "Изменить анкету" : "Edit questionnaire") { editingSession = recording }
                                         .disabled(!appState.canEditQuestionnaire(recording))
@@ -533,7 +549,6 @@ struct OverviewView: View {
                                     .disabled(recording.serverSyncState == "remote" || !appState.canEditQuestionnaire(recording))
                                 }
                                 VStack(alignment: .leading) {
-                                    Text(recording.sessionLabel)
                                     Text(recordingDisplayTime(recording.startedAtUTC)).font(.caption)
                                     Text(profile.numberOrName).font(.caption)
                                     Text(recordingSourceText(recording.source, language: appState.selectedLanguage)).font(.caption)
@@ -585,14 +600,15 @@ struct OverviewView: View {
 
                             }
                         }
-                        if !appState.showingAllRecordings && appState.recentRecordings.count == 10 {
-                            Button(appState.selectedLanguage == .russian ? "Показать все записи" : "Show all recordings") {
-                                appState.showAllRecordings()
-                            }
+                        if !appState.showingAllRecordings && appState.historyTotalCount > 10 {
+                            Button(russian ? "Открыть историю" : "Open history") { appState.showAllRecordings() }
+                                .disabled(appState.isHistoryLoading).accessibilityIdentifier("history.open")
+                        } else if appState.hasMoreRecordings {
+                            Button(russian ? "Показать ещё \(appState.nextHistoryPageCount)" : "Show \(appState.nextHistoryPageCount) more") { appState.showMoreRecordings() }
+                                .disabled(appState.isHistoryLoading || appState.historyLoadError != nil).accessibilityIdentifier("history.more")
                         }
                         ForEach(appState.serverRecordings.filter { remote in !appState.recentRecordings.contains(where: { $0.id == remote.id }) }) { recording in
-                            VStack(alignment: .leading) {
-                                Text(recording.sessionLabel)
+                            AppCard(title: recording.sessionLabel) {
                                 Text(recordingDisplayTime(recording.startedAtUtc)).font(.caption)
                                 Text(recordingSourceText(recording.source, language: appState.selectedLanguage)).font(.caption)
                                 Text(recordingCaptureText(status: recording.captureStatus, code: recording.captureErrorCode, message: recording.captureErrorMessage, language: appState.selectedLanguage)).font(.caption)
@@ -601,8 +617,6 @@ struct OverviewView: View {
                                 if let details = recording.captureErrorMessage { Text(details).font(.caption).textSelection(.enabled) }
                             }
                         }
-                    }
-                    .id(profile.id)
                 }
 
                 if section == .session && !appState.isV2PreviewActive && (appState.isConnectionActive || appState.activeRecording != nil || appState.packetsReceived > 0) {
@@ -674,6 +688,7 @@ struct OverviewView: View {
                 .padding(12)
             }
             .background(Color.woonaBackground)
+            .id(section == .recordings ? appState.selectedDogProfile?.id : nil)
             .safeAreaInset(edge: .top, spacing: 0) {
                 if section == .session { SessionSectionPicker() }
             }

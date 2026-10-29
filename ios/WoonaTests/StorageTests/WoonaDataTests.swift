@@ -5,6 +5,140 @@ import CryptoKit
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    func testLargeHistoryReadsAreBoundedBulkQueriesWithStableKeysetPages() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        let ids = try seedHistory(root: root, profile: profile, count: 1_205)
+        let reader = try WoonaStore(rootDirectory: root, readOnly: true)
+        let started = ProcessInfo.processInfo.systemUptime
+        let before = reader.queryCountForTesting
+        let first = try reader.recordingHistorySnapshot(dogID: profile.id, limit: 100)
+        XCTAssertEqual(first.recordings.count, 100); XCTAssertEqual(first.totalCount, 1_205); XCTAssertTrue(first.hasMore)
+        XCTAssertEqual(first.recordings.map(\.id), Array(ids.reversed().prefix(100)))
+        XCTAssertLessThanOrEqual(reader.queryCountForTesting - before, 12, "History must not query sync/artifacts separately for every recording")
+        let next = try reader.recordingHistorySnapshot(dogID: profile.id, limit: 100, after: first.cursor)
+        XCTAssertEqual(next.recordings.map(\.id), Array(ids.reversed().dropFirst(100).prefix(100)))
+        XCTAssertTrue(Set(first.recordings.map(\.id)).isDisjoint(with: next.recordings.map(\.id)))
+        XCTAssertTrue(next.hasMore)
+        let largeBefore = reader.queryCountForTesting
+        let all = try reader.recordingHistorySnapshot(dogID: profile.id, limit: 1_205)
+        XCTAssertEqual(all.recordings.count, 1_205); XCTAssertFalse(all.hasMore)
+        XCTAssertLessThanOrEqual(reader.queryCountForTesting - largeBefore, 18, "Bulk IN lists must stay bounded while query count scales by chunks, not rows")
+        XCTAssertEqual(all.recordings.first?.captureErrorCode, "gatt_error")
+        XCTAssertEqual(all.syncErrors[ids.last!], "Synthetic preserved upload failure")
+        XCTAssertEqual(all.files[ids.last!]?.local, 1)
+        XCTAssertEqual(all.files[ids.last!]?.uploadedBytes, 3)
+        XCTAssertEqual(all.recordings.first?.endedAtUTC, nil)
+        print("History benchmark: 1,205 records, page100+page100+all bulk reads, \(ProcessInfo.processInfo.systemUptime - started)s")
+    }
+
+    func testHistoryNormalizesMixedTimestampPrecisionAndOffsetsWithoutRewritingOriginals() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        let times = ["2026-10-01T10:00:03Z", "2026-10-01T10:00:03.123Z", "2026-10-01T10:00:03.123456Z", "2026-10-01T13:00:03.123+03:00", "2026-10-01T10:00:03.9Z", "not-a-historical-date"]
+        let ids = try seedHistory(root: root, profile: profile, count: times.count, timestamps: times)
+        let reader = try WoonaStore(rootDirectory: root, readOnly: true)
+        var collected: [WoonaRecording] = [], cursor: RecordingHistoryCursor?
+        repeat {
+            let page = try reader.recordingHistorySnapshot(dogID: profile.id, limit: 2, after: cursor)
+            collected += page.recordings; cursor = page.cursor
+            if !page.hasMore { break }
+        } while cursor != nil
+        XCTAssertEqual(collected.map(\.id), [ids[4], ids[3], ids[2], ids[1], ids[0], ids[5]])
+        XCTAssertEqual(Set(collected.map(\.id)).count, times.count)
+        for (id, time) in zip(ids, times) { XCTAssertEqual(try store.recording(id: id)?.startedAtUTC, time) }
+    }
+
+    @MainActor
+    func testHistoryPaginationRunsOffMainActorAndRejectsLateResultsForAnotherAnimal() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        _ = try seedHistory(root: root, profile: profile, count: 205)
+        var other = completeDog(); other.numberOrName = "Another animal"
+        let second = try store.saveProfile(other)
+        let model = AppViewModel(store: store, uiTesting: true)
+        model.selectDogProfile(profile)
+        try await awaitHistoryForTesting(model)
+        XCTAssertEqual(model.recentRecordings.count, 10)
+        model.showAllRecordings(); try await awaitHistoryForTesting(model)
+        XCTAssertEqual(model.recentRecordings.count, 100); XCTAssertEqual(model.historyTotalCount, 205)
+        let prefix = model.recentRecordings.map(\.id)
+        model.showMoreRecordings(); try await awaitHistoryForTesting(model)
+        XCTAssertEqual(model.recentRecordings.count, 200)
+        XCTAssertEqual(Array(model.recentRecordings.prefix(100)).map(\.id), prefix)
+        XCTAssertEqual(model.nextHistoryPageCount, 5)
+        let entered = expectation(description: "History IO worker entered")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        model.onHistoryReadStartForTesting = { XCTAssertFalse(Thread.isMainThread); entered.fulfill(); release.wait() }
+        model.refreshRecordingHistory()
+        await fulfillment(of: [entered], timeout: 5)
+        model.selectedTab = .settings
+        XCTAssertEqual(model.selectedTab, .settings)
+        XCTAssertTrue(model.isHistoryLoading)
+        model.onHistoryReadStartForTesting = nil
+        model.selectDogProfile(second)
+        release.signal()
+        try await awaitHistoryForTesting(model)
+        XCTAssertEqual(model.selectedDogProfile?.id, second.id)
+        XCTAssertTrue(model.recentRecordings.isEmpty, "The old animal's late read must not repopulate the new animal")
+        XCTAssertEqual(model.historyTotalCount, 0)
+    }
+
+    @MainActor
+    func testHistoryReadFailureDoesNotCreateAnEmptyDatabaseAndCanBeRetried() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        _ = try seedHistory(root: root, profile: profile, count: 12)
+        let model = AppViewModel(store: store, uiTesting: true)
+        try await awaitHistoryForTesting(model)
+        let original = model.recentRecordings.map(\.id)
+        let database = root.appendingPathComponent("woona.sqlite"), held = root.appendingPathComponent("unavailable.sqlite")
+        try FileManager.default.moveItem(at: database, to: held)
+        model.refreshRecordingHistory(); try await awaitHistoryForTesting(model, allowFailure: true)
+        XCTAssertNotNil(model.historyLoadError)
+        XCTAssertEqual(model.recentRecordings.map(\.id), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path), "A read failure must not create a new empty store")
+        try FileManager.default.moveItem(at: held, to: database)
+        model.retryLoadingHistory(); try await awaitHistoryForTesting(model)
+        XCTAssertNil(model.historyLoadError); XCTAssertEqual(model.recentRecordings.map(\.id), original)
+    }
+
+    private func seedHistory(root: URL, profile: DogProfile, count: Int, timestamps: [String]? = nil) throws -> [UUID] {
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        let json = String(decoding: try WoonaStore.sessionQuestionnaireData(completeSession()), as: UTF8.self)
+        try fixtureSQL(database, "BEGIN")
+        let clockJSON = #"{"captureErrorCode":"gatt_error"}"#
+        var ids: [UUID] = []
+        for index in 1...count {
+            let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index))!
+            ids.append(id)
+            let time = timestamps?[index - 1] ?? "2026-10-01T10:00:00.123456Z"
+            let directory = "recordings/\(profile.id.uuidString)/2026-10-01/\(id.uuidString)"
+            try fixtureSQL(database, "INSERT INTO recordings VALUES(\(fixtureSQLText(id.uuidString)),\(fixtureSQLText(profile.id.uuidString)),\(fixtureSQLText(profile.profileVersionID.uuidString)),'live','completed','Synthetic history',0,\(fixtureSQLText(time)),NULL,'Europe/Moscow',\(fixtureSQLText(json)),\(fixtureSQLText(directory)),'permanent_error','fixture',1,0);")
+            try fixtureSQL(database, "INSERT INTO recording_sync VALUES(\(fixtureSQLText(id.uuidString)),\(fixtureSQLText(clockJSON)),\(fixtureSQLText(time)));")
+            try fixtureSQL(database, "INSERT INTO server_sync_state VALUES(\(fixtureSQLText(id.uuidString)),'permanent_error',1,NULL,'fixture_error','Synthetic preserved upload failure',NULL,\(fixtureSQLText(time)));")
+            let path = directory + "/packets.bin"
+            if index == count {
+                try FileManager.default.createDirectory(at: root.appendingPathComponent(directory), withIntermediateDirectories: true)
+                try Data("original".utf8).write(to: root.appendingPathComponent(path))
+            }
+            try fixtureSQL(database, "INSERT INTO artifacts VALUES(\(fixtureSQLText(UUID().uuidString)),\(fixtureSQLText(id.uuidString)),'packet','packets.bin',\(fixtureSQLText(path)),'application/octet-stream',8,'fixture-hash','uploading',3,\(fixtureSQLText(time)),NULL);")
+        }
+        try fixtureSQL(database, "COMMIT")
+        return ids
+    }
+
     func testEveryDocumentedHistoricalSchemaMigratesWithoutChangingOriginalDataOrFiles() throws {
         for schema in HistoricalIOSSchema.allCases {
             try XCTContext.runActivity(named: "Historical iOS \(schema), version \(schema.version)") { _ in
@@ -1631,6 +1765,7 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertEqual(2, (manifest["synchronization"] as? [String: Any])?["schemaVersion"] as? Int)
         XCTAssertEqual(8, metadata.files.count)
         let viewModel = AppViewModel(store: reopened)
+        try await awaitHistoryForTesting(viewModel)
         XCTAssertTrue(viewModel.exportableRecordingIDs.contains(recording.id))
         XCTAssertEqual("HTTP 401: invalid_bearer_token", viewModel.recordingSyncErrors[recording.id])
         viewModel.shareRecording(recording.id)
@@ -2354,4 +2489,15 @@ private func fixtureScalar(_ database: OpaquePointer?, _ sql: String) throws -> 
     defer { sqlite3_finalize(statement) }
     guard sqlite3_step(statement) == SQLITE_ROW else { return "" }
     return sqlite3_column_type(statement, 0) == SQLITE_NULL ? "" : String(cString: sqlite3_column_text(statement, 0))
+}
+
+@MainActor
+private func awaitHistoryForTesting(_ model: AppViewModel, allowFailure: Bool = false) async throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + 20
+    while (model.isHistoryLoading || model.isLocalRecoveryRunning), ProcessInfo.processInfo.systemUptime < deadline {
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTAssertFalse(model.isHistoryLoading, "History read did not finish")
+    XCTAssertFalse(model.isLocalRecoveryRunning, "Local recovery did not finish")
+    if !allowFailure { XCTAssertNil(model.historyLoadError) }
 }

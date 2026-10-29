@@ -53,6 +53,20 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var recordingSyncErrors: [UUID: String] = [:]
     @Published private(set) var recordingUploadProgress: [UUID: (bytes: Int64, total: Int64, verified: Int, files: Int)] = [:]
     @Published private(set) var showingAllRecordings = false
+    @Published private(set) var isHistoryLoading = false
+    @Published private(set) var historyLoadError: String?
+    @Published private(set) var historyTotalCount = 0
+    private var historyLimit = 10
+    private var historyCursor: RecordingHistoryCursor?
+    private var historyHasMore = false
+    private var historyWasAppending = false
+    private var historyGeneration: UInt64 = 0
+    private var historyLoadTask: Task<Void, Never>?
+#if DEBUG
+    var onHistoryReadStartForTesting: (@Sendable () -> Void)?
+#endif
+    var hasMoreRecordings: Bool { showingAllRecordings && historyHasMore }
+    var nextHistoryPageCount: Int { min(100, max(1, historyTotalCount - recentRecordings.count)) }
     @Published private(set) var removingLocalRecordingID: UUID?
     @Published private(set) var downloadingRecordingID: UUID?
     @Published private(set) var activeRecording: WoonaRecording?
@@ -373,7 +387,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    deinit { networkMonitor?.cancel() }
+    deinit { networkMonitor?.cancel(); historyLoadTask?.cancel() }
 
     enum AppTab: Hashable {
         case overview
@@ -413,7 +427,8 @@ final class AppViewModel: ObservableObject {
         guard canSelectAnimal, profile.accountID == selectedAccountID else { return }
         serverRecordings = []
         selectedDogProfile = profile
-        showingAllRecordings = false
+        recentRecordings = []
+        showingAllRecordings = false; historyLimit = 10
         UserDefaults.standard.set(profile.id.uuidString, forKey: "selectedDogID")
         reloadRecentRecordings()
         Task { await reloadServerRecordings() }
@@ -474,7 +489,7 @@ final class AppViewModel: ObservableObject {
                 accountInput = account ?? ""
                 UserDefaults.standard.set(account, forKey: "selectedAccountID")
                 serverRecordings = []
-                showingAllRecordings = false
+                showingAllRecordings = false; historyLimit = 10
                 reloadProfiles()
                 return
             }
@@ -488,7 +503,7 @@ final class AppViewModel: ObservableObject {
                     accountInput = account ?? ""
                     UserDefaults.standard.set(account, forKey: "selectedAccountID")
                     serverRecordings = []
-                    showingAllRecordings = false
+                    showingAllRecordings = false; historyLimit = 10
                     reloadProfiles()
                     let restored = try await client.restoreProfiles(into: store)
                     _ = try await client.restoreRecordings(dogIDs: restored.map(\.id), into: store)
@@ -1251,7 +1266,16 @@ final class AppViewModel: ObservableObject {
 
     // Public for lifecycle refresh and tests. File presence is checked directly;
     // packet counters and saved upload status never stand in for local bytes.
+    private func waitForHistoryIfNeeded() async {
+        while activeRecording == nil && isHistoryLoading && !Task.isCancelled {
+            guard let task = historyLoadTask else { return }
+            await task.value
+        }
+    }
+
     func refreshExportAvailability() async {
+        await waitForHistoryIfNeeded()
+        guard !Task.isCancelled else { return }
         exportAvailabilityReadGeneration &+= 1
         let generation = exportAvailabilityReadGeneration
         let account = selectedAccountID; let animal = selectedDogProfile?.id
@@ -1291,6 +1315,7 @@ final class AppViewModel: ObservableObject {
         exportPhase = .preparingSnapshots
         Task {
             do {
+                await waitForHistoryIfNeeded()
                 discardPreparedExportSnapshot()
                 preparedExport = nil
                 await packetProcessor.flush()
@@ -1480,9 +1505,22 @@ final class AppViewModel: ObservableObject {
     }
 
     func showAllRecordings() {
-        showingAllRecordings = true
+        guard !isHistoryLoading else { return }
+        showingAllRecordings = true; historyLimit = 100
         reloadRecentRecordings()
     }
+
+    func showMoreRecordings() {
+        guard !isHistoryLoading, historyLoadError == nil, hasMoreRecordings else { return }
+        reloadRecentRecordings(append: true)
+    }
+
+    func retryLoadingHistory() { reloadRecentRecordings(append: historyWasAppending) }
+    func refreshRecordingHistory() {
+        historyLimit = showingAllRecordings ? 100 : 10
+        reloadRecentRecordings()
+    }
+
 
     private func reloadProfiles(selecting preferredID: UUID? = nil) {
         guard let store else { return }
@@ -1502,6 +1540,8 @@ final class AppViewModel: ObservableObject {
             let id = preferredID ?? selectedDogProfile?.id
             selectedDogProfile = id.flatMap { id in dogProfiles.first { $0.id == id } } ?? dogProfiles.first
             if previousDogID != selectedDogProfile?.id || previousAccountID != selectedDogProfile?.accountID {
+                showingAllRecordings = false; historyLimit = 10
+                recentRecordings = []
                 serverRecordings = []
                 serverTransferStatuses = [:]; transferStatusErrors = [:]; transferCheckedAt = [:]
             }
@@ -1512,34 +1552,82 @@ final class AppViewModel: ObservableObject {
         } catch { errorMessage = "Failed to load profiles: \(error.localizedDescription)" }
     }
 
-    private func reloadRecentRecordings() {
-        defer { invalidateSessionExportAvailability() }
-        if let cleanup = try? store?.retirementCleanupStatus() { retirementCleanupStatus = cleanup }
-        if let overview = try? store?.syncOverview() {
-            uploadPending = overview.pending; uploadRunning = overview.uploading; uploadSynced = overview.synced; uploadFailed = overview.failed; uploadLastError = overview.lastError
-        }
-        guard let store, let selectedDogProfile else {
-            recentRecordings = []; downloadableRecordingIDs = []; exportableRecordingIDs = []; recordingSyncErrors = [:]; recordingFileCounts = [:]
+    private func reloadRecentRecordings(append: Bool = false) {
+        historyGeneration &+= 1
+        let generation = historyGeneration
+        historyLoadTask?.cancel()
+        invalidateSessionExportAvailability()
+        guard let store, let profile = selectedDogProfile else {
+            recentRecordings = []; downloadableRecordingIDs = []; exportableRecordingIDs = []
+            recordingSyncErrors = [:]; recordingFileCounts = [:]; recordingUploadProgress = [:]
+            historyTotalCount = 0; isHistoryLoading = false; historyLoadError = nil
             return
         }
-        do {
-            recentRecordings = try store.recentRecordings(dogID: selectedDogProfile.id, limit: showingAllRecordings ? nil : 10)
-            downloadableRecordingIDs = []; exportableRecordingIDs = []; recordingSyncErrors = [:]; recordingFileCounts = [:]
-            for recording in recentRecordings {
-                let artifacts = try store.artifacts(recordingID: recording.id)
-                recordingUploadProgress[recording.id] = (artifacts.reduce(0) { $0 + min(max(0, $1.uploadedBytes), $1.sizeBytes) }, artifacts.reduce(0) { $0 + $1.sizeBytes }, artifacts.filter { $0.uploadState == "available" }.count, artifacts.count)
-                let local = artifacts.filter {
-                    FileManager.default.fileExists(atPath: store.rootDirectory.appendingPathComponent($0.relativePath).path)
-                }.count
-                recordingFileCounts[recording.id] = (local, artifacts.count)
-                if artifacts.contains(where: { $0.uploadState == "available" && !FileManager.default.fileExists(atPath: store.rootDirectory.appendingPathComponent($0.relativePath).path) }) {
-                    downloadableRecordingIDs.insert(recording.id)
+        let root = store.rootDirectory, dogID = profile.id, accountID = selectedAccountID
+        let limit = append ? 100 : historyLimit, cursor = append ? historyCursor : nil
+        historyWasAppending = append
+        isHistoryLoading = true; historyLoadError = nil
+#if DEBUG
+        let onStart = onHistoryReadStartForTesting
+#endif
+        historyLoadTask = Task { [weak self] in
+            let worker = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+#if DEBUG
+                onStart?()
+#endif
+                let reader = try WoonaStore(rootDirectory: root, readOnly: true)
+                var rows: [WoonaRecording] = [], files: [UUID: RecordingHistoryFiles] = [:], errors: [UUID: String] = [:]
+                var nextCursor = cursor, remaining = limit, total: Int?, last: RecordingHistorySnapshot?
+                repeat {
+                    try Task.checkCancellation()
+                    let page = try reader.recordingHistorySnapshot(dogID: dogID, limit: min(100, max(1, remaining)), after: nextCursor)
+                    if total == nil { total = page.totalCount }
+                    rows += page.recordings; files.merge(page.files) { _, new in new }; errors.merge(page.syncErrors) { _, new in new }
+                    remaining -= page.recordings.count; nextCursor = page.cursor; last = page
+                    if remaining <= 0 || !page.hasMore || page.recordings.isEmpty { break }
+                    await Task.yield()
+                } while true
+                guard let last else { throw WoonaStoreError.invalidData("History snapshot was not created") }
+                return RecordingHistorySnapshot(recordings: rows, totalCount: total ?? 0, cursor: last.cursor, hasMore: last.hasMore, files: files, syncErrors: errors, cleanup: last.cleanup, queue: last.queue)
+            }
+            do {
+                let snapshot = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                guard let self, !Task.isCancelled, self.historyGeneration == generation,
+                      self.selectedDogProfile?.id == dogID, self.selectedAccountID == accountID else { return }
+                if append {
+                    let existing = Set(self.recentRecordings.map(\.id))
+                    self.recentRecordings += snapshot.recordings.filter { !existing.contains($0.id) }
+                    self.historyLimit = self.recentRecordings.count
+                } else { self.recentRecordings = snapshot.recordings }
+                if !append { self.historyTotalCount = snapshot.totalCount }
+                self.historyCursor = snapshot.cursor; self.historyHasMore = snapshot.hasMore
+                self.retirementCleanupStatus = snapshot.cleanup
+                self.uploadPending = snapshot.queue.pending; self.uploadRunning = snapshot.queue.uploading
+                self.uploadSynced = snapshot.queue.synced; self.uploadFailed = snapshot.queue.failed; self.uploadLastError = snapshot.queue.lastError
+                let counts = snapshot.files.mapValues { (local: $0.local, total: $0.total) }
+                let progress = snapshot.files.mapValues { (bytes: $0.uploadedBytes, total: $0.totalBytes, verified: $0.verified, files: $0.total) }
+                let downloads = Set(snapshot.files.filter { $0.value.needsDownload }.map(\.key))
+                let exports = Set(snapshot.recordings.filter { (snapshot.files[$0.id]?.local ?? 0) > 0 && !["preparing", "recording"].contains($0.status) }.map(\.id))
+                if append {
+                    self.recordingSyncErrors.merge(snapshot.syncErrors) { _, new in new }
+                    self.recordingFileCounts.merge(counts) { _, new in new }; self.recordingUploadProgress.merge(progress) { _, new in new }
+                    self.downloadableRecordingIDs.formUnion(downloads); self.exportableRecordingIDs.formUnion(exports)
+                } else {
+                    self.recordingSyncErrors = snapshot.syncErrors; self.recordingFileCounts = counts; self.recordingUploadProgress = progress
+                    self.downloadableRecordingIDs = downloads; self.exportableRecordingIDs = exports
                 }
-                if local > 0 && !["preparing", "recording"].contains(recording.status) { exportableRecordingIDs.insert(recording.id) }
-                recordingSyncErrors[recording.id] = try store.recordingSyncError(recordingID: recording.id)
+                self.isHistoryLoading = false
+                self.invalidateSessionExportAvailability()
+            } catch is CancellationError {
+                // A newer profile/page/read owns the UI; its state must remain intact.
+            } catch {
+                guard let self, self.historyGeneration == generation, self.selectedDogProfile?.id == dogID,
+                      self.selectedAccountID == accountID else { return }
+                self.isHistoryLoading = false
+                self.historyLoadError = error.localizedDescription
             }
         }
-        catch { showError("Failed to load recordings", error: error) }
     }
 
     private func serverClient() throws -> WoonaServerClient {
