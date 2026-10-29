@@ -64,6 +64,14 @@ final class AppViewModel: ObservableObject {
     private var historyLoadTask: Task<Void, Never>?
 #if DEBUG
     var onHistoryReadStartForTesting: (@Sendable () throws -> Void)?
+    private(set) var pendingSyncTraceForTesting: [String] = []
+    var pendingSyncGuardStateForTesting: String {
+        "cancelled=\(Task.isCancelled) networkAllowed=\(transferNetworkAllowsWork) recovery=\(isLocalRecoveryRunning) tokenPresent=\(!serverToken.isEmpty) storePresent=\(store != nil) profilesInFlight=\(syncingProfileVersionIDs.count) scheduled=\(scheduledSyncCount) historyLoading=\(isHistoryLoading)"
+    }
+    private func tracePendingSyncForTesting(_ message: String) {
+        pendingSyncTraceForTesting.append(message)
+        if pendingSyncTraceForTesting.count > 40 { pendingSyncTraceForTesting.removeFirst(pendingSyncTraceForTesting.count - 40) }
+    }
 #endif
     var hasMoreRecordings: Bool { showingAllRecordings && historyHasMore }
     var historyChangedDuringPagination: Bool { showingAllRecordings && !isHistoryLoading && historyLoadError == nil && !historyHasMore && recentRecordings.count < historyTotalCount }
@@ -641,7 +649,15 @@ final class AppViewModel: ObservableObject {
 
     @discardableResult
     func resumePendingSync() async -> Bool {
-        guard !Task.isCancelled, transferNetworkAllowsWork, !serverToken.isEmpty, let store else { return false }
+        guard !Task.isCancelled, transferNetworkAllowsWork, !serverToken.isEmpty, let store else {
+#if DEBUG
+            tracePendingSyncForTesting("resume rejected: " + pendingSyncGuardStateForTesting)
+#endif
+            return false
+        }
+#if DEBUG
+        tracePendingSyncForTesting("resume entered: " + pendingSyncGuardStateForTesting)
+#endif
         let generation = UUID()
         let configuration = ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID)
         let token = serverToken
@@ -656,12 +672,19 @@ final class AppViewModel: ObservableObject {
                 return self.retirementCheckGeneration == generation && self.serverToken == token &&
                     configuration == ServerConfiguration(baseURL: self.serverBaseURL, wifiOnly: self.serverWifiOnly, accountID: self.selectedAccountID)
             })
+#if DEBUG
+            tracePendingSyncForTesting("retirement response: generationCurrent=\(retirementCheckGeneration == generation) tokenUnchanged=\(token == serverToken)")
+#endif
             guard retirementCheckGeneration == generation, token == serverToken,
                   configuration == ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID) else { return false }
             retirementCheckState = "verified"; retirementCheckedAt = WoonaStore.iso8601(Date())
             retirementCleanupStatus = try store.retirementCleanupStatus()
             var success = true
-            for profile in try store.pendingProfiles() {
+            let pendingProfiles = try store.pendingProfiles()
+#if DEBUG
+            tracePendingSyncForTesting("profiles ready: count=\(pendingProfiles.count)")
+#endif
+            for profile in pendingProfiles {
                 guard !Task.isCancelled else { return false }
                 if !(await uploadProfile(profile)) { success = false }
             }
@@ -670,8 +693,14 @@ final class AppViewModel: ObservableObject {
                 if !(await sync(recording: recording)) { success = false }
             }
             reloadProfiles()
+#if DEBUG
+            tracePendingSyncForTesting("resume completed: success=\(success) " + pendingSyncGuardStateForTesting)
+#endif
             return success && !Task.isCancelled
         } catch {
+#if DEBUG
+            tracePendingSyncForTesting("resume caught: \(error.localizedDescription); generationCurrent=\(retirementCheckGeneration == generation); " + pendingSyncGuardStateForTesting)
+#endif
             if retirementCheckGeneration == generation && retirementCheckState == "checking" {
                 retirementCheckState = serverToken.isEmpty ? "not_checked" : "failed"
                 retirementCheckError = serverToken.isEmpty ? nil : error.localizedDescription
@@ -1713,9 +1742,15 @@ final class AppViewModel: ObservableObject {
     private func uploadProfile(_ profile: DogProfile) async -> Bool {
         guard !Task.isCancelled, transferNetworkAllowsWork, !serverToken.isEmpty, let store,
               !syncingProfileVersionIDs.contains(profile.profileVersionID) else {
+#if DEBUG
+            tracePendingSyncForTesting("profile rejected: alreadySyncing=\(syncingProfileVersionIDs.contains(profile.profileVersionID)); " + pendingSyncGuardStateForTesting)
+#endif
             if !Task.isCancelled { scheduleBackgroundSync() }
             return false
         }
+#if DEBUG
+        tracePendingSyncForTesting("profile upload entered")
+#endif
         uploadingProfileCount += 1
         syncingProfileVersionIDs.insert(profile.profileVersionID)
         defer {
@@ -1729,6 +1764,9 @@ final class AppViewModel: ObservableObject {
             let state = try store.profileSyncState(versionID: profile.profileVersionID)
             return !Task.isCancelled && state == "synced"
         } catch {
+#if DEBUG
+            tracePendingSyncForTesting("profile upload caught: \(error.localizedDescription)")
+#endif
             if !Task.isCancelled {
                 let explanation = recordingUploadErrorText(error.localizedDescription, language: selectedLanguage)
                 showError(explanation == error.localizedDescription ? "Profile upload failed" : explanation, error: error)

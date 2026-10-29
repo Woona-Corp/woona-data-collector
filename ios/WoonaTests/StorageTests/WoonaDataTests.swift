@@ -976,8 +976,9 @@ final class WoonaDataTests: XCTestCase {
             try store.resetFailedSync() // Same persistent reset used by the explicit Retry button.
             reject = false
             let retried = await model.resumePendingSync()
-            XCTAssertTrue(retried)
-            XCTAssertEqual(puts, 2)
+            let retryDiagnostics = ([model.pendingSyncGuardStateForTesting, "retirement=\(model.retirementCheckState): \(model.retirementCheckError ?? "none")"] + model.pendingSyncTraceForTesting + model.diagnosticMessages).joined(separator: "\n")
+            XCTAssertTrue(retried, retryDiagnostics)
+            XCTAssertEqual(puts, 2, retryDiagnostics)
             XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "synced")
             XCTAssertEqual(try store.profiles().first?.revision, 8)
             XCTAssertEqual(model.profileUploadPending, 0)
