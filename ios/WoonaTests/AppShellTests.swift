@@ -1154,7 +1154,8 @@ final class AppShellTests: XCTestCase {
 
     private func waitForHeartPromptLocalIdle(_ model: AppViewModel) async throws {
         try await waitUntil("durable heart finalization and owned history", timeout: 15) {
-            model.activeRecording == nil && model.canStartNewSession && !model.isHistoryLoading
+            model.activeRecording == nil && model.canStartNewSession && !model.isHistoryLoading &&
+                (model.pendingPostCaptureHeartQuestionnaire == nil || model.canPresentPendingHeartQuestionnaire)
         }
     }
 
