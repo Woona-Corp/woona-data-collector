@@ -1613,7 +1613,9 @@ final class AppViewModel: ObservableObject {
               !isCompleteArchiveExporting, exportPhase == nil, preparedExport == nil else { return }
         do {
             guard let fresh = try scopedHeartQuestionnaireRecording(recording) else {
-                showError(selectedLanguage == .russian ? "Анкета не открыта: запись больше недоступна в выбранном аккаунте и у выбранного животного. Обновите историю." : "The questionnaire was not opened: the recording is no longer available for the selected account and animal. Refresh history.", error: nil)
+                let message = selectedLanguage == .russian ? "Анкета не открыта: запись больше недоступна в выбранном аккаунте и у выбранного животного либо ожидает удаления по команде сервера. Обновите историю." : "The questionnaire was not opened: the recording is no longer available for the selected account and animal, or is awaiting server-authorized retirement. Refresh history."
+                if errorMessage == nil { showError(message, error: nil) }
+                else { appendDiagnostic(message) }
                 return
             }
             if pendingPostCaptureHeartQuestionnaire?.id == fresh.id { pendingPostCaptureHeartQuestionnaire = nil }
@@ -1637,6 +1639,7 @@ final class AppViewModel: ObservableObject {
               fresh.dogID == selectedDogProfile?.id,
               ["completed", "failed", "interrupted"].contains(fresh.status),
               fresh.questionnaire?.sessionKind == "heart",
+              try store.hasDeferredRetirement(for: fresh) == false,
               let profile = try store.profile(dogID: fresh.dogID, versionID: fresh.profileVersionID),
               profile.accountID == selectedAccountID else { return nil }
         return fresh

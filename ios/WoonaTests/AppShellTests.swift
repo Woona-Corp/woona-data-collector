@@ -448,11 +448,11 @@ final class AppShellTests: XCTestCase {
 
     func testHeartCapturePromptOwnsFreshFinalizedRecordAndDoesNotReopenAfterDismissal() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
         let store = try WoonaStore(rootDirectory: root)
         let profile = try makeHeartPromptProfile(store, name: "owner")
         let old = try makeOldHeartPromptRecord(store, profile: profile)
         let model = AppViewModel(store: store, uiTesting: true)
+        defer { cleanupHeartPromptFixture(root, model: model) }
         try await waitUntil("initial heart history") { !model.isHistoryLoading }
         XCTAssertNil(model.pendingPostCaptureHeartQuestionnaire)
         XCTAssertNil(model.heartQuestionnairePresentation)
@@ -490,11 +490,11 @@ final class AppShellTests: XCTestCase {
 
     func testHeartCapturePromptClearsPresentedAndQueuedOwnersOnScopeChange() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
         let store = try WoonaStore(rootDirectory: root)
         let first = try makeHeartPromptProfile(store, name: "scope-a")
         let second = try makeHeartPromptProfile(store, name: "scope-b")
         let model = AppViewModel(store: store, uiTesting: true)
+        defer { cleanupHeartPromptFixture(root, model: model) }
         try await waitUntil("scope fixture startup") { !model.isHistoryLoading && model.canChangeAccount }
         model.selectDogProfile(first)
         let firstID = try beginHeartPromptReplay(model, root: root, label: "First scope heart")
@@ -521,10 +521,10 @@ final class AppShellTests: XCTestCase {
 
     func testHeartPresenterRechecksCompletedAnswersAndManualOpeningUsesFreshRecord() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
         let store = try WoonaStore(rootDirectory: root)
         _ = try makeHeartPromptProfile(store, name: "fresh")
         let model = AppViewModel(store: store, uiTesting: true)
+        defer { cleanupHeartPromptFixture(root, model: model) }
         try await waitUntil("fresh fixture startup") { !model.isHistoryLoading }
         let id = try beginHeartPromptReplay(model, root: root, label: "Completed before presentation")
         try await waitForHeartPromptLocalIdle(model)
@@ -546,11 +546,11 @@ final class AppShellTests: XCTestCase {
     func testRetiredHeartCaptureNeverPromptsIncludingDeferredRetirementSQLFailure() async throws {
         for failRetirement in [false, true] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            defer { try? FileManager.default.removeItem(at: root) }
             let store = try WoonaStore(rootDirectory: root)
             let profile = try makeHeartPromptProfile(store, name: "retired")
             let old = try makeOldHeartPromptRecord(store, profile: profile)
             let model = AppViewModel(store: store, uiTesting: true)
+            defer { cleanupHeartPromptFixture(root, model: model) }
             try await waitUntil("retirement fixture startup") { !model.isHistoryLoading }
             if failRetirement {
                 try executeHeartPromptSQL(root, "CREATE TRIGGER fail_heart_retirement BEFORE DELETE ON recordings BEGIN SELECT RAISE(ABORT, 'Injected heart retirement failure'); END")
@@ -564,8 +564,18 @@ final class AppShellTests: XCTestCase {
             model.presentPendingHeartQuestionnaire()
             XCTAssertNil(model.heartQuestionnairePresentation)
             if failRetirement {
-                XCTAssertNotNil(try store.recording(id: id), "The failed retirement transaction must preserve its durable recording")
+                let retained = try XCTUnwrap(store.recording(id: id), "The failed retirement transaction must preserve its durable recording")
                 XCTAssertTrue(model.errorMessage?.contains("Injected heart retirement failure") == true)
+                try await waitUntil("retired row manual eligibility fence settled") { model.canChangeAccount }
+                XCTAssertTrue(model.canEditQuestionnaire(retained), "This refusal must come from the exact retirement marker, not an unrelated busy gate")
+                let originalError = model.errorMessage
+                let artifacts = try store.artifacts(recordingID: id)
+                let originalHashes = try artifacts.map { try WoonaStore.sha256File(root.appendingPathComponent($0.relativePath)) }
+                model.presentHeartQuestionnaire(for: retained)
+                XCTAssertNil(model.heartQuestionnairePresentation)
+                XCTAssertEqual(model.errorMessage, originalError, "The specific cleanup failure remains visible after manual refusal")
+                XCTAssertEqual(try store.recording(id: id), retained)
+                XCTAssertEqual(try artifacts.map { try WoonaStore.sha256File(root.appendingPathComponent($0.relativePath)) }, originalHashes)
                 try executeHeartPromptSQL(root, "DROP TRIGGER fail_heart_retirement")
                 _ = try store.applyDeferredServerDeletions()
             }
@@ -578,11 +588,11 @@ final class AppShellTests: XCTestCase {
 
     func testHeartPromptWaitsForDurableFinalizationAndFailedWriteCanBeRetried() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
         let store = try WoonaStore(rootDirectory: root)
         _ = try makeHeartPromptProfile(store, name: "failed-finalizer")
         try executeHeartPromptSQL(root, "CREATE TRIGGER fail_heart_finalization BEFORE UPDATE OF status ON recordings WHEN NEW.status IN ('completed','failed','interrupted') BEGIN SELECT RAISE(ABORT, 'Injected heart finalization failure'); END")
         let model = AppViewModel(store: store, uiTesting: true)
+        defer { cleanupHeartPromptFixture(root, model: model) }
         try await waitUntil("failed finalizer fixture startup") { !model.isHistoryLoading }
         let id = try beginHeartPromptReplay(model, root: root, label: "Retry finalization")
         try await waitUntil("explicit durable finalization failure", timeout: 15) {
@@ -603,7 +613,6 @@ final class AppShellTests: XCTestCase {
 
     func testNewHeartPromptAndLocalSaveDoNotWaitForUnrelatedPendingNetworkWork() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
         let store = try WoonaStore(rootDirectory: root)
         let profile = try makeHeartPromptProfile(store, name: "held-network")
         try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
@@ -613,6 +622,7 @@ final class AppShellTests: XCTestCase {
         defer { HeartPromptHoldingProtocol.release(host) }
         let client = try WoonaServerClient(configuration: ServerConfiguration(baseURL: "https://" + host, wifiOnly: false), token: "synthetic", sessionConfiguration: configuration)
         let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { _ in client })
+        defer { cleanupHeartPromptFixture(root, model: model) }
         model.serverBaseURL = "https://" + host; model.serverToken = "synthetic"; model.serverWifiOnly = false
         model.updateTransferNetworkPath(available: true, unmetered: true)
         var capturedError: Error?
@@ -1137,6 +1147,14 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(viewModel.chart.viewportStartMillis, 1_969_980)
         XCTAssertEqual(viewModel.chart.viewportEndMillis, 1_999_980)
     }
+    private func cleanupHeartPromptFixture(_ root: URL, model: AppViewModel) {
+        guard model.activeRecording == nil, model.canChangeAccount, !model.isHistoryLoading, model.canStartNewSession else {
+            NSLog("Synthetic heart fixture retained because owned work has not finished: %@", root.lastPathComponent)
+            return
+        }
+        try? FileManager.default.removeItem(at: root)
+    }
+
     private func makeHeartPromptProfile(_ store: WoonaStore, name: String) throws -> DogProfile {
         var questionnaire = DogQuestionnaire()
         questionnaire.schemaVersion = 2; questionnaire.animalId = "heart-" + name; questionnaire.numberOrName = name

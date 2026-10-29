@@ -1286,6 +1286,17 @@ final class WoonaStore {
         return result
     }
 
+    func hasDeferredRetirement(for recording: WoonaRecording) throws -> Bool {
+        let statement = try prepare("SELECT 1 FROM deferred_retirements WHERE (kind='recording' AND id_sha256=?) OR (kind='dog' AND id_sha256=?) LIMIT 1", [
+            .text(Self.sha256(Data(recording.id.uuidString.lowercased().utf8))),
+            .text(Self.sha256(Data(recording.dogID.uuidString.lowercased().utf8))),
+        ])
+        defer { sqlite3_finalize(statement) }
+        let step = sqlite3_step(statement)
+        guard step == SQLITE_ROW || step == SQLITE_DONE else { throw sqliteError() }
+        return step == SQLITE_ROW
+    }
+
     @discardableResult
     func applyDeferredServerDeletions() throws -> Int { try applyServerDeletions([]) }
 
