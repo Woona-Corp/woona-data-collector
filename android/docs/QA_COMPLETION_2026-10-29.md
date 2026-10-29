@@ -86,24 +86,32 @@ and the already-running server integrity check. Presentation wording matches iOS
 
 ## Validation
 
-- 269 JVM tests passed, including the complete current-form literal inventory,
-  v1/v2 validation messages, account scope epochs, formatting, bounded parallel
-  ordering, and fatal cancellation.
-- Debug APK and instrumented APK assembled; debug v2 signature verified.
-- Full API 31 native runner: 150 discovered; 146 passed, 4 assumption-skipped,
-  zero failures, 135 seconds. Skips require an explicitly supplied local API or
-  production diagnostic credential. No production credential was supplied.
-- The executed native cases include the 18 new localization/migration/history
-  checks, 5 storage parser/UI/request checks, and 2 restore HTTP concurrency/
-  cancellation checks. Existing app recreation/navigation and file-safety tests
-  passed as part of the full runner. This does not prove physical BLE or camera
-  hardware behavior; emulator camera/video tests use synthetic inputs.
-- After final refinements, all 14 affected local native cases passed (4 history
-  database, 4 history UI, 6 storage/parser/shared-wire fixture). They also cover
-  late backdated inserts, deletions, and strict integer parsing.
-- On an exclusively owned disposable API/PostgreSQL fixture, all 4 integration
-  class cases passed: 3 real API/WorkManager cases plus embedded-default settings.
-  They include account/other/unassigned storage scope, invalid/revoked/secondary
+The final repository gate is green: [Android full CI 40890162641](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40890162641)
+on `75cb00db515aa2517a41d6ea914fbe4e1e503471`, version 1.5.1 (code 14).
+The Android job completed in 12m15s and ran the required
+`android/tools/check.sh full` tasks: JVM tests, lint, debug build, and managed
+API 31 native tests. The debug APK and diagnostic artifacts were uploaded;
+its Android Debug certificate and v2 signature were verified. This is a CI debug
+artifact, not proof of a signed release or tester distribution.
+
+- JVM: 269 passed, zero failures/errors/skips. Coverage includes the complete
+  current-form literal inventory, v1/v2 validation messages, scope epochs,
+  formatting, bounded parallel ordering, and fatal cancellation.
+- Managed API 31: 153 discovered; 149 passed, 4 assumption-skipped, zero
+  failures/errors. The skipped cases are the three external API/WorkManager
+  integration methods and the production-credential diagnostic. This CI job
+  deliberately does not start an API or supply credentials.
+- The executed native cases include all eight migration inputs, four long-form
+  localization cases, four history database cases, four history UI cases, six
+  storage/parser/shared-wire cases, and two restore HTTP concurrency/cancellation
+  cases. App recreation, navigation and file-safety tests also passed.
+- Lint: zero errors, 61 nonblocking warnings. The green gate does not mean a
+  warning-free report.
+- Separately, on an exclusively owned disposable API/PostgreSQL fixture, all
+  three real external API/WorkManager cases passed. The same four-case class also
+  passed its embedded-default settings case. These results are independent of
+  the three CI assumption-skips, not additional external cases run by that CI.
+  They cover account/other/unassigned storage scope, invalid/revoked/secondary
   auth, real worker 401 UI and Retry, persisted injected 503 and automatic retry,
   timeout recovery, upload/restore, range/ETag resumption and downloaded bytes.
   Production credential diagnostics remain unexecuted.
@@ -113,11 +121,11 @@ and the already-running server integrity check. Presentation wording matches iOS
   wrong card or two independent 401 messages. Clock-driven waiting uses the
   original 10-second deadline; semantic card scrolling/scoping proves the actual
   queue error and Retry action. Product startup locking was not changed.
-- `docker compose config -q` passed.
-- Required `android/tools/check.sh fast` and `full` were attempted. Local lint
-  cannot resolve existing Compose 1.7.0 desktop POM metadata from the offline
-  dependency mirror; normal dependency resolution also stalled. No dependencies
-  or tool versions were changed. Compilation, JVM tests, APK signing and the
-  complete directly executed native suite above ran successfully. CI must supply
-  the complete dependency metadata and run the repository lint/managed-device
-  wrapper before claiming that wrapper green.
+- `docker compose config -q` passed locally. Earlier local `fast`/`full` wrapper
+  attempts were blocked by missing existing Compose 1.7.0 desktop POM metadata
+  in the offline dependency mirror; normal resolution also stalled. The final
+  online CI full gate above resolves that local verification limitation. No
+  dependencies or tool versions were changed to work around the cache.
+
+No physical BLE, camera hardware, or synchronization accuracy is proved by these
+emulator checks. Emulator camera/video tests use synthetic inputs.
