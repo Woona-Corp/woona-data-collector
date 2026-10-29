@@ -646,15 +646,25 @@ final class WoonaDataTests: XCTestCase {
         try await networkSource { root, _ in
             let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
             _ = try store.saveProfile(completeDog())
-            HangingRetirementProtocol.reset()
+            let previousOwner = HangingRetirementProtocol.reset()
+            let previousConfig = URLSessionConfiguration.ephemeral
+            previousConfig.protocolClasses = [HangingRetirementProtocol.self]
+            let previousClient = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test/" + previousOwner, wifiOnly: false), token: "fixture", sessionConfiguration: previousConfig)
+            let previous = Task { try await previousClient.deletions() }
+            defer { previous.cancel() }
+            try await Task.sleep(nanoseconds: 20_000_000)
+            let owner = HangingRetirementProtocol.reset()
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [HangingRetirementProtocol.self]
-            let client = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test", wifiOnly: false), token: "fixture", sessionConfiguration: configuration)
+            let client = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test/" + owner, wifiOnly: false), token: "fixture", sessionConfiguration: configuration)
             let started = ProcessInfo.processInfo.systemUptime
             do { _ = try await client.reconcileDeletions(into: store, timeout: 0.02); XCTFail("A hanging maintenance request must be bounded") }
             catch let error as URLError { XCTAssertEqual(error.code, .timedOut) }
             XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2,
                               "Timeout returns without waiting for the uncooperative URLProtocol")
+            previous.cancel()
+            do { _ = try await previous.value; XCTFail("Previous request must also cancel") }
+            catch is CancellationError {}
             let deadline = Date().addingTimeInterval(5)
             while HangingRetirementProtocol.stoppedCount == 0, Date() < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
             XCTAssertEqual(HangingRetirementProtocol.stoppedCount, 1)
@@ -669,10 +679,10 @@ final class WoonaDataTests: XCTestCase {
         try await networkSource { root, _ in
             let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
             _ = try store.saveProfile(completeDog())
-            HangingRetirementProtocol.reset()
+            let owner = HangingRetirementProtocol.reset()
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [HangingRetirementProtocol.self]
-            let client = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test", wifiOnly: false), token: "fixture", sessionConfiguration: configuration)
+            let client = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test/" + owner, wifiOnly: false), token: "fixture", sessionConfiguration: configuration)
             let check = Task { try await client.reconcileDeletions(into: store) }
             try await Task.sleep(nanoseconds: 20_000_000)
             let cancelledAt = ProcessInfo.processInfo.systemUptime
@@ -752,15 +762,18 @@ final class WoonaDataTests: XCTestCase {
                 return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
             })
             model.updateTransferNetworkPath(available: true, unmetered: true)
-            for _ in 0..<100 {
-                if model.canChangeAccount { break }
-                await Task.yield() // Flush startup path scheduling while token remains empty.
-            }
-            XCTAssertTrue(model.canChangeAccount)
+            // Real worker IO can outlive an arbitrary number of MainActor yields,
+            // especially with TSan. Finish startup reads and the token-empty
+            // scheduled network pass before invoking this lower-level API.
+            try await awaitHistoryForTesting(model)
+            let readyDeadline = Date().addingTimeInterval(10)
+            while !model.canChangeAccount, Date() < readyDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertTrue(model.canChangeAccount, model.serverMutationBlockedReason ?? "Startup did not become ready")
+            XCTAssertTrue(model.transferNetworkAllowsWork)
             model.serverToken = "fixture"
             let rejected = await model.resumePendingSync()
             XCTAssertFalse(rejected)
-            XCTAssertEqual(puts, 1)
+            XCTAssertEqual(puts, 1, model.diagnosticMessages.joined(separator: "\n"))
             XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "permanent_error")
             XCTAssertEqual(model.profileUploadFailed, 1)
             XCTAssertFalse(model.uploadQueueExplanation.contains("queue is empty"))
@@ -2635,12 +2648,27 @@ private final class LoopbackArtifactHTTPServer: @unchecked Sendable {
 private final class HangingRetirementProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var stopped = 0
-    static func reset() { lock.lock(); stopped = 0; lock.unlock() }
+    nonisolated(unsafe) private static var owner: String?
+    private var didStop = false
+    @discardableResult
+    static func reset() -> String {
+        lock.lock(); defer { lock.unlock() }
+        let owner = UUID().uuidString
+        Self.owner = owner; stopped = 0
+        return owner
+    }
     static var stoppedCount: Int { lock.lock(); defer { lock.unlock() }; return stopped }
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "retirement.test" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {}
-    override func stopLoading() { Self.lock.lock(); Self.stopped += 1; Self.lock.unlock() }
+    override func stopLoading() {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard !didStop else { return }
+        didStop = true
+        // Requests from another test can receive stopLoading after this reset.
+        // The immutable synthetic owner travels in the request's URL prefix.
+        if request.url?.pathComponents.dropFirst().first == Self.owner { Self.stopped += 1 }
+    }
 }
 
 private final class RecordingSyncProtocol: URLProtocol, @unchecked Sendable {
