@@ -145,6 +145,8 @@ final class WoonaDataTests: XCTestCase {
             }
         }
         XCTAssertEqual(storageAdmissionText("account_quota_reached", russian: false), "Account storage limit reached")
+        XCTAssertEqual(recordingUploadErrorText("account_quota_reached", language: .english), "Account storage limit reached")
+        XCTAssertEqual(recordingUploadErrorText("account_quota_reached", language: .russian), "Лимит хранения аккаунта исчерпан")
     }
 
     @MainActor
