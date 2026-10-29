@@ -16,18 +16,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError as SchemaValidationError
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from server.safety import (LOCAL_ONLY_TOKEN, active_entity_sql, append_upload,
                            identity_lock, production_auth_guard)
+from server.integrity_audit import audit_limits, integrity_page
+from server.storage_policy import (check_account_assignment, reserve_artifact, reserve_manifest,
+                                   reservation_lock, storage_status, limits as storage_limits)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -393,6 +396,8 @@ def ensure_device() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global dog_validator, session_validator
+    storage_limits()
+    audit_limits()
     with engine.connect() as connection:
         production_auth_guard(connection, DEBUG_TOKEN)
     STORAGE_ROOT.joinpath("incoming").mkdir(parents=True, exist_ok=True)
@@ -879,9 +884,11 @@ def validate_artifact(artifact: ArtifactPayload) -> None:
         raise HTTPException(422, detail={"code": "unexpected_reference_metadata"})
 
 
-def insert_artifact(connection: Connection, recording_id: uuid.UUID, artifact: ArtifactPayload, uploader: uuid.UUID | None = None) -> None:
+def insert_artifact(connection: Connection, recording_id: uuid.UUID, artifact: ArtifactPayload, uploader: uuid.UUID | None = None, *, reservation_checked: bool = False) -> None:
     ensure_not_retired(connection, "recording", recording_id)
     ensure_not_retired(connection, "artifact", artifact.id)
+    if not reservation_checked:
+        reserve_artifact(connection, STORAGE_ROOT, recording_id, artifact)
     connection.execute(text("""
         INSERT INTO artifacts(id,recording_id,artifact_type,file_name,mime_type,
             expected_size_bytes,sha256,storage_status,client_created_at,reference_metadata,uploaded_by_device_id)
@@ -1004,6 +1011,7 @@ def put_recording(
             account,
         )
         if existing is None:
+            reserve_manifest(connection, STORAGE_ROOT, recording_id, account, manifest.artifacts)
             recording = manifest.recording
             connection.execute(
                 text(
@@ -1050,7 +1058,7 @@ def put_recording(
             )
             insert_sync(connection, recording_id, manifest.sync)
             for artifact in manifest.artifacts:
-                insert_artifact(connection, recording_id, artifact)
+                insert_artifact(connection, recording_id, artifact, reservation_checked=True)
         else:
             rows = connection.execute(
                 text(
@@ -1062,6 +1070,7 @@ def put_recording(
                 {"recording": recording_id},
             ).mappings()
             existing_artifacts = {row["id"]: row for row in rows}
+            additions = []
             for artifact in manifest.artifacts:
                 row = existing_artifacts.get(artifact.id)
                 if row is None and artifact.type in REFERENCE_TYPES:
@@ -1069,7 +1078,7 @@ def put_recording(
                         {"id": artifact.id, "recording": recording_id, "name": artifact.file_name}).first()
                     if conflict:
                         raise HTTPException(409, detail={"code": "immutable_artifact_conflict"})
-                    insert_artifact(connection, recording_id, artifact)
+                    additions.append(artifact)
                     continue
                 if (
                     row is None
@@ -1082,6 +1091,9 @@ def put_recording(
                     raise HTTPException(
                         409, detail={"code": "immutable_artifact_conflict"}
                     )
+            reserve_manifest(connection, STORAGE_ROOT, recording_id, account, additions)
+            for artifact in additions:
+                insert_artifact(connection, recording_id, artifact, reservation_checked=True)
         result_rows = connection.execute(
             text(
                 """
@@ -1230,6 +1242,7 @@ async def patch_artifact(
                     os.fsync(output.fileno())
                 actual = current
             elif actual < current:
+                reservation_lock(connection)
                 current = actual
                 connection.execute(
                     text(
@@ -1322,6 +1335,7 @@ def complete_artifact(
                 for chunk in iter(lambda: source.read(1024 * 1024), b""):
                     digest.update(chunk)
             if digest.hexdigest() != row["sha256"]:
+                reservation_lock(connection)
                 with candidate.open("r+b") as output:
                     output.truncate(0)
                     output.flush()
@@ -1476,6 +1490,8 @@ def assign_dog_account(dog_id: uuid.UUID, payload: AccountAssignment,
         if dog.account_id is not None and dog.account_id != identifier:
             raise HTTPException(409, detail={"code": "dog_account_conflict", "message": "Dog already belongs to another account"})
         ensure_account(connection, identifier)
+        if dog.account_id != identifier:
+            check_account_assignment(connection, dog_id, identifier)
         connection.execute(text("UPDATE dogs SET account_id=:account,updated_at=now() WHERE id=:id"),
                            {"id": dog_id, "account": identifier})
     return {"dogId": str(dog_id), "accountId": identifier}
@@ -1912,46 +1928,28 @@ def download_artifact(
     )
 
 
+@app.get("/v1/storage-status")
+def get_storage_status(
+    device_id: Annotated[uuid.UUID, Depends(authenticated_device)],
+    account: Annotated[str | None, Depends(selected_account)] = None,
+) -> dict[str, Any]:
+    with engine.begin() as connection:
+        return storage_status(connection, STORAGE_ROOT, account)
+
+
 @app.get("/v1/integrity")
 def integrity(
     device_id: Annotated[uuid.UUID, Depends(authenticated_device)],
     account: Annotated[str | None, Depends(selected_account)] = None,
+    mode: Literal["metadata", "sha256"] = "sha256",
+    limit: Annotated[int | None, Query(ge=1, le=100)] = None,
+    cursor: uuid.UUID | None = None,
 ) -> dict[str, Any]:
-    problems: list[dict[str, str]] = []
-    hashed_artifacts = 0
-    hashed_bytes = 0
-    with engine.connect() as connection:
-        rows = connection.execute(
-            text(
-                """
-                SELECT a.id,a.server_relative_path,a.expected_size_bytes,a.sha256
-                FROM artifacts a JOIN recordings r ON r.id=a.recording_id
-                JOIN dogs d ON d.id=r.dog_id
-                WHERE a.storage_status='available'
-                  AND d.account_id IS NOT DISTINCT FROM CAST(:account AS text)
-                """
-            ),
-            {"account": account},
-        ).mappings().all()
-    for row in rows:
-        path = (STORAGE_ROOT / row["server_relative_path"]).resolve()
-        if STORAGE_ROOT not in path.parents or not path.is_file():
-            problems.append({"artifactId": str(row["id"]), "problem": "missing"})
-            continue
-        if path.stat().st_size != row["expected_size_bytes"]:
-            problems.append({"artifactId": str(row["id"]), "problem": "size"})
-            continue
-        digest_builder = hashlib.sha256()
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest_builder.update(chunk)
-        digest = digest_builder.hexdigest()
-        hashed_artifacts += 1
-        hashed_bytes += row["expected_size_bytes"]
-        if digest != row["sha256"]:
-            problems.append({"artifactId": str(row["id"]), "problem": "hash"})
-    return {"status": "ok" if not problems else "failed", "problems": problems,
-            "checkedScope": {"accountId": account, "unassignedOnly": account is None,
-                             "includesAllAccounts": False},
-            "checkedArtifacts": len(rows), "hashedArtifacts": hashed_artifacts,
-            "hashedBytes": hashed_bytes}
+    try:
+        with engine.begin() as connection:
+            return integrity_page(connection, STORAGE_ROOT, account, mode=mode, limit=limit, cursor=cursor)
+    except DBAPIError as error:
+        if getattr(error.orig, 'sqlstate', None) == '57014':
+            raise HTTPException(429, detail={'code': 'integrity_check_busy', 'phase': 'metadata_query_budget'},
+                                headers={'Retry-After': '1'}) from error
+        raise

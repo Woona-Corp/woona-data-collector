@@ -368,3 +368,45 @@ description, подробности в Settings/recording card.
 10. server path невозможно изменить filename/path traversal payload.
 11. профиль, сохранённый без recording, появляется на сервере.
 12. несколько offline profile versions одного dog применяются по порядку.
+
+## Storage capacity and bounded integrity diagnostics
+
+`GET /v1/storage-status` requires the existing bearer device token and accepts the
+same `X-Woona-Account` scope. It returns `limits`, selected-account declared and
+currently present acknowledged bytes (`metadataAcknowledgedBytes` separately
+retains the database counter), and separately labelled server filesystem capacity/pending
+reservations. `status` is `ready`, `account_quota_reached`, or `capacity_reserved`;
+`admission.blockingReasons` can contain both blocking causes. It does not expose
+other account identities. `existingUploadsMayResume=true` distinguishes rejection
+of new declarations from the right to complete an already accepted upload.
+
+New manifest/reference bytes are reserved transactionally. The whole manifest is
+checked before inserting artifact rows. `413 storage_quota_exceeded` reports
+`quotaScope`, `limitBytes`, `reservedBytes`, `requestedBytes`, nonretryable and
+`nextAction=review_server_storage_limits`. `507 storage_reservation_unavailable`
+reports physical admission failure after existing pending reservations and the
+filesystem reserve; it is retryable with `Retry-After`. Both preserve local
+originals and never acknowledge new upload bytes. Retried accepted UUIDs are not
+charged again, and lowering a quota does not interrupt existing accepted uploads.
+
+`GET /v1/integrity?mode=sha256&limit=50&cursor=<UUID>` uses the same account scope.
+Defaults: at most 50 files/page, 16 MiB per hashed file, 32 MiB total hashed bytes,
+2 second cooperative hash/query budget. HTTP maxima cannot be removed through
+request input. `mode=metadata` checks existence/size and explicitly leaves SHA
+unchecked. There is no public unbounded `mode=full`.
+
+The additive result retains `checkedScope`, `problems`, `checkedArtifacts`,
+`hashedArtifacts`, `hashedBytes`, and adds `uncheckedArtifacts`, `scopeArtifacts`,
+`scopeExpectedBytes`, `coverage`, `limits`, `hasMore`, `nextCursor`, `nextAction`.
+`status=ok` requires every available artifact in the selected scope to have its
+SHA checked in this one request. Pages and omitted/large files yield `partial`;
+`coverage.pageChecksumVerified` never implies `scopeChecksumVerified`. A missing
+or corrupted file yields `failed`, and the list remains bounded/paginated.
+`429 integrity_check_busy` with `phase` and `Retry-After` covers cross-worker
+concurrency, cooldown and database query budget. No recordings are modified.
+
+Migration 0009 adds only the technical single-row audit budget. Large explicit
+operator audits use `python -m server.verify_storage` on the server with an
+explicit scope and byte/time budget; they are not started by an HTTP query.
+The CLI exits 0 only for a fully verified scope, 1 for detected problems, and 2
+for partial/paged results that require continuation or a reviewed larger budget.

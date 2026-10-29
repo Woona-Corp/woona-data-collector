@@ -313,7 +313,7 @@ class BackendSafetyIntegrationTest(unittest.TestCase):
     def test_integrity_explicitly_reports_selected_scope_and_counts(self):
         for headers, scope in [({}, {'accountId': None, 'unassignedOnly': True, 'includesAllAccounts': False}),
                                ({'X-Woona-Account': 'qa-empty-' + uuid.uuid4().hex}, None)]:
-            response = json.loads(request('GET', '/v1/integrity', headers=headers)[2])
+            response = json.loads(request('GET', '/v1/integrity?mode=metadata', headers=headers)[2])
             expected = scope or {'accountId': headers['X-Woona-Account'], 'unassignedOnly': False, 'includesAllAccounts': False}
             self.assertEqual(response['checkedScope'], expected)
             self.assertGreaterEqual(response['checkedArtifacts'], response['hashedArtifacts'])

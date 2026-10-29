@@ -86,15 +86,67 @@ Timer/service templates удалены из текущей конфигурац�
 - `/health/ready = 200` — доступны БД и запись/чтение storage.
 - `database_unavailable` — проверять PostgreSQL health/DNS/password/pool.
 - `storage_unavailable` — проверять mount, права, inode и свободное место.
-- `/v1/integrity` с device token проверяет доступные файлы, размер и SHA только
-  выбранного `X-Woona-Account`; без него проверяются непривязанные записи.
-  `checkedScope` явно сообщает область, `checkedArtifacts`, `hashedArtifacts`
-  и `hashedBytes` — объём проверки. `ok` не означает проверку всех аккаунтов.
+- `/v1/storage-status` с device token показывает квоты и занятый объём выбранного
+  `X-Woona-Account`, физическое место и уже обещанные pending bytes всего сервера.
+  `checkedScope` относится только к аккаунту; `serverStorage.scope=server` явно
+  отделяет общую ёмкость. Идентификаторы и записи других аккаунтов не возвращаются.
+  `admission.blockingReasons` различает `account_quota_reached` и
+  `server_capacity_reserved`. Даже при лимите `existingUploadsMayResume=true`:
+  уже принятые файлы можно завершить, а `ready` не обещает место сверх показанной
+  верхней границы `newArtifactUpperBoundBytes`.
+- `/v1/integrity` с device token проверяет только выбранный `X-Woona-Account`;
+  без него — непривязанные записи. По умолчанию одна страница содержит до 50
+  available artifacts, хешируются файлы до 16 MiB и не более 32 MiB суммарно,
+  с двухсекундным cooperative hash/query budget. Проверки выполняются по UUID
+  keyset cursor; `limit` ограничен 100. HTTP hard caps: 100 файлов, 64 MiB на файл,
+  256 MiB хешируемых bytes и 5 seconds. Их нельзя снять query parameter.
+  `mode=metadata` проверяет наличие/размер без SHA. `mode=full` не существует.
+  `uncheckedArtifacts`, `hasMore`, `nextCursor`, `coverage` и `nextAction` явно
+  описывают недопроверенные данные. `status=ok` выдаётся только для целиком
+  проверенного checksum scope в одном запросе; `partial` не означает успешный
+  SHA всех файлов. Одна страница с cursor не подтверждает предыдущие страницы.
+  Ошибки missing/size/hash/unreadable показываются отдельно, без server paths.
+  Одновременно работает не более одного audit во всём API/PG cluster; между
+  SHA scans по умолчанию минимум 1 second. `429 integrity_check_busy` содержит
+  phase и Retry-After. Миграция 0009 добавляет только одну техническую budget row,
+  не меняет clinical metadata и не создаёт фонового задания.
 - `storage_space_low` / `storage_full` (507) — upload offset не подтверждается
   вперёд. Сохранить исходники, проверить место и после `Retry-After` повторить
   HEAD перед продолжением. По умолчанию сервер оставляет 256 MiB свободного
   места сверх текущего chunk (`WOONA_UPLOAD_FREE_SPACE_RESERVE_BYTES`);
   это проверка доступного места, не quota и не автоматическое удаление `.part`.
+- `storage_quota_exceeded` (413, nonretryable) — новые artifact declarations
+  превысят quota записи или аккаунта. Defaults: 20 GiB/recording и 100 GiB/account;
+  `WOONA_RECORDING_QUOTA_BYTES` / `WOONA_ACCOUNT_QUOTA_BYTES` меняют эти пределы,
+  0 явно отключает соответствующую logical quota. Existing/pending/corrupt
+  artifacts учитываются по expected size, повтор одного UUID не начисляется
+  дважды. Authoritatively retired parents/children не резервируют будущие bytes;
+  оставшиеся физические файлы всё равно уменьшают свободное место.
+  Весь новый manifest проверяется до вставки файлов и транзакционно откатывается
+  при отказе; дополнительный reference проходит те же правила. Перенос
+  непривязанной собаки в аккаунт не обходит quota. Уже принятые manifests,
+  idempotent retries и resume не блокируются при последующем уменьшении лимита.
+- `storage_reservation_unavailable` (507, retryable) — новым файлам не хватает
+  свободной ёмкости после учёта незаписанных bytes уже принятых uploads и256 MiB
+  reserve. Admission сериализуется между API workers, namespace/account
+  identifiers при этом не раскрываются. Неподтверждённые и отсутствующие
+  `.part` prefixes не принимаются за записанные bytes. Файлы не удаляются,
+  upload offsets не продвигаются, source originals должны остаться на телефоне.
+
+Для явной проверки больших видео оператор внутри API container может запустить
+ограниченную локальную команду (не HTTP request и не scheduled job):
+
+```bash
+python -m server.verify_storage --account clinic --max-bytes 8589934592 --max-seconds 300 --limit 10
+```
+
+Область обязательна: `--account` или `--unassigned`. Продолжать по `--cursor`
+из JSON, проверять `uncheckedArtifacts` и ошибки. Exit codes: 0 — весь scope
+проверен, 1 — найдены проблемы, 2 — результат частичный и требует продолжения.
+Команда ничего не копирует, не создаёт резервных копий, не удаляет и не правит
+исходные записи. Изменение файла во время чтения не выдаётся за проверенный SHA.
+Quotas и HTTP audit limits — конфигурация admission/diagnostics, не разрешение
+на очистку зависших `.part` или возобновление отключённых backup jobs.
 - `offset_mismatch` — клиент должен повторить HEAD и продолжить с серверного
   offset, а не начинать новый файл.
 - `artifact_hash_mismatch` — локальный файл или manifest изменился; повторная

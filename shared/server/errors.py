@@ -1,6 +1,9 @@
 """Stable machine actions and safe explanations for API failures."""
 
 ERRORS = {
+    'storage_quota_exceeded': ('This manifest would exceed the configured recording or account storage quota. Preserve local originals and review the reported quota with the server operator; already accepted files may still resume.', 'review_server_storage_limits'),
+    'storage_reservation_unavailable': ('The server cannot reserve enough remaining capacity for this new file after accounting for pending uploads and its safety reserve. Preserve local originals; existing uploads may resume and no files were removed.', 'retry_after_storage_available'),
+    'integrity_check_busy': ('The bounded integrity audit is busy, cooling down, or reached its database query budget. Wait for Retry-After before continuing the audit; recording uploads use a separate admission path.', 'retry_later'),
     'storage_space_low': ('The server has insufficient free storage to accept this chunk safely. Keep the original files and retry after server space is freed; the acknowledged offset has not advanced.', 'retry_after_storage_available'),
     'storage_full': ('The server ran out of storage while writing this chunk. Preserve local originals and resume from the acknowledged offset after storage is available.', 'retry_after_storage_available'),
     'missing_bearer_token': ('The server token is missing. Enter the device token in server settings; local data is unchanged.', 'update_server_token'),
