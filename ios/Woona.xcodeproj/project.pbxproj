@@ -68,6 +68,7 @@
 		8A1AC0002B0000000000B104 /* V2PreviewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000B103 /* V2PreviewController.swift */; };
 		8A1AC0002B0000000000B106 /* V2PreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000B105 /* V2PreviewView.swift */; };
 		8A1AC0002B0000000000B108 /* V2PreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000B107 /* V2PreviewTests.swift */; };
+		8A1AD0002B0000000000C102 /* storage-api-contract.json in Resources */ = {isa = PBXBuildFile; fileRef = 8A1AD0002B0000000000C101 /* storage-api-contract.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -146,6 +147,7 @@
 		8A1AC0002B0000000000B103 /* V2PreviewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V2PreviewController.swift; sourceTree = "<group>"; };
 		8A1AC0002B0000000000B105 /* V2PreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V2PreviewView.swift; sourceTree = "<group>"; };
 		8A1AC0002B0000000000B107 /* V2PreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V2PreviewTests.swift; sourceTree = "<group>"; };
+		8A1AD0002B0000000000C101 /* storage-api-contract.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = storage-api-contract.json; path = "../shared/testdata/storage-api-contract.json"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -249,6 +251,7 @@
 			isa = PBXGroup;
 			children = (
 				8A1AC0002B0000000000A109 /* woona-v2-wire-vectors.json */,
+				8A1AD0002B0000000000C101 /* storage-api-contract.json */,
 				8A1AC0002B0000000000A107 /* WoonaV2Tests.swift */,
 				8A1A003B2B00000200000001 /* PacketAssemblerTests.swift */,
 				8A1A00392B00000200000001 /* PacketStatsTrackerTests.swift */,
@@ -427,6 +430,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				8A1AC0002B0000000000A110 /* woona-v2-wire-vectors.json in Resources */,
+				8A1AD0002B0000000000C102 /* storage-api-contract.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

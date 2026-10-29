@@ -273,7 +273,7 @@ enum ServerSyncError: LocalizedError {
         let message = detail?["message"] as? String ?? body?["detail"] as? String ?? HTTPURLResponse.localizedString(forStatusCode: status)
         // Keep useful server diagnostics visible without retaining credentials or
         // arbitrary response fields. The original request ID remains searchable.
-        let diagnosticKeys = ["requestId", "retryable", "nextAction", "quotaScope", "limitBytes", "reservedBytes", "requestedBytes"]
+        let diagnosticKeys = ["requestId", "retryable", "nextAction", "quotaScope", "limitBytes", "reservedBytes", "requestedBytes", "availableBytes", "pendingReservedBytes", "requiredBytes", "freeSpaceReserveBytes"]
         var diagnostics: [String: Any] = [:]
         for key in diagnosticKeys {
             if let value = detail?[key] ?? body?[key] { diagnostics[key] = value }

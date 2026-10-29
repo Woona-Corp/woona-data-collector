@@ -5,6 +5,40 @@ import CryptoKit
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    func testNativeStorageParserConsumesActualIsolatedAPIWireFixture() throws {
+        // This file is captured by the server suite from real synthetic HTTP
+        // responses, rather than generated from the Swift DTO under test.
+        let url = try XCTUnwrap(Bundle(for: WoonaDataTests.self).url(forResource: "storage-api-contract", withExtension: "json"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        XCTAssertEqual(root["contractVersion"] as? Int, 1)
+        let response = try XCTUnwrap(root["storageStatus"] as? [String: Any])
+        let body = try XCTUnwrap(response["body"] as? [String: Any])
+        let value = try JSONDecoder().decode(ServerStorageStatus.self, from: JSONSerialization.data(withJSONObject: body))
+        try value.validate(accountID: "qa-storage-wire-contract")
+        XCTAssertEqual(value.limits.recordingBytes, 21_474_836_480)
+        XCTAssertEqual(value.limits.accountBytes, 107_374_182_400)
+        XCTAssertTrue(value.existingUploadsMayResume)
+        XCTAssertEqual(value.nextAction, "continue_upload")
+        XCTAssertNotEqual(transferNextAction(value.nextAction, ru: false), value.nextAction)
+        let server = try XCTUnwrap(body["serverStorage"] as? [String: Any])
+        XCTAssertEqual(value.serverStorage.pendingArtifacts, server["pendingArtifacts"] as? Int)
+        for key in ["quotaExceeded", "reservationUnavailable"] {
+            let response = try XCTUnwrap(root[key] as? [String: Any])
+            let body = try XCTUnwrap(response["body"] as? [String: Any])
+            let status = try XCTUnwrap(response["httpStatus"] as? Int)
+            let headers = try XCTUnwrap(response["headers"] as? [String: String])
+            let requestID = try XCTUnwrap(body["requestId"] as? String)
+            XCTAssertEqual(headers["x-request-id"], requestID)
+            let raw = ServerSyncError.responseError(status: status, data: try JSONSerialization.data(withJSONObject: body)).localizedDescription
+            XCTAssertTrue(raw.contains(requestID))
+            for field in ["quotaScope", "limitBytes", "reservedBytes", "requestedBytes", "availableBytes", "pendingReservedBytes", "requiredBytes"] where body[field] != nil {
+                XCTAssertTrue(raw.contains(field), "Actual server diagnostic \(field) must remain available")
+            }
+            XCTAssertNotEqual(recordingUploadErrorText(raw, language: .english), raw)
+            XCTAssertNotEqual(recordingUploadErrorText(raw, language: .russian), raw)
+        }
+    }
+
     private func storageFixture(account: String? = nil, unlimited: Bool = false) throws -> Data {
         let remaining: Any = unlimited ? NSNull() : NSNumber(value: 98_784_247_808 as Int64)
         return try JSONSerialization.data(withJSONObject: [
