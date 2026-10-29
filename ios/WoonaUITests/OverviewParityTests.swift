@@ -10,8 +10,11 @@ final class OverviewParityTests: XCTestCase {
         if name.contains("testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls") {
             app.launchArguments.append("--ui-testing-v2-charts")
         }
-        if name.contains("testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire") {
+        if name.contains("testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire") || name.contains("testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory") {
             app.launchArguments.append("--ui-testing-preexisting-heart")
+        }
+        if name.contains("testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory") {
+            app.launchArguments.append("--ui-testing-heart-capture")
         }
         app.launch()
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
@@ -43,6 +46,28 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Preexisting incomplete heart"].waitForExistence(timeout: 5), "The test must actually load the persisted old record")
         XCTAssertTrue(app.buttons["Complete heart questionnaire"].exists)
         XCTAssertFalse(app.navigationBars["Activity and heart questionnaire"].waitForExistence(timeout: 5), "Accepted history data must remain browsable without reopening its old questionnaire")
+        app.buttons["Complete heart questionnaire"].tap()
+        XCTAssertTrue(app.navigationBars["Activity and heart questionnaire"].waitForExistence(timeout: 5), "Manual editing remains available through the central presenter")
+        app.buttons["Later"].tap()
+        XCTAssertTrue(app.navigationBars["Recordings"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.navigationBars["Activity and heart questionnaire"].waitForExistence(timeout: 5))
+    }
+
+    func testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory() {
+        app.buttons["UI Dog 2"].tap()
+        let capture = app.buttons["heart.capture.fixture"]
+        XCTAssertTrue(capture.waitForExistence(timeout: 5))
+        capture.tap()
+        let editor = app.navigationBars["Activity and heart questionnaire"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 15), "A newly finalized heart capture must open its own questionnaire")
+        attachScreen("NewHeartCapture-PostFinalizationQuestionnaire")
+        app.buttons["Later"].tap()
+        XCTAssertTrue(app.navigationBars["Session"].waitForExistence(timeout: 5))
+        app.buttons["tab.recordings"].tap()
+        XCTAssertTrue(app.navigationBars["Recordings"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["New capture heart target"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Preexisting incomplete heart"].exists)
+        XCTAssertFalse(editor.waitForExistence(timeout: 5), "Dismissing the capture prompt must not reopen either old or new incomplete forms during history browsing")
     }
 
     func testEnglishLongDogFormPresentsTranslatedOptionsAndRetainsCanonicalAnswersAcrossLanguageChange() {

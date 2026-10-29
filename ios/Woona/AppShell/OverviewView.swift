@@ -415,7 +415,6 @@ struct OverviewView: View {
     @State private var pendingReplaySelection = false
     @State private var pendingDevice: BleDevice?
     @State private var pendingReplayURL: URL?
-    @State private var heartRecording: WoonaRecording?
     @State private var pendingLocalRemoval: WoonaRecording?
     @State private var referenceRecording: WoonaRecording?
     @State private var isReferenceImporterPresented = false
@@ -468,6 +467,14 @@ struct OverviewView: View {
                     }
                 }
                 if section == .animals {
+                #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("--ui-testing-heart-capture") {
+                    Button("Run synthetic heart capture") {
+                        do { try appState.startSyntheticHeartCaptureForTesting() }
+                        catch { appState.reportError("Synthetic heart capture failed", error: error) }
+                    }.accessibilityIdentifier("heart.capture.fixture")
+                }
+                #endif
                 if !appState.canSelectAnimal {
                     Text(russian ? "Завершите текущую запись или операцию с аккаунтом перед сменой животного." : "Finish the active recording or account operation before changing the animal.").font(.footnote)
                 }
@@ -552,7 +559,7 @@ struct OverviewView: View {
                                     Button(appState.selectedLanguage == .russian ? "Изменить анкету" : "Edit questionnaire") { editingSession = recording }
                                         .disabled(!appState.canEditQuestionnaire(recording))
                                     if recording.questionnaire?.sessionKind == "heart", recording.questionnaire?.readyForSync == false {
-                                        Button(appState.selectedLanguage == .russian ? "Заполнить анкету по сердцебиению" : "Complete heart questionnaire") { heartRecording = recording }.disabled(!appState.canEditQuestionnaire(recording))
+                                        Button(appState.selectedLanguage == .russian ? "Заполнить анкету по сердцебиению" : "Complete heart questionnaire") { appState.presentHeartQuestionnaire(for: recording) }.disabled(!appState.canEditQuestionnaire(recording))
                                     }
                                     Button(appState.selectedLanguage == .russian ? "Добавить ЭКГ / ЧСС / интервалы" : "Add ECG / heart rate / intervals") {
                                         referenceRecording = recording
@@ -713,9 +720,6 @@ struct OverviewView: View {
             }
             .navigationTitle(screenTitle)
             .navigationBarTitleDisplayMode(.inline)
-            .onChange(of: appState.recentRecordings) { _, records in
-                presentIncompleteHeartQuestionnaire(records)
-            }
             .alert(russian ? "Удалить файлы сессии с устройства?" : "Remove session files from this device?", isPresented: Binding(
                 get: { pendingLocalRemoval != nil }, set: { if !$0 { pendingLocalRemoval = nil } }
             ), presenting: pendingLocalRemoval) { recording in
@@ -759,9 +763,6 @@ struct OverviewView: View {
                         }
                     }
                 }
-            }
-            .sheet(item: $heartRecording) { recording in
-                HeartQuestionnaireEditor(initial: appState.heartQuestionnaireDraft(recordingID: recording.id), language: appState.selectedLanguage) { heart, revision in try await appState.saveHeartQuestionnaire(heart, displayedRecording: recording, expectedRevision: revision) }
             }
             .fileImporter(isPresented: $isReferenceImporterPresented, allowedContentTypes: [.data, .item], allowsMultipleSelection: false) { result in
                 switch result {
@@ -892,15 +893,6 @@ struct OverviewView: View {
                         }
                     }
                 }
-    }
-
-    private func presentIncompleteHeartQuestionnaire(_ records: [WoonaRecording]) {
-        guard heartRecording == nil, !isSessionEditorPresented else { return }
-        heartRecording = records.first { recording in
-            guard ["completed", "failed", "interrupted"].contains(recording.status),
-                  let questionnaire = recording.questionnaire else { return false }
-            return questionnaire.sessionKind == "heart" && !questionnaire.readyForSync
-        }
     }
 
     private func preparePendingExport() {

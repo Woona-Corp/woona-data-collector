@@ -44,7 +44,17 @@ final class AppViewModel: ObservableObject {
     private var completeArchiveTask: Task<Void, Never>?
     private var completeArchiveWorker: Task<URL, Error>?
     @Published private(set) var dogProfiles: [DogProfile] = []
-    @Published private(set) var selectedDogProfile: DogProfile?
+    @Published private(set) var selectedDogProfile: DogProfile? {
+        didSet {
+            if oldValue?.id != selectedDogProfile?.id || oldValue?.accountID != selectedDogProfile?.accountID {
+                clearHeartQuestionnaireScope()
+            }
+        }
+    }
+    @Published private(set) var pendingPostCaptureHeartQuestionnaire: WoonaRecording?
+    @Published private(set) var heartQuestionnairePresentation: WoonaRecording?
+    private var pendingHeartAccountID: String?
+    private var lastPostCaptureHeartRecordingID: UUID?
     @Published private(set) var recentRecordings: [WoonaRecording] = []
     @Published private(set) var serverRecordings: [ServerRecordingSummary] = []
     @Published private(set) var downloadableRecordingIDs: Set<UUID> = []
@@ -95,11 +105,16 @@ final class AppViewModel: ObservableObject {
     @Published var serverToken = "" { didSet { if oldValue != serverToken { resetServerStorageCheck() } } }
     @Published var serverWifiOnly = true { didSet { if oldValue != serverWifiOnly { resetServerStorageCheck() } } }
     @Published var accountInput = ""
-    @Published private(set) var selectedAccountID: String? { didSet { if oldValue != selectedAccountID { resetServerStorageCheck() } } }
+    @Published private(set) var selectedAccountID: String? {
+        didSet {
+            if oldValue != selectedAccountID { resetServerStorageCheck(); clearHeartQuestionnaireScope() }
+        }
+    }
     @Published private(set) var unassignedDogProfiles: [DogProfile] = []
     @Published private(set) var isAccountOperationRunning = false
     @Published private var uploadingProfileCount = 0
     @Published private var scheduledSyncCount = 0
+    @Published private var scheduledSyncRecordingCounts: [UUID: Int] = [:]
 
     @Published private(set) var localProfileCount = 0
     @Published private(set) var localRecordingCount = 0
@@ -344,7 +359,7 @@ final class AppViewModel: ObservableObject {
     private var captureSessionZeroWallClockMs: Int64?
     private var captureSessionZeroMonotonicNs: UInt64?
     private var captureSessionZeroUncertaintyNs: UInt64?
-    private var captureStopInProgress = false
+    @Published private var captureStopInProgress = false
     private var captureStopTask: Task<Void, Never>?
     private lazy var captureFinalizationBackgroundTime = CaptureFinalizationBackgroundTime(enabled: backgroundSchedulingEnabled)
     private var hasPreparedActiveCapture = false
@@ -640,9 +655,15 @@ final class AppViewModel: ObservableObject {
     }
 
     private func scheduleSync(_ recording: WoonaRecording) {
+        scheduledSyncRecordingCounts[recording.id, default: 0] += 1
         scheduledSyncCount += 1
         Task {
-            defer { scheduledSyncCount -= 1 }
+            defer {
+                scheduledSyncCount -= 1
+                let remaining = (scheduledSyncRecordingCounts[recording.id] ?? 1) - 1
+                if remaining > 0 { scheduledSyncRecordingCounts[recording.id] = remaining }
+                else { scheduledSyncRecordingCounts.removeValue(forKey: recording.id) }
+            }
             await sync(recording: recording)
         }
     }
@@ -1100,6 +1121,18 @@ final class AppViewModel: ObservableObject {
         await prepareCaptureForConnection()
     }
 
+    func startSyntheticHeartCaptureForTesting() throws {
+        guard let store else { throw WoonaStoreError.invalidData("Synthetic heart capture requires its isolated store") }
+        let source = store.rootDirectory.appendingPathComponent("ui-heart-replay-" + UUID().uuidString + ".bin")
+        try Data().write(to: source)
+        var questionnaire = SessionQuestionnaire()
+        questionnaire.schemaVersion = 2; questionnaire.sessionKind = "heart"
+        questionnaire.sessionLabel = "New capture heart target"; questionnaire.videoRequested = false
+        // Empty replay exercises actual stop/failure/durable finalization without
+        // pretending to verify Bluetooth hardware or camera behavior.
+        try startReplay(from: source, questionnaire: questionnaire)
+    }
+
     func submitPacketFragmentForTesting(_ fragment: [UInt8]) {
         packetFragmentSubmitter.enqueue(fragment)
     }
@@ -1542,7 +1575,83 @@ final class AppViewModel: ObservableObject {
     }
 
     func canEditQuestionnaire(_ recording: WoonaRecording) -> Bool {
-        removingLocalRecordingID == nil && !isAccountOperationRunning && scheduledSyncCount == 0 && !syncingRecordingIDs.contains(recording.id) && activeRecording == nil && !captureStopInProgress && ["completed", "failed", "interrupted"].contains(recording.status)
+        // An unrelated network transfer must not hold a new local capture's
+        // required form hostage. Its own queued/running transfer still fences it.
+        let localCapturePrompt = lastPostCaptureHeartRecordingID == recording.id &&
+            (pendingPostCaptureHeartQuestionnaire?.id == recording.id || heartQuestionnairePresentation?.id == recording.id) &&
+            recording.questionnaire?.sessionKind == "heart" && recording.questionnaire?.readyForSync == false &&
+            !["synced", "remote"].contains(recording.serverSyncState) && (scheduledSyncRecordingCounts[recording.id] ?? 0) == 0
+        return removingLocalRecordingID == nil && !isAccountOperationRunning && (scheduledSyncCount == 0 || localCapturePrompt) && !syncingRecordingIDs.contains(recording.id) && activeRecording == nil && !captureStopInProgress && ["completed", "failed", "interrupted"].contains(recording.status)
+    }
+
+    var canPresentPendingHeartQuestionnaire: Bool {
+        guard let recording = pendingPostCaptureHeartQuestionnaire else { return false }
+        return heartQuestionnairePresentation == nil && !isLocalRecoveryRunning && localRecoveryError == nil &&
+            !isCompleteArchiveExporting && exportPhase == nil && preparedExport == nil &&
+            recording.dogID == selectedDogProfile?.id && pendingHeartAccountID == selectedAccountID &&
+            canEditQuestionnaire(recording)
+    }
+
+    func presentPendingHeartQuestionnaire() {
+        guard canPresentPendingHeartQuestionnaire, let pending = pendingPostCaptureHeartQuestionnaire else { return }
+        do {
+            // Re-read the exact event owner: history pages, uploads and profile
+            // changes cannot substitute another incomplete heart recording.
+            let fresh = try scopedHeartQuestionnaireRecording(pending)
+            pendingPostCaptureHeartQuestionnaire = nil
+            guard let fresh, fresh.questionnaire?.readyForSync == false else { return }
+            heartQuestionnairePresentation = fresh
+        } catch {
+            pendingPostCaptureHeartQuestionnaire = nil
+            showError(selectedLanguage == .russian ? "Запись сохранена, но анкету по сердцебиению не удалось открыть. Она доступна из истории после устранения ошибки." : "The recording is saved, but its heart questionnaire could not be opened. Open it from history after resolving the error.", error: error)
+        }
+    }
+
+    func presentHeartQuestionnaire(for recording: WoonaRecording) {
+        guard heartQuestionnairePresentation == nil, canEditQuestionnaire(recording),
+              !isLocalRecoveryRunning, localRecoveryError == nil,
+              !isCompleteArchiveExporting, exportPhase == nil, preparedExport == nil else { return }
+        do {
+            guard let fresh = try scopedHeartQuestionnaireRecording(recording) else {
+                showError(selectedLanguage == .russian ? "Анкета не открыта: запись больше недоступна в выбранном аккаунте и у выбранного животного. Обновите историю." : "The questionnaire was not opened: the recording is no longer available for the selected account and animal. Refresh history.", error: nil)
+                return
+            }
+            if pendingPostCaptureHeartQuestionnaire?.id == fresh.id { pendingPostCaptureHeartQuestionnaire = nil }
+            heartQuestionnairePresentation = fresh
+        } catch {
+            showError(selectedLanguage == .russian ? "Не удалось открыть анкету по сердцебиению. Запись и ответы сохранены." : "Could not open the heart questionnaire. The recording and answers are preserved.", error: error)
+        }
+    }
+
+    func dismissHeartQuestionnaire() { heartQuestionnairePresentation = nil }
+
+    private func clearHeartQuestionnaireScope() {
+        pendingPostCaptureHeartQuestionnaire = nil
+        pendingHeartAccountID = nil
+        heartQuestionnairePresentation = nil
+    }
+
+    private func scopedHeartQuestionnaireRecording(_ recording: WoonaRecording) throws -> WoonaRecording? {
+        guard let store, let fresh = try store.recording(id: recording.id),
+              fresh.dogID == recording.dogID, fresh.profileVersionID == recording.profileVersionID,
+              fresh.dogID == selectedDogProfile?.id,
+              ["completed", "failed", "interrupted"].contains(fresh.status),
+              fresh.questionnaire?.sessionKind == "heart",
+              let profile = try store.profile(dogID: fresh.dogID, versionID: fresh.profileVersionID),
+              profile.accountID == selectedAccountID else { return nil }
+        return fresh
+    }
+
+    private func queuePostCaptureHeartQuestionnaire(_ recording: WoonaRecording) {
+        guard lastPostCaptureHeartRecordingID != recording.id else { return }
+        do {
+            guard let fresh = try scopedHeartQuestionnaireRecording(recording), fresh.questionnaire?.readyForSync == false else { return }
+            lastPostCaptureHeartRecordingID = fresh.id
+            pendingHeartAccountID = selectedAccountID
+            pendingPostCaptureHeartQuestionnaire = fresh
+        } catch {
+            showError(selectedLanguage == .russian ? "Запись сохранена, но автоматическое открытие анкеты по сердцебиению не подготовлено. Откройте её из истории после устранения ошибки." : "The recording is saved, but its heart questionnaire could not be prepared automatically. Open it from history after resolving the error.", error: error)
+        }
     }
 
     func saveHeartQuestionnaire(_ heart: HeartQuestionnaire, displayedRecording: WoonaRecording, expectedRevision: Int? = nil) async throws {
@@ -1870,6 +1979,11 @@ final class AppViewModel: ObservableObject {
                 showError(selectedLanguage == .russian ? "Локальная финализация завершена; отложенная очистка требует повтора" : "Local finalization finished; deferred cleanup needs a retry", error: WoonaStoreError.invalidData(cleanupError))
             }
             if let finalized = try store.recording(id: recording.id) {
+                // Only this successful durable capture completion creates an
+                // automatic prompt. Startup/history/restore never enqueue one.
+                if !finalization.retired && finalization.cleanupError == nil {
+                    queuePostCaptureHeartQuestionnaire(finalized)
+                }
                 // Durable capture completion releases the next session before network
                 // transfer starts. The upload queue owns its own busy/error states.
                 scheduleSync(finalized)

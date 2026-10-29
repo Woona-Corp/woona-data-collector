@@ -84,10 +84,24 @@ struct AppRootView: View {
         )) { export in
             ActivityView(items: export.urls)
         }
+        .sheet(item: Binding(
+            get: { appState.heartQuestionnairePresentation },
+            set: { if $0 == nil { appState.dismissHeartQuestionnaire() } }
+        )) { recording in
+            HeartQuestionnaireEditor(initial: appState.heartQuestionnaireDraft(recordingID: recording.id), language: appState.selectedLanguage) { heart, revision in
+                try await appState.saveHeartQuestionnaire(heart, displayedRecording: recording, expectedRevision: revision)
+            }
+        }
+        .onChange(of: appState.canPresentPendingHeartQuestionnaire, initial: true) { _, ready in
+            if ready && scenePhase == .active { appState.presentPendingHeartQuestionnaire() }
+        }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .background {
                 appState.enterBackground()
-            } else if newPhase == .active { appState.enterForeground() }
+            } else if newPhase == .active {
+                appState.enterForeground()
+                appState.presentPendingHeartQuestionnaire()
+            }
         }
     }
 
