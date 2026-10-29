@@ -117,6 +117,11 @@ class MainActivity : ComponentActivity() {
     private var historyProfileId: String? = null
     private var historyRequestedCount = 10
     private val historyGeneration = java.util.concurrent.atomic.AtomicLong()
+    private data class PendingRecordingChange(val id: String, val accountId: String?, val generation: Long)
+    private data class HistoryLoadResult(val rows: List<Recording>, val total: Int,
+        val cursor: com.example.myapplication.data.RecordingHistoryCursor?, val changedRecording: Recording?)
+    private var recordingChangeGeneration = 0L
+    private var pendingRecordingChange: PendingRecordingChange? = null
     private var localHistorySummary by mutableStateOf("")
     private var serverRecordingReports by mutableStateOf<Map<String, Pair<String?, Boolean>>>(emptyMap())
     private var serverSyncState by mutableStateOf(ServerSyncUiState())
@@ -648,6 +653,9 @@ class MainActivity : ComponentActivity() {
             }
         }
         startupSavedState = savedInstanceState
+        savedInstanceState?.getString("history.recordingChange.id")?.let {
+            pendingRecordingChange = PendingRecordingChange(it, savedInstanceState.getString("history.recordingChange.account"), ++recordingChangeGeneration)
+        }
         beginStartupRecovery()
     }
 
@@ -689,6 +697,8 @@ class MainActivity : ComponentActivity() {
                 showingAllRecordings = state.getBoolean("history.opened")
                 historyRequestedCount = state.getInt("history.count", 10).coerceAtLeast(10)
                 loadRecordingHistory()
+            } else if (pendingRecordingChange != null) {
+                loadRecordingHistory()
             }
             editingProfile = state.getString(STATE_EDITING_PROFILE_ID)
                 ?.let { id -> dogProfiles.firstOrNull { it.id == id } }
@@ -728,9 +738,13 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         if (!startupReady) {
             startupSavedState?.let(outState::putAll)
+            outState.putString("history.recordingChange.id", pendingRecordingChange?.id)
+            outState.putString("history.recordingChange.account", pendingRecordingChange?.accountId)
             super.onSaveInstanceState(outState)
             return
         }
+        outState.putString("history.recordingChange.id", pendingRecordingChange?.id)
+        outState.putString("history.recordingChange.account", pendingRecordingChange?.accountId)
         outState.putString("history.profile", selectedProfileId)
         outState.putBoolean("history.opened", showingAllRecordings)
         outState.putInt("history.count", historyRequestedCount)
@@ -889,6 +903,7 @@ class MainActivity : ComponentActivity() {
     private fun selectProfile(profileId: String) {
         if (accountBusy || isServerRestoreInProgress || deviceFeatureController.isCaptureActive()) return
         if (dogProfiles.none { it.id == profileId }) return
+        pendingRecordingChange = null
         selectedProfileId = profileId
         profilePreferences.edit().putString(LAST_PROFILE_ID_KEY, profileId).apply()
         showingAllRecordings = false
@@ -941,6 +956,7 @@ class MainActivity : ComponentActivity() {
         }
         historyProfileId = profileId
         val generation = historyGeneration.incrementAndGet()
+        val recordingChange = pendingRecordingChange
         val previous = if (append) recentRecordings else emptyList()
         val after = if (append) historyCursor else null
         val knownTotal = if (append) recordingsTotal else null
@@ -956,16 +972,32 @@ class MainActivity : ComponentActivity() {
                     val page = woonaDatabase.recordingHistoryPage(profileId, minOf(100, wanted - loaded.size), cursor, total)
                     loaded += page.recordings; total = page.totalCount; cursor = page.nextCursor
                 } while (cursor != null && loaded.size < wanted)
-                Triple(loaded.toList(), total ?: 0, cursor)
+                val changed = recordingChange?.let { request ->
+                    loaded.firstOrNull { it.id == request.id } ?: woonaDatabase.recording(request.id)
+                }
+                HistoryLoadResult(loaded.toList(), total ?: 0, cursor, changed)
             }
             runOnUiThread {
                 if (isDestroyed || generation != historyGeneration.get() || selectedProfileId != profileId) return@runOnUiThread
                 recordingsLoading = false
-                result.onSuccess { (rows, total, cursor) ->
+                result.onSuccess { (rows, total, cursor, changedRecording) ->
                     recentRecordings = (previous + rows).distinctBy { it.id }
                     recordingsTotal = maxOf(total, recentRecordings.size)
                     historyCursor = cursor
                     historyRequestedCount = recentRecordings.size
+                    if (recordingChange != null && pendingRecordingChange == recordingChange) {
+                        pendingRecordingChange = null
+                        if (recordingChange.accountId == serverSettingsStore.get().accountId &&
+                            changedRecording?.profileId == profileId &&
+                            changedRecording.status.value in setOf("completed", "failed", "interrupted") &&
+                            changedRecording.questionnaire?.sessionKind == "heart" &&
+                            changedRecording.questionnaire.heartQuestionnaire == null &&
+                            heartQuestionnaireRecordingId == null && (!deviceFeatureController.isCaptureActive() ||
+                                deviceFeatureController.captureIdentity() == changedRecording.id)) {
+                            editingRecording = changedRecording
+                            heartQuestionnaireRecordingId = changedRecording.id
+                        }
+                    }
                 }.onFailure { error ->
                     if (error !is java.util.concurrent.CancellationException) recordingsError = error.toString()
                 }
@@ -973,13 +1005,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleRecordingChanged() {
+    private fun handleRecordingChanged() = handleRecordingChanged(deviceFeatureController.captureIdentity())
+
+    private fun handleRecordingChanged(recordingId: String?) {
         runOnUiThread {
+            if (isDestroyed) return@runOnUiThread
+            pendingRecordingChange = recordingId?.let {
+                PendingRecordingChange(it, serverSettingsStore.get().accountId, ++recordingChangeGeneration)
+            }
             if (!startupReady) return@runOnUiThread
             refreshProfilesAndRecordings()
-            recentRecordings.firstOrNull {
-                it.status.value in setOf("completed", "failed", "interrupted") && it.questionnaire?.sessionKind == "heart" && it.questionnaire.heartQuestionnaire == null
-            }?.let { if (heartQuestionnaireRecordingId == null) { editingRecording = it; heartQuestionnaireRecordingId = it.id } }
             ServerSyncScheduler.enqueuePending(applicationContext)
             refreshServerState()
         }
@@ -1237,7 +1272,7 @@ class MainActivity : ComponentActivity() {
                 }
             } }
             editingRecording = null; heartQuestionnaireRecordingId = null
-            handleRecordingChanged()
+            handleRecordingChanged(displayed.id)
         } finally { accountBusy = false; refreshServerState() }
     }
 

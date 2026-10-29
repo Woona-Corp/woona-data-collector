@@ -129,3 +129,30 @@ artifact, not proof of a signed release or tester distribution.
 
 No physical BLE, camera hardware, or synchronization accuracy is proved by these
 emulator checks. Emulator camera/video tests use synthetic inputs.
+
+## Follow-up: post-stop heart questionnaire
+
+Independent review found an asynchronous regression after the earlier green gate:
+`handleRecordingChanged` scheduled a history refresh, then immediately searched
+the previous `recentRecordings` list. A just-stopped heart capture could still
+appear as recording in that list, so its required questionnaire did not open;
+an older unfilled heart session could be selected instead.
+
+The recording-change callback now records a target ID, account scope and event
+generation. Only an accepted current history result may consume that event and
+open the target's fresh terminal heart record. The target is read on the history
+worker even when outside the visible first ten rows. Pending events survive
+superseding stop/WorkManager refreshes and activity recreation. Ordinary history
+browsing never creates such an event. Editing an existing questionnaire reports
+its displayed recording ID instead of using the latest capture ID.
+
+All `refreshProfilesAndRecordings`/`loadRecordingHistory` callers were checked.
+The immediate stale-list read existed only in `handleRecordingChanged`; profile
+selection remains synchronous for the other callers. Four native fake-BLE cases
+exercise the real MainActivity/SQLite/finalization path: correct heart target,
+activity stop with an older missing-heart record, ordinary history open/refresh,
+and recreation while the history worker is deliberately queued.
+
+The runtime and instrumented sources compile and 269 JVM tests pass. The earlier
+CI gate on `75cb00d` predates this follow-up. Final affected-native and fresh
+full-CI results for this runtime change are still pending.
