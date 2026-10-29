@@ -537,8 +537,10 @@ final class AppViewModel: ObservableObject {
             isAccountOperationRunning = true
             Task {
                 defer { isAccountOperationRunning = false; schedulePendingSync() }
+                var didApplyAccount = false
                 do {
                     try await client.applyAccount()
+                    didApplyAccount = true
                     selectedAccountID = account
                     accountInput = account ?? ""
                     UserDefaults.standard.set(account, forKey: "selectedAccountID")
@@ -554,7 +556,18 @@ final class AppViewModel: ObservableObject {
                     // Show those durable results even when background reconciliation
                     // is also offline or unauthorized and cannot refresh the UI.
                     reloadProfiles(selecting: selectedDogProfile?.id)
-                    showError("Account restore failed; retry Apply", error: error)
+                    let russian = selectedLanguage == .russian
+                    let message: String
+                    if didApplyAccount {
+                        message = russian
+                            ? "Аккаунт применён. Восстановление данных не завершено; сохранённые данные доступны. Повторите «Применить аккаунт»"
+                            : "Account applied. Data restore is incomplete; saved data is available. Retry Apply account"
+                    } else {
+                        message = russian
+                            ? "Не удалось применить аккаунт. Сохранённые данные доступны; проверьте причину и повторите «Применить аккаунт»"
+                            : "The account could not be applied. Saved data is available; check the cause and retry Apply account"
+                    }
+                    showError(message, error: error)
                 }
             }
         } catch { showError("Invalid account", error: error) }
