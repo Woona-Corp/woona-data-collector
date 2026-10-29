@@ -12,6 +12,17 @@ final class OverviewParityTests: XCTestCase {
         }
         app.launch()
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
+        // The account field can render before local startup recovery releases
+        // the animal actions. Existence alone does not make a tap actionable.
+        let newDogReady = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let button = object as? XCUIElement else { return false }
+                return button.exists && button.isEnabled && button.isHittable
+            },
+            object: app.buttons["dog.new"]
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [newDogReady], timeout: 15), .completed,
+                       "New dog must become enabled and hittable after local startup recovery")
     }
 
     func testEnglishLongDogFormPresentsTranslatedOptionsAndRetainsCanonicalAnswersAcrossLanguageChange() {
@@ -195,6 +206,10 @@ final class OverviewParityTests: XCTestCase {
     }
 
     func testNewSavesSeparateDogAndKeepsExistingProfile() {
+        let readyState = XCTAttachment(string: app.debugDescription)
+        readyState.name = "NewDog-Ready-BeforeTap-Hierarchy"
+        readyState.lifetime = .keepAlways
+        add(readyState)
         app.buttons["dog.new"].tap()
         let id = app.textFields["dog.editor.animalID"]
         XCTAssertTrue(id.waitForExistence(timeout: 5))
