@@ -12,6 +12,9 @@ final class OverviewParityTests: XCTestCase {
         }
         app.launch()
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
+        // Running V2 intentionally locks animal actions; that scenario waits for
+        // its own session/chart controls rather than requiring New to be enabled.
+        if app.launchArguments.contains("--ui-testing-v2-charts") { return }
         // The account field can render before local startup recovery releases
         // the animal actions. Existence alone does not make a tap actionable.
         let newDogReady = XCTNSPredicateExpectation(
