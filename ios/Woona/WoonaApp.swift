@@ -20,6 +20,27 @@ struct WoonaApp: App {
                 _ = try? store?.saveProfile(questionnaire)
             }
             var historyFixtureError: String?
+            if ProcessInfo.processInfo.arguments.contains("--ui-testing-preexisting-heart") {
+                do {
+                    guard let store, let dog = try store.profiles().first(where: { $0.numberOrName == "UI Dog 2" }) else {
+                        throw WoonaStoreError.invalidData("The synthetic heart-history profile was not created")
+                    }
+                    var questionnaire = SessionQuestionnaire()
+                    questionnaire.schemaVersion = 2
+                    questionnaire.sessionLabel = "Preexisting incomplete heart"
+                    questionnaire.sessionKind = "heart"
+                    questionnaire.videoRequested = false
+                    let recording = try store.createRecording(profile: dog, source: "live", questionnaire: questionnaire)
+                    try store.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8))
+                    guard let persisted = try store.recording(id: recording.id), persisted.status == "completed",
+                          persisted.questionnaire?.sessionKind == "heart", persisted.questionnaire?.readyForSync == false else {
+                        throw WoonaStoreError.invalidData("The preexisting incomplete-heart fixture was not persisted")
+                    }
+                } catch {
+                    historyFixtureError = "Synthetic heart-history fixture failed: " + error.localizedDescription
+                    NSLog("%@", historyFixtureError!)
+                }
+            }
             if ProcessInfo.processInfo.arguments.contains("--ui-testing-history") {
                 do {
                     guard let store, let dog = try store.profiles().first(where: { $0.numberOrName == "UI Dog 1" }) else {

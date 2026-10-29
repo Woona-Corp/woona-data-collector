@@ -10,6 +10,9 @@ final class OverviewParityTests: XCTestCase {
         if name.contains("testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls") {
             app.launchArguments.append("--ui-testing-v2-charts")
         }
+        if name.contains("testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire") {
+            app.launchArguments.append("--ui-testing-preexisting-heart")
+        }
         app.launch()
         XCTAssertTrue(app.textFields["account.input"].waitForExistence(timeout: 15))
         // Running V2 intentionally locks animal actions; that scenario waits for
@@ -26,6 +29,23 @@ final class OverviewParityTests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [newDogReady], timeout: 15), .completed,
                        "New dog must become enabled and hittable after local startup recovery")
+    }
+
+    func testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire() {
+        let otherDog = app.buttons["UI Dog 2"]
+        XCTAssertTrue(otherDog.waitForExistence(timeout: 5))
+        otherDog.tap()
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate { object, _ in
+            (object as? XCUIElement)?.isSelected == true
+        }, object: otherDog)
+        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed)
+        let automaticallyOpened = app.navigationBars["Activity and heart questionnaire"].waitForExistence(timeout: 5)
+        attachScreen("PreexistingHeart-AfterAnimalSelection")
+        XCTAssertFalse(automaticallyOpened, "Selecting an animal is history browsing, not a new capture-stop event; its preexisting incomplete-heart questionnaire must remain available for manual opening")
+        app.buttons["tab.recordings"].tap()
+        XCTAssertTrue(app.navigationBars["Recordings"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Preexisting incomplete heart"].waitForExistence(timeout: 5), "The test must actually load the persisted old record")
+        XCTAssertTrue(app.buttons["Complete heart questionnaire"].exists)
     }
 
     func testEnglishLongDogFormPresentsTranslatedOptionsAndRetainsCanonicalAnswersAcrossLanguageChange() {
