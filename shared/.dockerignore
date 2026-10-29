@@ -1,0 +1,28 @@
+# Only the three Dockerfile COPY trees belong in the API build context.
+**
+!server/
+!server/**
+!docs/
+!docs/target-server-plan/
+!docs/target-server-plan/models/
+!docs/target-server-plan/models/**
+!testdata/
+!testdata/**
+
+# Local secrets, databases, environments and generated duplicates are never inputs.
+**/.env
+**/.env.*
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+**/.venv
+**/venv
+**/build
+**/dist
+**/*.egg-info
+**/__pycache__
+**/*.pyc
+**/*.pyo
