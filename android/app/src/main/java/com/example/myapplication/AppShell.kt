@@ -189,7 +189,10 @@ fun DeviceAppShell(
                 }
                 Box(modifier = Modifier.weight(1f)) {
                 when (selectedDestination) {
-                    AppDestination.ANIMALS, AppDestination.VIDEO, AppDestination.RECORDINGS -> Column(
+                    AppDestination.RECORDINGS -> Box(Modifier.fillMaxSize().padding(12.dp)) {
+                        overviewProfileContent(ProfileScreenSection.RECORDINGS)
+                    }
+                    AppDestination.ANIMALS, AppDestination.VIDEO -> Column(
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {

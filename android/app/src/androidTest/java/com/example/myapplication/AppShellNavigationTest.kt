@@ -313,8 +313,8 @@ class AppShellNavigationTest {
                     })
             }
         }
-        composeRule.onNodeWithText("Номер/ID животного *").performTextInput("retained-id")
-        composeRule.onNodeWithText("Кличка *").performTextInput("Retained draft")
+        composeRule.onNodeWithText("Animal number/ID *").performTextInput("retained-id")
+        composeRule.onNodeWithText("Name *").performTextInput("Retained draft")
         composeRule.onNodeWithText("Validate and save").performClick()
         composeRule.onNodeWithText("Injected database save failure", substring = true).assertIsDisplayed()
         composeRule.onNodeWithText("Retained draft").assertIsDisplayed()
@@ -382,7 +382,7 @@ class AppShellNavigationTest {
         }
         composeRule.onNodeWithText("Answered: 0 of 2").assertIsDisplayed()
         composeRule.onNodeWithText("2 fields need attention").assertIsDisplayed()
-        composeRule.onNodeWithText("Номер/ID животного *").assertIsDisplayed()
+        composeRule.onNodeWithText("Animal number/ID *").assertIsDisplayed()
         composeRule.onNodeWithText("Dog questionnaire").assertIsDisplayed()
     }
 
@@ -399,13 +399,13 @@ class AppShellNavigationTest {
             }
         }
 
-        composeRule.onNodeWithText("Номер сессии *").performTextInput("1")
+        composeRule.onNodeWithText("Session number *").performTextInput("1")
         Espresso.closeSoftKeyboard()
-        composeRule.onNodeWithText("Аллюр/движение").performScrollTo().performClick()
-        checkbox("Аллюр/движение").assertIsOn()
-        checkbox("Активность").performScrollTo().performClick()
-        checkbox("Аллюр/движение").assertIsOn()
-        checkbox("Активность").assertIsOn()
+        composeRule.onNodeWithText("Gait/movement").performScrollTo().performClick()
+        checkbox("Gait/movement").assertIsOn()
+        checkbox("Activity").performScrollTo().performClick()
+        checkbox("Gait/movement").assertIsOn()
+        checkbox("Activity").assertIsOn()
         composeRule.onNodeWithText("Validate and save").performClick()
         composeRule.runOnIdle { assertEquals(listOf("Аллюр/движение", "Активность"), saved?.plannedActivities) }
     }
@@ -421,10 +421,10 @@ class AppShellNavigationTest {
                 )
             }
         }
-        composeRule.onNodeWithText("Номер сессии *").performTextInput("Failure draft")
+        composeRule.onNodeWithText("Session number *").performTextInput("Failure draft")
         Espresso.closeSoftKeyboard()
-        composeRule.onNodeWithText("Аллюр/движение").performScrollTo().performClick()
-        checkbox("Аллюр/движение").assertIsOn()
+        composeRule.onNodeWithText("Gait/movement").performScrollTo().performClick()
+        checkbox("Gait/movement").assertIsOn()
         composeRule.onNodeWithText("Validate and save").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) {
             composeRule.onNodeWithText("java.io.IOException: database unavailable", substring = true).isDisplayed()
@@ -489,19 +489,19 @@ class AppShellNavigationTest {
             }
         }
 
-        composeRule.onNodeWithText("Номер сессии *").performTextInput("2")
+        composeRule.onNodeWithText("Session number *").performTextInput("2")
         Espresso.closeSoftKeyboard()
-        composeRule.onNodeWithText("Аллюр/движение").performScrollTo().performClick()
-        checkbox("Аллюр/движение").assertIsOn()
-        composeRule.onNodeWithText("На улице").performScrollTo().performClick()
-        composeRule.onNodeWithText("Асфальт").performScrollTo().performClick()
-        checkbox("Асфальт").assertIsOn()
-        composeRule.onNodeWithText("Трава").performScrollTo().performClick()
-        checkbox("Асфальт").assertIsOn()
-        checkbox("Трава").assertIsOn()
-        composeRule.onNodeWithText("В помещении").performScrollTo().performClick()
-        checkbox("Асфальт").assertIsOn()
-        checkbox("Трава").assertIsOn()
+        composeRule.onNodeWithText("Gait/movement").performScrollTo().performClick()
+        checkbox("Gait/movement").assertIsOn()
+        composeRule.onNodeWithText("Outdoors").performScrollTo().performClick()
+        composeRule.onNodeWithText("Asphalt").performScrollTo().performClick()
+        checkbox("Asphalt").assertIsOn()
+        composeRule.onNodeWithText("Grass").performScrollTo().performClick()
+        checkbox("Asphalt").assertIsOn()
+        checkbox("Grass").assertIsOn()
+        composeRule.onNodeWithText("Indoors").performScrollTo().performClick()
+        checkbox("Asphalt").assertIsOn()
+        checkbox("Grass").assertIsOn()
         composeRule.onNodeWithText("Validate and save").performClick()
         composeRule.runOnIdle { assertEquals(listOf("Асфальт", "Трава"), saved?.surfaces) }
     }
@@ -518,7 +518,7 @@ class AppShellNavigationTest {
                 )
             }
         }
-        composeRule.onNodeWithText("Номер сессии *").performTextInput("Draft session")
+        composeRule.onNodeWithText("Session number *").performTextInput("Draft session")
 
         restoration.emulateSavedInstanceStateRestore()
 

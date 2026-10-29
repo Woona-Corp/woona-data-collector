@@ -77,7 +77,7 @@ class MainActivityRecreationTest {
                 .performScrollTo()
                 .performClick()
             composeRule
-                .onNodeWithText("Номер сессии *")
+                .onNodeWithText("Session number *")
                 .performTextInput("Lifecycle draft")
 
             scenario.recreate()
@@ -105,8 +105,9 @@ class MainActivityRecreationTest {
             awaitScreenReady()
             composeRule.onNode(hasText("Recordings") and SemanticsMatcher.expectValue(
                 androidx.compose.ui.semantics.SemanticsProperties.Role, androidx.compose.ui.semantics.Role.Tab)).performClick()
+            composeRule.waitUntil(30_000) { composeRule.onAllNodesWithText("Edit questionnaire").fetchSemanticsNodes().isNotEmpty() }
             composeRule.onNodeWithText("Edit questionnaire").performScrollTo().performClick()
-            composeRule.onNodeWithText("Номер сессии *").performTextReplacement("Retained existing session draft")
+            composeRule.onNodeWithText("Session number *").performTextReplacement("Retained existing session draft")
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             scenario.recreate()
             awaitScreenReady()
@@ -139,13 +140,14 @@ class MainActivityRecreationTest {
             awaitScreenReady()
             composeRule.onNode(hasText("Recordings") and SemanticsMatcher.expectValue(
                 androidx.compose.ui.semantics.SemanticsProperties.Role, androidx.compose.ui.semantics.Role.Tab)).performClick()
+            composeRule.waitUntil(30_000) { composeRule.onAllNodesWithText("Edit questionnaire").fetchSemanticsNodes().isNotEmpty() }
             composeRule.onNodeWithText("Edit questionnaire").performScrollTo().performClick()
-            composeRule.onAllNodesWithText("Да")[0].performScrollTo().performClick()
-            composeRule.onNodeWithText("Какой диагноз? (необязательно)").performScrollTo().performTextInput("Retained synthetic heart detail")
+            composeRule.onAllNodesWithText("Yes")[0].performScrollTo().performClick()
+            composeRule.onNodeWithText("Diagnosis (optional)").performScrollTo().performTextInput("Retained synthetic heart detail")
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             scenario.recreate()
             awaitScreenReady()
-            composeRule.onNodeWithText("Анкета по активности и сердцебиению").assertIsDisplayed()
+            composeRule.onNodeWithText("Activity and heart questionnaire").assertIsDisplayed()
             composeRule.onNodeWithText("Retained synthetic heart detail").performScrollTo().assertIsDisplayed()
         }
     }

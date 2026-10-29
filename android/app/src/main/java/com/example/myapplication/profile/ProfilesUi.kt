@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.text.KeyboardOptions
@@ -82,6 +84,7 @@ import com.example.myapplication.data.validate
 import com.example.myapplication.feature.device.VideoCaptureState
 import com.example.myapplication.feature.device.DeviceListItem
 import com.example.myapplication.localization.AppLanguage
+import com.example.myapplication.localization.questionnaireText
 import com.example.myapplication.ble.PolarConnectionState
 import com.example.myapplication.ble.PolarStatus
 import com.example.myapplication.protocol.ConnectionQuality
@@ -128,6 +131,13 @@ fun ProfilesOverview(
     canSelectProfile: Boolean = true,
     showingAllRecordings: Boolean = false,
     onShowAllRecordings: () -> Unit = {},
+    recordingsTotal: Int = recordings.size,
+    recordingsLoading: Boolean = false,
+    recordingsError: String? = null,
+    onShowMoreRecordings: () -> Unit = {},
+    onRetryRecordings: () -> Unit = {},
+    onRefreshRecordings: () -> Unit = {},
+    historyListState: androidx.compose.foundation.lazy.LazyListState = rememberLazyListState(),
     serverReports: Map<String, Pair<String?, Boolean>> = emptyMap(),
     onCheckServerRecording: (String) -> Unit = {},
 ) {
@@ -225,28 +235,33 @@ fun ProfilesOverview(
         Text(tr(language, "No active video. Prepare a session and enable video in its questionnaire. Start and stop control the sensor and camera together.", "Видео не запущено. Подготовьте сессию и включите видео в её анкете. Старт и остановка управляют датчиком и камерой вместе."))
     }
     if (section in setOf(ProfileScreenSection.ALL, ProfileScreenSection.RECORDINGS)) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text(
-                text = if (showingAllRecordings) tr(language, "All recordings", "Все записи") else tr(language, "Last 10 recordings", "Последние 10 записей"),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(tr(language, "Animal: ${selected?.numberOrName ?: "not selected"}. Choose another animal in Animals.", "Животное: ${selected?.numberOrName ?: "не выбрано"}. Выбор другого животного — во вкладке Животные."), style = MaterialTheme.typography.bodySmall)
-            if (!showingAllRecordings && recordings.size >= 10) {
-                OutlinedButton(onClick = onShowAllRecordings) { Text(tr(language, "Show all recordings", "Показать все записи")) }
+        val header: @Composable () -> Unit = {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(if (showingAllRecordings) tr(language, "Recording history", "История записей") else tr(language, "Last 10 recordings", "Последние 10 записей"),
+                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(tr(language, "Animal: ${selected?.numberOrName ?: "not selected"}. Choose another animal in Animals.", "Животное: ${selected?.numberOrName ?: "не выбрано"}. Выбор другого животного — во вкладке Животные."), style = MaterialTheme.typography.bodySmall)
+                if (showingAllRecordings) Text(tr(language, "Shown ${recordings.size} of $recordingsTotal", "Показано ${recordings.size} из $recordingsTotal"), modifier = Modifier.testTag("history.count"))
+                if (!showingAllRecordings && recordingsTotal > 10) OutlinedButton(onClick = onShowAllRecordings, enabled = !recordingsLoading) {
+                    Text(tr(language, "Open history", "Открыть историю"))
+                }
+                if (showingAllRecordings) {
+                    OutlinedButton(onClick = onRefreshRecordings, enabled = !recordingsLoading) { Text(tr(language, "Refresh history", "Обновить историю")) }
+                    Text(tr(language, "Refresh to include newly added recordings. The first 100 will be loaded again.", "Обновите историю, чтобы увидеть новые записи. Снова загрузятся первые 100."), style = MaterialTheme.typography.bodySmall)
+                }
+                if (recordingsLoading) {
+                    androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(tr(language, "Loading recordings…", "Загружаем записи…"))
+                }
+                if (recordingsError != null) {
+                    Text(tr(language, "History could not be loaded. Existing data is preserved.", "Не удалось загрузить историю. Существующие данные сохранены."), color = MaterialTheme.colorScheme.error)
+                    Text(recordingsError, style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = onRetryRecordings, enabled = !recordingsLoading) { Text(tr(language, "Retry", "Повторить")) }
+                }
+                if (recordings.isEmpty() && !recordingsLoading) Text(tr(language, "No recordings for this dog", "У этой собаки пока нет записей"), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (recordings.isEmpty()) {
-                Text(
-                    tr(language, "No recordings for this dog", "У этой собаки пока нет записей"),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            recordings.forEachIndexed { index, recording ->
-                if (index > 0) HorizontalDivider()
+        }
+        val content: @Composable (Recording) -> Unit = { recording ->
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 val localArtifacts = recording.artifacts.filter { it.localPresence in setOf("local", "both") }
                 val remoteArtifacts = recording.artifacts.filter { it.localPresence == "remote_only" }
                 val dataLabels = recordingDataLabels(recording, language)
@@ -331,7 +346,24 @@ fun ProfilesOverview(
                 }
             }
         }
-    }
+        val more: @Composable () -> Unit = {
+            val remaining = (recordingsTotal - recordings.size).coerceAtLeast(0)
+            if (showingAllRecordings && remaining > 0) OutlinedButton(onClick = onShowMoreRecordings, enabled = !recordingsLoading,
+                modifier = Modifier.fillMaxWidth().testTag("history.more")) {
+                val amount = minOf(100, remaining)
+                Text(tr(language, "Show $amount more", "Показать ещё $amount"))
+            }
+        }
+        if (section == ProfileScreenSection.RECORDINGS) {
+            if (recordingsLoading && recordings.isEmpty()) Card(Modifier.fillMaxWidth()) { header() }
+            else LazyColumn(Modifier.fillMaxSize().testTag("recordings.history"), state = historyListState, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                item(key = "history.header") { Card(Modifier.fillMaxWidth()) { header() } }
+                items(recordings, key = { it.id }) { recording -> Card(Modifier.fillMaxWidth()) { content(recording) } }
+                item(key = "history.more") { more() }
+            }
+        } else {
+            Card(Modifier.fillMaxWidth()) { Column { header(); recordings.forEach { content(it) }; more() } }
+        }
     }
 }
 
@@ -994,8 +1026,8 @@ private fun QuestionnaireDialog(
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(questionnaireText(title, language), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Text(questionnaireText(subtitle, language), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         tr(
                             language,
@@ -1068,7 +1100,7 @@ private fun QuestionnaireDialog(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     item {
-                        CompositionLocalProvider(LocalFirstErrorKey provides firstErrorKey) {
+                        CompositionLocalProvider(LocalFirstErrorKey provides firstErrorKey, LocalQuestionnaireLanguage provides language) {
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { content() }
                         }
                     }
@@ -1084,7 +1116,7 @@ private fun QuestionnaireDialog(
 @Composable
 private fun SectionTitle(text: String) {
     Text(
-        text,
+        questionnaireLabel(text),
         style = MaterialTheme.typography.titleMedium,
         fontWeight = FontWeight.SemiBold,
         color = MaterialTheme.colorScheme.primary,
@@ -1106,8 +1138,8 @@ private fun Field(
     OutlinedTextField(
         value = values[key].orEmpty(),
         onValueChange = { values[key] = it },
-        label = { Text(label) },
-        supportingText = error?.let { { Text(it) } },
+        label = { Text(questionnaireLabel(label)) },
+        supportingText = error?.let { { Text(questionnaireLabel(it)) } },
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         singleLine = singleLine,
         isError = error != null,
@@ -1128,7 +1160,7 @@ private fun Choice(
 ) {
     val errorModifier = firstErrorModifier(key)
     Column(modifier = errorModifier) {
-        Text(label, fontWeight = FontWeight.Medium)
+        Text(questionnaireLabel(label), fontWeight = FontWeight.Medium)
         options.forEach { (value, title) ->
             Row(
                 modifier = Modifier
@@ -1145,10 +1177,10 @@ private fun Choice(
                         onChange(value)
                     },
                 )
-                Text(title, modifier = Modifier.padding(top = 12.dp))
+                Text(questionnaireLabel(title), modifier = Modifier.padding(top = 12.dp))
             }
         }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        error?.let { Text(questionnaireLabel(it), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
     }
 }
 
@@ -1163,7 +1195,7 @@ private fun MultiChoice(
 ) {
     val errorModifier = firstErrorModifier(key)
     Column(modifier = errorModifier) {
-        Text(label, fontWeight = FontWeight.Medium)
+        Text(questionnaireLabel(label), fontWeight = FontWeight.Medium)
         options.forEach { (value, title) ->
             val selected = value in values.list(key)
             Row(
@@ -1172,10 +1204,10 @@ private fun MultiChoice(
                     .clickable { values.toggle(key, value, exclusive) },
             ) {
                 Checkbox(checked = selected, onCheckedChange = { values.toggle(key, value, exclusive) })
-                Text(title, modifier = Modifier.padding(top = 12.dp))
+                Text(questionnaireLabel(title), modifier = Modifier.padding(top = 12.dp))
             }
         }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        error?.let { Text(questionnaireLabel(it), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
     }
 }
 
@@ -1217,6 +1249,10 @@ private fun Measurement(
 }
 
 private val LocalFirstErrorKey = staticCompositionLocalOf<String?> { null }
+private val LocalQuestionnaireLanguage = staticCompositionLocalOf { AppLanguage.ENGLISH }
+
+@Composable
+private fun questionnaireLabel(text: String): String = questionnaireText(text, LocalQuestionnaireLanguage.current)
 
 private val questionnaireValuesSaver = mapSaver<SnapshotStateMap<String, String>>(
     save = { values -> values.mapValues { it.value } },
@@ -1591,7 +1627,7 @@ fun DogQuestionnaireDialog(
         SheetChoice(values, "shelterPermission", "Разрешение на съёмку", "да", "нет", "не требуется")
         Field(values, "notes", "Примечания", singleLine = false)
         Field(values, "specialistName", "ФИО специалиста, проводящего запись")
-        Text("Дата и время сохранения заполняются автоматически.")
+        Text(questionnaireText("Дата и время сохранения заполняются автоматически.", language))
     }
 }
 
@@ -1619,7 +1655,7 @@ fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onS
     var retainedDraft by rememberSaveable { mutableStateOf<String?>(null) }
     QuestionnaireDialog(
         title = tr(language, "Session questionnaire", "Анкета сессии"),
-        subtitle = "Собака связывается с выбранной карточкой. Фактические время и длительность записываются автоматически.",
+        subtitle = questionnaireText("Собака связывается с выбранной карточкой. Фактические время и длительность записываются автоматически.", language),
         language = language, progress = listOf("sessionLabel", if (values["sessionKind"] == "heart") "sessionKind" else "plannedActivities").count { !values[it].isNullOrBlank() } to 2,
         errorCount = errors.size, firstErrorKey = errors.keys.firstOrNull(), canDismiss = true, onDismiss = onDismiss,
         onSave = {
@@ -1652,7 +1688,7 @@ fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onS
         if (initial == null) Choice(values, "sessionKind", "Вид сессии", listOf("activity" to "Активность", "heart" to "Сердцебиение"), onChange = { if (it == "heart") values["videoRequested"] = "no" })
         Field(values, "sessionLabel", "Номер сессии *", error = errors["sessionLabel"])
         if (values["sessionKind"] == "heart") {
-            Text("Анкета по сердцебиению заполняется после записи. Контрольные файлы можно добавить позже.")
+            Text(questionnaireText("Анкета по сердцебиению заполняется после записи. Контрольные файлы можно добавить позже.", language))
             if (initial == null) Choice(values, "videoRequested", "Записывать видео (необязательно)", yesNo(language))
         } else {
         Field(values, "sessionDate", "Дата сессии (ГГГГ-ММ-ДД)", error = errors["sessionDate"])
@@ -1721,18 +1757,18 @@ fun HeartQuestionnaireDialog(language: AppLanguage, initial: HeartQuestionnaire?
             saved.keys().forEach { values[it] = saved.getString(it) }
             retainedDraft = if (stack.length() <= 1) null else org.json.JSONArray((0 until stack.length() - 1).map { stack.getJSONObject(it) }).toString()
         })) {
-        Text("1. Сведения о сердце и препаратах", fontWeight = FontWeight.SemiBold)
+        Text(questionnaireText("1. Сведения о сердце и препаратах", language), fontWeight = FontWeight.SemiBold)
         Choice(values, "knownHeartCondition", "1.1. Диагностировал ли ветеринар заболевание сердца или нарушение ритма? *", HEART_OPTIONS.getValue("knownHeartCondition"), errors["knownHeartCondition"])
         if (values["knownHeartCondition"] == "yes") Field(values, "knownHeartConditionDetails", "Какой диагноз? (необязательно)")
         Choice(values, "heartRelevantMedication", "1.2. Принимала ли собака препараты, которые могут повлиять на частоту сердечных сокращений (ЧСС)? *", HEART_OPTIONS.getValue("heartRelevantMedication"), errors["heartRelevantMedication"])
         if (values["heartRelevantMedication"] == "yes") Field(values, "heartRelevantMedicationDetails", "Название препарата и время последнего приёма (необязательно)")
-        Text("Если оператор не знает, не нужно оценивать препарат самостоятельно — выберите «Неизвестно».")
-        Text("2. Условия записи", fontWeight = FontWeight.SemiBold)
+        Text(questionnaireText("Если оператор не знает, не нужно оценивать препарат самостоятельно — выберите «Неизвестно».", language))
+        Text(questionnaireText("2. Условия записи", language), fontWeight = FontWeight.SemiBold)
         Choice(values, "preRecordingState", "2.1. Что собака делала непосредственно перед началом записи? *", HEART_OPTIONS.getValue("preRecordingState"), errors["preRecordingState"])
         Choice(values, "actualActivity", "2.2. Что собака фактически делала во время записи? *", HEART_OPTIONS.getValue("actualActivity"), errors["actualActivity"])
         MultiChoice(values, "acuteHeartRateFactors", "2.3. Были ли во время записи факторы, способные изменить ЧСС? *", HEART_OPTIONS.getValue("acuteHeartRateFactors"), errors["acuteHeartRateFactors"], setOf("none", "unknown"))
-        Text("«Нет» и «Неизвестно» нельзя сочетать с другими вариантами.")
-        Text("3. Контрольное измерение", fontWeight = FontWeight.SemiBold)
+        Text(questionnaireText("«Нет» и «Неизвестно» нельзя сочетать с другими вариантами.", language))
+        Text(questionnaireText("3. Контрольное измерение", language), fontWeight = FontWeight.SemiBold)
         Choice(values, "referenceMethod", "3.1. Есть ли независимое измерение сердцебиения за тот же период? *", HEART_OPTIONS.getValue("referenceMethod"), errors["referenceMethod"])
         when (values["referenceMethod"]) {
             "ecg", "polar_rr" -> Field(values, "referenceArtifact", "Файл или идентификатор контрольной записи и её временная привязка *", error = errors["referenceArtifact"])
@@ -1741,7 +1777,7 @@ fun HeartQuestionnaireDialog(language: AppLanguage, initial: HeartQuestionnaire?
                 Field(values, "referenceMeasuredAtUtc", "Время измерения (UTC, ГГГГ-ММ-ДДTЧЧ:ММ:ССZ) *", error = errors["referenceMeasuredAtUtc"])
             }
         }
-        Text("Файл ЭКГ или интервалы с временными метками нужны для проверки отдельных ударов. Одиночное значение ЧСС подходит только для сравнения среднего темпа. По ответам анкеты нельзя делать заключение об аритмии.")
+        Text(questionnaireText("Файл ЭКГ или интервалы с временными метками нужны для проверки отдельных ударов. Одиночное значение ЧСС подходит только для сравнения среднего темпа. По ответам анкеты нельзя делать заключение об аритмии.", language))
     }
 }
 
@@ -1760,7 +1796,7 @@ fun ReferenceAttachmentDialog(language: AppLanguage, fileName: String, onDismiss
     onSave: suspend (com.example.myapplication.data.ArtifactType, com.example.myapplication.data.ReferenceMetadata) -> Unit) {
     val values = rememberSaveable(saver = questionnaireValuesSaver) { mutableStateMapOf<String, String>() }
     var errors by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-    QuestionnaireDialog("Добавить контрольную запись", fileName, language, 0 to 4, errors.size, errors.keys.firstOrNull(), true, onDismiss, {
+    QuestionnaireDialog(questionnaireText("Добавить контрольную запись", language), fileName, language, 0 to 4, errors.size, errors.keys.firstOrNull(), true, onDismiss, {
         val metadata = com.example.myapplication.data.ReferenceMetadata(values["source"].orEmpty(), values["startedAtUtc"].orEmpty(),
             values["endedAtUtc"].orEmpty(), values.sheetDouble("offsetFromRecordingMs"), values.text("notes"))
         errors = metadata.validate().errors + if (values["type"] == null) mapOf("type" to "Выберите тип данных") else emptyMap()
@@ -1772,7 +1808,7 @@ fun ReferenceAttachmentDialog(language: AppLanguage, fileName: String, onDismiss
         Field(values, "endedAtUtc", "Окончание контрольной записи UTC *", error = errors["endedAtUtc"])
         Field(values, "offsetFromRecordingMs", "Поправка к UTC таргета, мс (добавляется к его меткам, если известна)", KeyboardType.Decimal, errors["offsetFromRecordingMs"])
         Field(values, "notes", "Временная привязка / примечания", error = errors["notes"], singleLine = false)
-        Text("Оригинальный файл сохраняется без преобразований. ЧСС без интервалов подходит только для сравнения среднего темпа.")
+        Text(questionnaireText("Оригинальный файл сохраняется без преобразований. ЧСС без интервалов подходит только для сравнения среднего темпа.", language))
     }
 }
 

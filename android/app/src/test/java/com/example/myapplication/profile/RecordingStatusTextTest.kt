@@ -13,6 +13,15 @@ class RecordingStatusTextTest {
     private val ru = AppLanguage.RUSSIAN
     private val en = AppLanguage.ENGLISH
 
+    @Test fun quotaAndReservedSpaceGiveDifferentActionsAndPreserveRawDetails() {
+        val quota = recordingUploadErrorText("HTTP 413 storage_quota_exceeded requestId=fixture-id", en)
+        assertTrue(quota.contains("storage limit")); assertTrue(quota.contains("automatic retries"))
+        assertTrue(recordingUploadErrorText("storage_quota_exceeded", ru).contains("Проверьте лимиты"))
+        assertTrue(recordingUploadErrorText("storage_reservation_unavailable", en).contains("unreserved"))
+        assertTrue(recordingUploadErrorText("storage_reservation_unavailable", ru).contains("зарезервированного"))
+        assertTrue(com.example.myapplication.sync.nextTransferActionText("review_server_storage_limits", false).contains("storage limits"))
+    }
+
     @Test fun failedCaptureStaysExplicitWhenUploadSucceeded() {
         assertEquals("Запись: прервана — сбой связи с ошейником (GATT 8)",
             recordingCaptureText("failed", "gatt_error", "Ошибка GATT-подключения: 8", ru))

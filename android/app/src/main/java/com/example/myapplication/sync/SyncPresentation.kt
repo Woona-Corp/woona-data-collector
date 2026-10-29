@@ -93,6 +93,7 @@ fun nextTransferActionText(value: String, ru: Boolean): String = when (value) {
     "restart_file_upload" -> if (ru) "повторите передачу файла; сохраните оригинал" else "retry the file transfer; preserve the original"
     "contact_support_preserve_local_data" -> if (ru) "сохраните локальные данные и передайте диагностику разработчику" else "preserve local data and send diagnostics to support"
     "review_rejected_file" -> if (ru) "проверьте причину отклонения файла; не удаляйте оригинал" else "review why the file was rejected; preserve the original"
+    "review_server_storage_limits" -> if (ru) "проверьте лимиты хранения записи и аккаунта на сервере; сохраните локальные оригиналы" else "review the server recording and account storage limits; preserve local originals"
     "retry_after_storage_available" -> if (ru) "повторите после освобождения места на сервере; локальные оригиналы сохранены" else "retry after server storage is available; local originals are preserved"
     "retry_later" -> if (ru) "повторите позже" else "retry later"
     else -> value

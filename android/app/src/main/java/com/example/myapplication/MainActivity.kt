@@ -107,6 +107,13 @@ class MainActivity : ComponentActivity() {
     private var selectedProfileId by mutableStateOf<String?>(null)
     private var recentRecordings by mutableStateOf<List<Recording>>(emptyList())
     private var showingAllRecordings by mutableStateOf(false)
+    private var recordingsTotal by mutableStateOf(0)
+    private var recordingsLoading by mutableStateOf(false)
+    private var recordingsError by mutableStateOf<String?>(null)
+    private var historyCursor: com.example.myapplication.data.RecordingHistoryCursor? = null
+    private var historyProfileId: String? = null
+    private var historyRequestedCount = 10
+    private val historyGeneration = java.util.concurrent.atomic.AtomicLong()
     private var localHistorySummary by mutableStateOf("")
     private var serverRecordingReports by mutableStateOf<Map<String, Pair<String?, Boolean>>>(emptyMap())
     private var serverSyncState by mutableStateOf(ServerSyncUiState())
@@ -296,6 +303,7 @@ class MainActivity : ComponentActivity() {
                         com.example.myapplication.storage.StartupRecoveryScreen(selectedLanguage, startupRecoveryRunning, startupRecoveryError) { beginStartupRecovery() }
                     }
                 } else {
+                val historyListState = androidx.compose.runtime.saveable.rememberSaveable(selectedProfileId, saver = androidx.compose.foundation.lazy.LazyListState.Saver) { androidx.compose.foundation.lazy.LazyListState() }
                 val uiState = deviceFeatureController.uiState
                 AppThemeEntryPoint.Render(themeMode = selectedThemeMode) {
                     val serverMutationBlock = serverMutationBlockReason(serverSyncState.uploading)
@@ -437,7 +445,14 @@ class MainActivity : ComponentActivity() {
                             }
                             ProfilesOverview(
                                 showingAllRecordings = showingAllRecordings,
-                                onShowAllRecordings = { showingAllRecordings = true; refreshProfilesAndRecordings() },
+                                onShowAllRecordings = { showingAllRecordings = true; historyRequestedCount = 100; loadRecordingHistory() },
+                                historyListState = historyListState,
+                                recordingsTotal = recordingsTotal,
+                                recordingsLoading = recordingsLoading,
+                                recordingsError = recordingsError,
+                                onShowMoreRecordings = { loadRecordingHistory(append = true) },
+                                onRetryRecordings = { loadRecordingHistory() },
+                                onRefreshRecordings = { historyRequestedCount = 100; loadRecordingHistory(resetHistory = true) },
                                 serverReports = serverRecordingReports,
                                 onCheckServerRecording = ::checkRecordingOnServer,
                                 section = section,
@@ -665,6 +680,11 @@ class MainActivity : ComponentActivity() {
 
     private fun restoreStartupUiState(savedInstanceState: Bundle?) {
         savedInstanceState?.let { state ->
+            if (state.getString("history.profile") == selectedProfileId) {
+                showingAllRecordings = state.getBoolean("history.opened")
+                historyRequestedCount = state.getInt("history.count", 10).coerceAtLeast(10)
+                loadRecordingHistory()
+            }
             editingProfile = state.getString(STATE_EDITING_PROFILE_ID)
                 ?.let { id -> dogProfiles.firstOrNull { it.id == id } }
             isDogQuestionnaireVisible =
@@ -706,6 +726,9 @@ class MainActivity : ComponentActivity() {
             super.onSaveInstanceState(outState)
             return
         }
+        outState.putString("history.profile", selectedProfileId)
+        outState.putBoolean("history.opened", showingAllRecordings)
+        outState.putInt("history.count", historyRequestedCount)
         outState.putBoolean(STATE_DOG_QUESTIONNAIRE_VISIBLE, isDogQuestionnaireVisible)
         outState.putString(STATE_EDITING_PROFILE_ID, editingProfile?.id)
         outState.putBoolean(STATE_SESSION_QUESTIONNAIRE_VISIBLE, isSessionQuestionnaireVisible)
@@ -737,6 +760,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        historyGeneration.incrementAndGet()
         setChartFullscreenActive(false)
         if (startupReady && !deviceFeatureController.shouldRetainConnection()) {
             DeviceFeatureControllerHolder.releaseIfInactive(deviceFeatureController)
@@ -863,7 +887,8 @@ class MainActivity : ComponentActivity() {
         selectedProfileId = profileId
         profilePreferences.edit().putString(LAST_PROFILE_ID_KEY, profileId).apply()
         showingAllRecordings = false
-        recentRecordings = woonaDatabase.recentRecordings(profileId)
+        historyRequestedCount = 10
+        loadRecordingHistory()
     }
 
     private fun refreshProfilesAndRecordings(preferredProfileId: String? = null) {
@@ -887,12 +912,58 @@ class MainActivity : ComponentActivity() {
             ?: profiles.firstOrNull()?.id
         selectedProfileId = selectedId
         if (selectedId == null) {
-            recentRecordings = emptyList()
+            loadRecordingHistory()
             editingProfile = null
             isDogQuestionnaireVisible = false
         } else {
             profilePreferences.edit().putString(LAST_PROFILE_ID_KEY, selectedId).apply()
-            recentRecordings = woonaDatabase.recentRecordings(selectedId, if (showingAllRecordings) Int.MAX_VALUE else 10)
+            loadRecordingHistory()
+        }
+    }
+
+    private fun loadRecordingHistory(append: Boolean = false, resetHistory: Boolean = false) {
+        if (isDestroyed) return
+        val profileId = selectedProfileId ?: run {
+            historyGeneration.incrementAndGet(); recentRecordings = emptyList(); recordingsTotal = 0
+            historyCursor = null; historyProfileId = null; recordingsLoading = false
+            return
+        }
+        if (append && (recordingsLoading || historyCursor == null)) return
+        val sameProfile = historyProfileId == profileId
+        if (!sameProfile) {
+            recentRecordings = emptyList(); historyCursor = null; recordingsTotal = 0
+            showingAllRecordings = false; historyRequestedCount = 10
+        }
+        historyProfileId = profileId
+        val generation = historyGeneration.incrementAndGet()
+        val previous = if (append) recentRecordings else emptyList()
+        val after = if (append) historyCursor else null
+        val wanted = if (append || resetHistory) 100 else if (showingAllRecordings) maxOf(100, historyRequestedCount, recentRecordings.size) else 10
+        recordingsLoading = true; recordingsError = null
+        backgroundExecutor.execute {
+            val result = runCatching {
+                val loaded = mutableListOf<Recording>()
+                var cursor = after
+                var total = 0
+                do {
+                    if (Thread.currentThread().isInterrupted || historyGeneration.get() != generation) throw java.util.concurrent.CancellationException()
+                    val page = woonaDatabase.recordingHistoryPage(profileId, minOf(100, wanted - loaded.size), cursor)
+                    loaded += page.recordings; total = page.totalCount; cursor = page.nextCursor
+                } while (cursor != null && loaded.size < wanted)
+                Triple(loaded.toList(), total, cursor)
+            }
+            runOnUiThread {
+                if (isDestroyed || generation != historyGeneration.get() || selectedProfileId != profileId) return@runOnUiThread
+                recordingsLoading = false
+                result.onSuccess { (rows, total, cursor) ->
+                    recentRecordings = (previous + rows).distinctBy { it.id }
+                    recordingsTotal = maxOf(total, recentRecordings.size)
+                    historyCursor = cursor
+                    historyRequestedCount = recentRecordings.size
+                }.onFailure { error ->
+                    if (error !is java.util.concurrent.CancellationException) recordingsError = error.toString()
+                }
+            }
         }
     }
 

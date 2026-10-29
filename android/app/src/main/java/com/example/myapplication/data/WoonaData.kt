@@ -405,6 +405,14 @@ data class Recording(
         get() = remoteOrigin || serverReceiptSha256 != null || serverSyncState in setOf("synced", "remote")
 }
 
+data class RecordingHistoryCursor(val sortTimeMillis: Long, val id: String)
+
+data class RecordingHistoryPage(
+    val recordings: List<Recording>,
+    val totalCount: Int,
+    val nextCursor: RecordingHistoryCursor?,
+)
+
 data class RecordingSummary(
     val recording: Recording,
     val profileName: String,
@@ -738,6 +746,11 @@ class WoonaDatabase(
             db.execSQL("DROP TABLE artifacts_v5")
             db.execSQL("CREATE INDEX artifacts_recording ON artifacts(recording_id)")
         }
+    }
+
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        if (!db.isReadOnly) db.execSQL("CREATE INDEX IF NOT EXISTS recordings_history_time ON recordings(dog_id,$HISTORY_TIME_KEY DESC,id DESC)")
     }
 
     private fun createSchema(db: SQLiteDatabase) {
@@ -1446,30 +1459,50 @@ class WoonaDatabase(
         return target
     }
 
-    fun recentRecordings(profileId: String, limit: Int = 10): List<Recording> {
-        return readableDatabase.query(
-            "recordings",
-            RECORDING_COLUMNS,
-            "dog_id=?",
-            arrayOf(profileId),
-            null,
-            null,
-            "started_at_utc DESC",
-            limit.coerceAtLeast(0).toString(),
-        ).use { cursor ->
-            buildList {
-                while (cursor.moveToNext()) {
-                    val recording = cursor.toRecording()
-                    add(
-                        recording.copy(
-                            artifacts = artifacts(recording.id),
-                            serverSyncState = recordingServerSyncState(recording.id),
-                            serverSyncError = recordingServerSyncError(recording.id),
-                        ),
-                    )
-                }
-            }
+    fun recentRecordings(profileId: String, limit: Int = 10): List<Recording> =
+        recordingRows(profileId, limit.coerceAtLeast(0), null).map { it.recording }
+
+    /** Bounded keyset pages: new captures cannot shift offsets and duplicate old rows. */
+    fun recordingHistoryPage(profileId: String, limit: Int = 100, after: RecordingHistoryCursor? = null): RecordingHistoryPage {
+        require(limit in 1..100) { "History page size must be 1–100" }
+        val total = readableDatabase.rawQuery("SELECT COUNT(*) FROM recordings WHERE dog_id=?", arrayOf(profileId)).use {
+            it.moveToFirst(); it.getInt(0)
         }
+        val rows = recordingRows(profileId, limit + 1, after)
+        val visible = rows.take(limit)
+        return RecordingHistoryPage(visible.map { it.recording }, maxOf(total, visible.size), if (rows.size > limit) {
+            visible.last().let { RecordingHistoryCursor(it.sortTimeMillis, it.recording.id) }
+        } else null)
+    }
+
+    private data class HistoryRow(val recording: Recording, val sortTimeMillis: Long)
+
+    private fun recordingRows(profileId: String, limit: Int, after: RecordingHistoryCursor?): List<HistoryRow> {
+        if (limit == 0) return emptyList()
+        val timeKey = HISTORY_TIME_KEY.replace("started_at_utc", "r.started_at_utc")
+        val projection = RECORDING_COLUMNS.dropLast(1).joinToString(",") { if (it == "started_at_utc") "COALESCE(r.started_at_utc,'')" else "r.$it" } +
+            ",s.server_receipt_sha256,COALESCE(s.state,'pending')," +
+            "CASE WHEN s.state IN ('retryable_error','permanent_error') THEN COALESCE(NULLIF(s.last_error_message,''),s.last_error_code) END,$timeKey"
+        val cursorClause = if (after == null) "" else " AND ($timeKey,r.id)<(CAST(? AS INTEGER),?)"
+        val args = if (after == null) arrayOf(profileId, limit.toString()) else
+            arrayOf(profileId, after.sortTimeMillis.toString(), after.id, limit.toString())
+        val rows = readableDatabase.rawQuery(
+            "SELECT $projection FROM recordings r LEFT JOIN server_sync_state s ON s.recording_id=r.id " +
+                "WHERE r.dog_id=?$cursorClause ORDER BY $timeKey DESC,r.id DESC LIMIT ?", args,
+        ).use { cursor -> buildList {
+            while (cursor.moveToNext()) add(HistoryRow(cursor.toRecording().copy(
+                serverSyncState = cursor.getString(17),
+                serverSyncError = if (cursor.isNull(18)) null else cursor.getString(18),
+            ), cursor.getLong(19)))
+        } }
+        val grouped = rows.map { it.recording.id }.chunked(500).flatMap { ids ->
+            readableDatabase.query("artifacts", ARTIFACT_COLUMNS,
+                "recording_id IN (${ids.joinToString(",") { "?" }})", ids.toTypedArray(), null, null,
+                "recording_id,created_at_utc,relative_path").use { cursor -> buildList {
+                while (cursor.moveToNext()) add(cursor.toArtifact())
+            } }
+        }.groupBy { it.recordingId }
+        return rows.map { it.copy(recording = it.recording.copy(artifacts = grouped[it.recording.id].orEmpty())) }
     }
 
     fun recording(id: String): Recording? {
@@ -1516,41 +1549,22 @@ class WoonaDatabase(
         return file
     }
 
-    private fun artifacts(recordingId: String): List<Artifact> {
-        return readableDatabase.query(
-            "artifacts",
-            ARTIFACT_COLUMNS,
-            "recording_id=?",
-            arrayOf(recordingId),
-            null,
-            null,
-            "created_at_utc, relative_path",
-        ).use { cursor ->
-            buildList {
-                while (cursor.moveToNext()) {
-                    add(
-                        Artifact(
-                            id = cursor.getString(0),
-                            recordingId = cursor.getString(1),
-                            type = ArtifactType.entries.first { it.value == cursor.getString(2) },
-                            fileName = cursor.getString(3),
-                            mimeType = cursor.getString(4),
-                            relativePath = cursor.getString(5),
-                            sizeBytes = cursor.getLong(6),
-                            sha256 = cursor.getString(7),
-                            localPresence = if (cursor.getString(9) == "available") {
-                                if (runCatching { resolveRelativePath(cursor.getString(5)).isFile }.getOrDefault(false)) "both" else "remote_only"
-                            } else cursor.getString(8),
-                            uploadState = cursor.getString(9),
-                            uploadedBytes = cursor.getLong(10),
-                            createdAtUtc = cursor.getString(11),
-                            referenceMetadataJson = if (cursor.isNull(12)) null else cursor.getString(12),
-                        ),
-                    )
-                }
-            }
-        }
-    }
+    private fun artifacts(recordingId: String): List<Artifact> = readableDatabase.query(
+        "artifacts", ARTIFACT_COLUMNS, "recording_id=?", arrayOf(recordingId), null, null,
+        "created_at_utc,relative_path",
+    ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.toArtifact()) } }
+
+    private fun android.database.Cursor.toArtifact(): Artifact = Artifact(
+        id = getString(0), recordingId = getString(1),
+        type = ArtifactType.entries.first { it.value == getString(2) },
+        fileName = getString(3), mimeType = getString(4), relativePath = getString(5),
+        sizeBytes = getLong(6), sha256 = getString(7),
+        localPresence = if (getString(9) == "available") {
+            if (runCatching { resolveRelativePath(getString(5)).isFile }.getOrDefault(false)) "both" else "remote_only"
+        } else getString(8),
+        uploadState = getString(9), uploadedBytes = getLong(10), createdAtUtc = getString(11),
+        referenceMetadataJson = if (isNull(12)) null else getString(12),
+    )
 
     private fun recordingServerSyncState(recordingId: String): String =
         readableDatabase.query(
@@ -1764,6 +1778,9 @@ class WoonaDatabase(
 
     companion object {
         private const val DATABASE_VERSION = 8
+        // Preserve historical text verbatim; normalize only the indexed UI ordering key.
+        // SQLite dates have millisecond resolution; UUID deterministically breaks equal instants.
+        private const val HISTORY_TIME_KEY = "COALESCE(CAST(ROUND((CASE WHEN started_at_utc GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN julianday(started_at_utc) END-2440587.5)*86400000.0) AS INTEGER),-9223372036854775807)"
         private val RECORDING_COLUMNS = arrayOf(
             "id",
             "dog_id",
