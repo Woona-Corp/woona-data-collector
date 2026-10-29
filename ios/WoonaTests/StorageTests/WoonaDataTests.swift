@@ -271,6 +271,21 @@ final class WoonaDataTests: XCTestCase {
     }
 
     @MainActor
+    func testGlobalQueueRemainsVisibleWhenSelectedAccountHasNoAnimal() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let hidden = try store.saveProfile(completeDog(), accountID: "another-account")
+        _ = try seedHistory(root: root, profile: hidden, count: 1)
+        let model = AppViewModel(store: store, uiTesting: true)
+        try await awaitHistoryForTesting(model)
+        XCTAssertNil(model.selectedDogProfile)
+        XCTAssertTrue(model.recentRecordings.isEmpty)
+        XCTAssertEqual(model.uploadFailed, 1, "Settings shows all-account queue, including hidden animals")
+        XCTAssertEqual(model.uploadLastError, "Synthetic preserved upload failure")
+    }
+
+    @MainActor
     func testHistoryReadFailureDoesNotCreateAnEmptyDatabaseAndCanBeRetried() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

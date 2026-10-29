@@ -1596,13 +1596,13 @@ final class AppViewModel: ObservableObject {
         let generation = historyGeneration
         historyLoadTask?.cancel()
         invalidateSessionExportAvailability()
-        guard let store, let profile = selectedDogProfile else {
+        guard let store else {
             recentRecordings = []; downloadableRecordingIDs = []; exportableRecordingIDs = []
             recordingSyncErrors = [:]; recordingFileCounts = [:]; recordingUploadProgress = [:]
             historyTotalCount = 0; isHistoryLoading = false; historyLoadError = nil
             return
         }
-        let root = store.rootDirectory, dogID = profile.id, accountID = selectedAccountID
+        let root = store.rootDirectory, dogID = selectedDogProfile?.id, accountID = selectedAccountID
         let limit = append ? 100 : historyLimit, cursor = append ? historyCursor : nil
         historyWasAppending = append
         isHistoryLoading = true; historyLoadError = nil
@@ -1616,6 +1616,10 @@ final class AppViewModel: ObservableObject {
                 onStart?()
 #endif
                 let reader = try WoonaStore(rootDirectory: root, readOnly: true)
+                guard let dogID else {
+                    return RecordingHistorySnapshot(recordings: [], totalCount: 0, cursor: nil, hasMore: false,
+                        files: [:], syncErrors: [:], cleanup: try reader.retirementCleanupStatus(), queue: try reader.syncOverview())
+                }
                 var rows: [WoonaRecording] = [], files: [UUID: RecordingHistoryFiles] = [:], errors: [UUID: String] = [:]
                 var nextCursor = cursor, remaining = limit, total: Int?, last: RecordingHistorySnapshot?
                 repeat {
