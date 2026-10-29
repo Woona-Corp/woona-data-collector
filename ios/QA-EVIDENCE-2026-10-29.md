@@ -114,8 +114,9 @@ it does not require an intermittent platform failure to occur for the suite to p
 | --- | --- | --- | --- |
 | [ASan 40903495453](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40903495453) | 290/290 PASS | 0 / 256 | 39 / 256 |
 | [TSan 40903500634](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40903500634) | 290/290 PASS | 0 / 256 | 53 / 256 |
+| [Release workflow 40906195392](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40906195392) | 290/290 PASS | 0 / 256 | 41 / 256 |
 
-Recorded control samples in both runs match the original writer error 3850/errno 9.
+Recorded control samples in all three runs match the original writer error 3850/errno 9.
 Both protected fixtures preserved the original profile and inventory. Reports are kept
 as `history-lock-churn-control` test attachments. These are simulator stress results,
 not physical-device throughput or a guarantee about every filesystem.
@@ -153,14 +154,26 @@ was readable in both themes. The editable species value «собака» is pres
 text in English on both platforms, not an untranslated UI label. This review does not
 claim full-page/Dynamic Type visual coverage or contrast measurements for every field.
 
-Subsequent account-selection and descriptor changes are covered by the final 290-test
-sanitizer suites. Their standard full UI/release workflow results must be recorded
-separately when those runs complete; the earlier 299/299 result is not relabeled as a
-304-test final full run. Earlier assertion/readiness failures were corrected without
+The final standard simulator run in
+[release workflow 40906195392](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40906195392)
+at `75aae98` passed 290 unit tests plus 14 UI tests (304/304). The unit suite took
+10.616 seconds and UI tests 438.896 seconds; `TEST SUCCEEDED` was recorded at
+2026-10-29 16:08:42 UTC. Its independently opened native session ZIP again passed all
+eight artifact types, questionnaires, sync, size/SHA and ZIP CRC checks. The earlier
+299/299 result remains distinct. Earlier assertion/readiness failures were corrected without
 removing UUID, draft-retention, active-capture, file-removal or exact cancellation checks.
 
 Linux SQL/source checks cannot prove iOS compilation, BLE/camera behavior, MP4 quality,
 background termination or physical sensor clock alignment. Those require a signed
-physical iPhone and sensor. These simulator/test records do not establish signing,
-TestFlight upload, Apple processing or tester availability; release workflow records
-establish those separately.
+physical iPhone and sensor.
+
+## Internal release upload
+
+The same successful release workflow built marketing version **1.5.1**, build
+**13501**, from tag `ios-v1.5.1-internal.1` at `75aae98`. Native tests and signing-asset
+installation succeeded before archive. Its log records `ARCHIVE SUCCEEDED` at
+2026-10-29 16:11:23 UTC, then `Upload succeeded`, `Uploaded Woona` and
+`EXPORT SUCCEEDED` at 16:12:43 UTC. These establish successful signed upload to
+App Store Connect. The upload response states that the package is processing;
+Apple processing completion and internal tester availability require the separate
+exact-version/build status record and are not established by upload success alone.
