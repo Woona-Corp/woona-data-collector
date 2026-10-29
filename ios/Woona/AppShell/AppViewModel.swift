@@ -53,6 +53,7 @@ final class AppViewModel: ObservableObject {
     }
     @Published private(set) var pendingPostCaptureHeartQuestionnaire: WoonaRecording?
     @Published private(set) var heartQuestionnairePresentation: WoonaRecording?
+    @Published private(set) var isSessionQuestionnairePresented = false
     private var pendingHeartAccountID: String?
     private var lastPostCaptureHeartRecordingID: UUID?
     @Published private(set) var recentRecordings: [WoonaRecording] = []
@@ -1121,16 +1122,11 @@ final class AppViewModel: ObservableObject {
         await prepareCaptureForConnection()
     }
 
-    func startSyntheticHeartCaptureForTesting() throws {
+    func makeSyntheticHeartReplaySourceForTesting() throws -> URL {
         guard let store else { throw WoonaStoreError.invalidData("Synthetic heart capture requires its isolated store") }
         let source = store.rootDirectory.appendingPathComponent("ui-heart-replay-" + UUID().uuidString + ".bin")
         try Data().write(to: source)
-        var questionnaire = SessionQuestionnaire()
-        questionnaire.schemaVersion = 2; questionnaire.sessionKind = "heart"
-        questionnaire.sessionLabel = "New capture heart target"; questionnaire.videoRequested = false
-        // Empty replay exercises actual stop/failure/durable finalization without
-        // pretending to verify Bluetooth hardware or camera behavior.
-        try startReplay(from: source, questionnaire: questionnaire)
+        return source
     }
 
     func submitPacketFragmentForTesting(_ fragment: [UInt8]) {
@@ -1586,7 +1582,7 @@ final class AppViewModel: ObservableObject {
 
     var canPresentPendingHeartQuestionnaire: Bool {
         guard let recording = pendingPostCaptureHeartQuestionnaire else { return false }
-        return heartQuestionnairePresentation == nil && !isLocalRecoveryRunning && localRecoveryError == nil &&
+        return heartQuestionnairePresentation == nil && !isSessionQuestionnairePresented && !isLocalRecoveryRunning && localRecoveryError == nil &&
             !isCompleteArchiveExporting && exportPhase == nil && preparedExport == nil &&
             recording.dogID == selectedDogProfile?.id && pendingHeartAccountID == selectedAccountID &&
             canEditQuestionnaire(recording)
@@ -1609,6 +1605,7 @@ final class AppViewModel: ObservableObject {
 
     func presentHeartQuestionnaire(for recording: WoonaRecording) {
         guard heartQuestionnairePresentation == nil, canEditQuestionnaire(recording),
+              !isSessionQuestionnairePresented,
               !isLocalRecoveryRunning, localRecoveryError == nil,
               !isCompleteArchiveExporting, exportPhase == nil, preparedExport == nil else { return }
         do {
@@ -1626,6 +1623,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func dismissHeartQuestionnaire() { heartQuestionnairePresentation = nil }
+
+    func setSessionQuestionnairePresented(_ presented: Bool) { isSessionQuestionnairePresented = presented }
 
     private func clearHeartQuestionnaireScope() {
         pendingPostCaptureHeartQuestionnaire = nil

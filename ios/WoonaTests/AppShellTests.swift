@@ -456,7 +456,16 @@ final class AppShellTests: XCTestCase {
         try await waitUntil("initial heart history") { !model.isHistoryLoading }
         XCTAssertNil(model.pendingPostCaptureHeartQuestionnaire)
         XCTAssertNil(model.heartQuestionnairePresentation)
+        model.setSessionQuestionnairePresented(true)
         let id = try beginHeartPromptReplay(model, root: root, label: "New owned heart")
+        try await waitUntil("durable heart completion while preparation sheet is still closing", timeout: 15) {
+            model.activeRecording == nil && model.canStartNewSession && !model.isHistoryLoading && model.pendingPostCaptureHeartQuestionnaire?.id == id
+        }
+        XCTAssertFalse(model.canPresentPendingHeartQuestionnaire)
+        model.presentPendingHeartQuestionnaire()
+        XCTAssertNil(model.heartQuestionnairePresentation)
+        XCTAssertEqual(model.pendingPostCaptureHeartQuestionnaire?.id, id, "UI preparation must defer, not consume, the durable capture event")
+        model.setSessionQuestionnairePresented(false)
         try await waitForHeartPromptLocalIdle(model)
         let fresh = try XCTUnwrap(store.recording(id: id))
         XCTAssertTrue(["completed", "failed", "interrupted"].contains(fresh.status))

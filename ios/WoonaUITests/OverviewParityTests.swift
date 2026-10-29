@@ -58,6 +58,18 @@ final class OverviewParityTests: XCTestCase {
         let capture = app.buttons["heart.capture.fixture"]
         XCTAssertTrue(capture.waitForExistence(timeout: 5))
         capture.tap()
+        XCTAssertTrue(app.navigationBars["Session questionnaire"].waitForExistence(timeout: 5))
+        let heartbeat = app.segmentedControls.buttons["Heartbeat"]
+        XCTAssertTrue(heartbeat.waitForExistence(timeout: 5))
+        XCTAssertTrue(heartbeat.isEnabled && heartbeat.isHittable)
+        heartbeat.tap()
+        let number = app.textFields["Session number *"]
+        XCTAssertTrue(number.waitForExistence(timeout: 5))
+        number.tap(); number.typeText("314159")
+        let proceed = app.buttons["Continue"]
+        XCTAssertTrue(proceed.waitForExistence(timeout: 5))
+        XCTAssertTrue(proceed.isEnabled && proceed.isHittable)
+        proceed.tap()
         let editor = app.navigationBars["Activity and heart questionnaire"]
         XCTAssertTrue(editor.waitForExistence(timeout: 15), "A newly finalized heart capture must open its own questionnaire")
         attachScreen("NewHeartCapture-PostFinalizationQuestionnaire")
@@ -66,7 +78,7 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.buttons["tab.overview"].isSelected)
         app.buttons["tab.recordings"].tap()
         XCTAssertTrue(app.navigationBars["Recordings"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["New capture heart target"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["314159"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Preexisting incomplete heart"].exists)
         XCTAssertFalse(editor.waitForExistence(timeout: 5), "Dismissing the capture prompt must not reopen either old or new incomplete forms during history browsing")
     }

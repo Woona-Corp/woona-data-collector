@@ -470,7 +470,11 @@ struct OverviewView: View {
                 #if DEBUG
                 if ProcessInfo.processInfo.arguments.contains("--ui-testing-heart-capture") {
                     Button("Run synthetic heart capture") {
-                        do { try appState.startSyntheticHeartCaptureForTesting() }
+                        do {
+                            pendingReplayURL = try appState.makeSyntheticHeartReplaySourceForTesting()
+                            pendingDevice = nil
+                            isSessionEditorPresented = true
+                        }
                         catch { appState.reportError("Synthetic heart capture failed", error: error) }
                     }.accessibilityIdentifier("heart.capture.fixture")
                 }
@@ -818,7 +822,10 @@ struct OverviewView: View {
                 }
                 .id(presentation.id)
             }
-            .sheet(isPresented: $isSessionEditorPresented, onDismiss: { pendingDevice = nil; pendingReplayURL = nil }) {
+            .sheet(isPresented: $isSessionEditorPresented, onDismiss: {
+                pendingDevice = nil; pendingReplayURL = nil
+                appState.setSessionQuestionnairePresented(false)
+            }) {
                 SessionQuestionnaireEditor(
                     language: appState.selectedLanguage,
                     source: pendingReplayURL == nil ? "live" : "replay"
@@ -831,6 +838,7 @@ struct OverviewView: View {
                     pendingDevice = nil
                     pendingReplayURL = nil
                 }
+                .onAppear { appState.setSessionQuestionnairePresented(true) }
             }
         }
     }
