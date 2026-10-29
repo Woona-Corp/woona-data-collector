@@ -673,9 +673,6 @@ struct OverviewView: View {
                             }
                                 .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary).accessibilityIdentifier("devices.newConnection")
                                 .disabled(!appState.canOpenBLEPicker)
-                                #if DEBUG
-                                .accessibilityValue(ProcessInfo.processInfo.arguments.contains("--ui-testing") ? (isBLESelectionPresented ? "picker requested" : "picker closed") : "")
-                                #endif
                             if appState.isBLEDisconnectPending {
                                 Text(russian ? "Ожидаем завершения отключения Bluetooth перед новым подключением…" : "Waiting for Bluetooth disconnection before a new connection…").font(.footnote)
                             }
