@@ -75,7 +75,9 @@ def pending_reservation(connection, root: Path) -> tuple[int, int]:
             part = root / 'incoming' / f"{row['id']}.part"
             info = part.lstat()
             actual = info.st_size if stat.S_ISREG(info.st_mode) and root in part.resolve().parents else 0
-        except FileNotFoundError:
+        except (OSError, RuntimeError):
+            # Unreadable or unresolvable prefixes cannot count as durable
+            # acknowledged bytes; reserve the full declaration conservatively.
             actual = 0
         acknowledged = min(row['stored_size_bytes'], actual)
         pending += max(0, row['expected_size_bytes'] - acknowledged)

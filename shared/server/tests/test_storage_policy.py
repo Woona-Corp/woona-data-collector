@@ -260,6 +260,46 @@ class StoragePolicyTest(unittest.TestCase):
             self.assertGreaterEqual(result['serverStorage']['pendingReservedBytes'], 20)
             self.assertEqual(private.read_bytes(), b'PRIVATE-DATA')
 
+    def test_self_referencing_pending_symlink_counts_no_acknowledged_bytes(self):
+        fixture = self.fixture(20)
+        self.put(fixture, self.account)
+        identity = uuid.UUID(fixture['manifest']['artifacts'][0]['id'])
+        part = api.incoming_path(identity)
+        part.symlink_to(part.name)
+        with api.engine.begin() as connection:
+            connection.execute(text('UPDATE artifacts SET stored_size_bytes=10 WHERE id=:id'), {'id': identity})
+            result = storage_status(connection, api.STORAGE_ROOT, self.account)
+        self.assertEqual(result['account']['acknowledgedBytes'], 0)
+        self.assertGreaterEqual(result['serverStorage']['pendingReservedBytes'], 20)
+        self.put(self.fixture(1), self.account + '-unrelated')
+        self.assertTrue(part.is_symlink())
+
+    def test_unreadable_or_unresolvable_pending_prefix_reserves_full_declaration(self):
+        fixture = self.fixture(20)
+        self.put(fixture, self.account)
+        identity = uuid.UUID(fixture['manifest']['artifacts'][0]['id'])
+        part = api.incoming_path(identity)
+        part.write_bytes(b'P' * 10)
+        with api.engine.begin() as connection:
+            connection.execute(text('UPDATE artifacts SET stored_size_bytes=10 WHERE id=:id'), {'id': identity})
+        original_lstat, original_resolve = Path.lstat, Path.resolve
+        def denied(path, *args, **kwargs):
+            if path == part:
+                raise PermissionError('Synthetic unreadable prefix')
+            return original_lstat(path, *args, **kwargs)
+        def unresolvable(path, *args, **kwargs):
+            if path == part:
+                raise RuntimeError('Synthetic symlink-resolution failure')
+            return original_resolve(path, *args, **kwargs)
+        for method, effect in [('lstat', denied), ('resolve', unresolvable)]:
+            with self.subTest(method=method), patch.object(Path, method, effect):
+                with api.engine.begin() as connection:
+                    result = storage_status(connection, api.STORAGE_ROOT, self.account)
+                self.assertEqual(result['account']['acknowledgedBytes'], 0)
+                self.assertGreaterEqual(result['serverStorage']['pendingReservedBytes'], 20)
+                self.put(self.fixture(1), self.account + '-' + method)
+        self.assertEqual(part.read_bytes(), b'P' * 10)
+
     def test_offset_and_corrupt_resets_can_race_manifest_admission_without_lock_inversion(self):
         import threading
         for corrupt in (False, True):
