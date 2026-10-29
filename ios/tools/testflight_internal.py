@@ -135,8 +135,15 @@ def resource(response, kind):
     return row
 
 
-def included_resource(build, relationship, kind):
+def included_resource(build, relationship, kind, *, optional=False):
     reference = build.get("relationships", {}).get(relationship, {}).get("data", {})
+    # Apple can expose a processing build before its optional beta detail exists.
+    # Required app/version identity always fails closed; an absent beta detail
+    # only means internal availability cannot yet be confirmed.
+    if optional and (reference is None or reference == {}):
+        return {}
+    if not isinstance(reference, dict):
+        raise SafetyError("Included " + relationship + " cannot be confirmed")
     matches = [item for item in build.get("_included", [])
                if item.get("type") == kind and item.get("id") == reference.get("id")]
     if reference.get("type") != kind or len(matches) != 1:
@@ -188,7 +195,7 @@ def inspect(client, app_id, version, build_number):
     relationship = build.get("relationships", {}).get("betaGroups", {})
     assigned = collection(relationship, "betaGroups")
     assigned_ids = {group["id"] for group in assigned}
-    details = included_resource(build, "buildBetaDetail", "buildBetaDetails")
+    details = included_resource(build, "buildBetaDetail", "buildBetaDetails", optional=True)
     report_groups = []
     for group in internal:
         testers = client.get("/v1/betaGroups/" + group["id"] + "/betaTesters", {"limit": 1})

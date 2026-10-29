@@ -237,6 +237,49 @@ class InternalTestFlightTests(unittest.TestCase):
         self.assertEqual("VALID", self.check()["processing_state"])
         self.assertEqual([], self.client.writes)
 
+    def test_null_beta_detail_while_processing_is_polled_until_ready(self):
+        self.client.processing_sequence = ["PROCESSING", "VALID"]
+        self.client.assigned.add("internal-1")
+        original_get = self.client.get
+        def get(path, query=None):
+            result = original_get(path, query)
+            if path == "/v1/builds" and result["data"][0]["attributes"]["processingState"] == "PROCESSING":
+                result["data"][0]["relationships"]["buildBetaDetail"]["data"] = None
+                result["included"] = [item for item in result["included"] if item["type"] != "buildBetaDetails"]
+            return result
+        with patch.object(self.client, "get", side_effect=get):
+            report = self.check()
+        self.assertTrue(report["available_for_internal_testers"])
+        self.assertEqual([], self.client.writes)
+
+    def test_missing_beta_detail_never_confirms_availability_or_authorizes_assignment(self):
+        original_get = self.client.get
+        def get(path, query=None):
+            result = original_get(path, query)
+            if path == "/v1/builds":
+                result["data"][0]["relationships"]["buildBetaDetail"]["data"] = None
+                result["included"] = [item for item in result["included"] if item["type"] != "buildBetaDetails"]
+            return result
+        with patch.object(self.client, "get", side_effect=get):
+            report = self.check()
+            self.assertFalse(report["available_for_internal_testers"])
+            self.assertIsNone(report["internal_build_state"])
+            with self.assertRaises(SafetyError):
+                self.check(assign_internal=True, group_ids=("internal-1",))
+        self.assertEqual([], self.client.writes)
+
+    def test_null_required_owner_or_version_still_fails_closed(self):
+        original_get = self.client.get
+        for relationship in ["app", "preReleaseVersion"]:
+            def get(path, query=None):
+                result = original_get(path, query)
+                if path == "/v1/builds":
+                    result["data"][0]["relationships"][relationship]["data"] = None
+                return result
+            with self.subTest(relationship=relationship), patch.object(self.client, "get", side_effect=get):
+                self.assertBlocked()
+        self.assertEqual([], self.client.writes)
+
     def test_missing_build_does_not_select_latest_build(self):
         self.client.build = None
         with self.assertRaises(TimeoutError):
