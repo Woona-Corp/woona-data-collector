@@ -86,9 +86,9 @@ and the already-running server integrity check. Presentation wording matches iOS
 
 ## Validation
 
-The final repository gate is green: [Android full CI 40890162641](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40890162641)
-on `75cb00db515aa2517a41d6ea914fbe4e1e503471`, version 1.5.1 (code 14).
-The Android job completed in 12m15s and ran the required
+The final repository gate is green: [Android full CI 40896118469](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40896118469)
+on `3004aaae8e8fed16ddd45118ed605deb88dc0b0e`, version 1.5.1 (code 14).
+The Android job completed in 11m34s and ran the required
 `android/tools/check.sh full` tasks: JVM tests, lint, debug build, and managed
 API 31 native tests. The debug APK and diagnostic artifacts were uploaded;
 its Android Debug certificate and v2 signature were verified. This is a CI debug
@@ -97,21 +97,23 @@ artifact, not proof of a signed release or tester distribution.
 - JVM: 269 passed, zero failures/errors/skips. Coverage includes the complete
   current-form literal inventory, v1/v2 validation messages, scope epochs,
   formatting, bounded parallel ordering, and fatal cancellation.
-- Managed API 31: 153 discovered; 149 passed, 4 assumption-skipped, zero
+- Managed API 31: 157 discovered; 153 passed, 4 assumption-skipped, zero
   failures/errors. The skipped cases are the three external API/WorkManager
   integration methods and the production-credential diagnostic. This CI job
   deliberately does not start an API or supply credentials.
 - The executed native cases include all eight migration inputs, four long-form
   localization cases, four history database cases, four history UI cases, six
-  storage/parser/shared-wire cases, and two restore HTTP concurrency/cancellation
-  cases. App recreation, navigation and file-safety tests also passed.
+  storage/parser/shared-wire cases, two restore HTTP concurrency/cancellation
+  cases, and all four post-stop MainActivity heart-prompt cases. App recreation, navigation and file-safety tests also passed.
 - Lint: zero errors, 61 nonblocking warnings. The green gate does not mean a
   warning-free report.
 - Separately, on an exclusively owned disposable API/PostgreSQL fixture, all
   three real external API/WorkManager cases passed. The same four-case class also
   passed its embedded-default settings case. These results are independent of
   the three CI assumption-skips, not additional external cases run by that CI.
-  They cover account/other/unassigned storage scope, invalid/revoked/secondary
+  This separate backend/transfer proof used `632925e`; the final `3004aaa` gate
+  also covers the subsequent post-stop MainActivity fix. The API cases cover
+  account/other/unassigned storage scope, invalid/revoked/secondary
   auth, real worker 401 UI and Retry, persisted injected 503 and automatic retry,
   timeout recovery, upload/restore, range/ETag resumption and downloaded bytes.
   Production credential diagnostics remain unexecuted.
@@ -153,6 +155,18 @@ exercise the real MainActivity/SQLite/finalization path: correct heart target,
 activity stop with an older missing-heart record, ordinary history open/refresh,
 and recreation while the history worker is deliberately queued.
 
-The runtime and instrumented sources compile and 269 JVM tests pass. The earlier
-CI gate on `75cb00d` predates this follow-up. Final affected-native and fresh
-full-CI results for this runtime change are still pending.
+The runtime and instrumented sources compile and 269 JVM tests pass. All four
+new native cases passed locally in 6.339s and in the final full CI above. As a
+negative control, the exact heart-stop test failed against the previous
+MainActivity (`1495d68`, equivalent to the pre-fix runtime): after filling and
+saving the opened heart form, the changed recording's questionnaire remained
+null for the test's 10-second bound. The same test passes with `921d3d5`.
+
+The final full CI includes this fix: 157 native cases, 153 passed and four
+explicit credential/API skips, plus all 269 JVM tests and lint. The earlier green
+`75cb00d` gate alone did not validate the follow-up.
+
+One local broad run lacked the shared captured fixture in its isolated Android
+worktree. Its other 156 cases completed (152 passed, four skipped). Restoring the
+exact Git fixture and rebuilding the test APK made the isolated parser case pass
+in 0.398s. Final CI packages the committed fixture and passes the entire suite.
