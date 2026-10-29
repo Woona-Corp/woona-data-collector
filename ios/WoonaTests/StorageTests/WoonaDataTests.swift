@@ -953,6 +953,17 @@ final class WoonaDataTests: XCTestCase {
                 let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [NetworkFaultProtocol.self]
                 return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
             })
+            @MainActor func syncDiagnostics() -> String {
+                ([model.pendingSyncGuardStateForTesting, "retirement=\(model.retirementCheckState): \(model.retirementCheckError ?? "none")"] + model.pendingSyncTraceForTesting + model.diagnosticMessages).joined(separator: "\n")
+            }
+            defer {
+                XCTContext.runActivity(named: "Complete sync attempt trace") { activity in
+                    let attachment = XCTAttachment(string: syncDiagnostics())
+                    attachment.name = "pending-sync-trace"
+                    attachment.lifetime = .keepAlways
+                    activity.add(attachment)
+                }
+            }
             model.updateTransferNetworkPath(available: true, unmetered: true)
             // Real worker IO can outlive an arbitrary number of MainActor yields,
             // especially with TSan. Finish startup reads and the token-empty
@@ -964,19 +975,19 @@ final class WoonaDataTests: XCTestCase {
             XCTAssertTrue(model.transferNetworkAllowsWork)
             model.serverToken = "fixture"
             let rejected = await model.resumePendingSync()
-            XCTAssertFalse(rejected)
-            XCTAssertEqual(puts, 1, model.diagnosticMessages.joined(separator: "\n"))
+            XCTAssertFalse(rejected, syncDiagnostics())
+            XCTAssertEqual(puts, 1, syncDiagnostics())
             XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "permanent_error")
             XCTAssertEqual(model.profileUploadFailed, 1)
             XCTAssertFalse(model.uploadQueueExplanation.contains("queue is empty"))
             let automatic = await model.resumePendingSync()
-            XCTAssertTrue(automatic) // No eligible retry remains; this does not mark it uploaded.
+            XCTAssertTrue(automatic, syncDiagnostics()) // No eligible retry remains; this does not mark it uploaded.
             XCTAssertEqual(puts, 1)
             XCTAssertEqual(try store.profileSyncOverview().failed, 1)
             try store.resetFailedSync() // Same persistent reset used by the explicit Retry button.
             reject = false
             let retried = await model.resumePendingSync()
-            let retryDiagnostics = ([model.pendingSyncGuardStateForTesting, "retirement=\(model.retirementCheckState): \(model.retirementCheckError ?? "none")"] + model.pendingSyncTraceForTesting + model.diagnosticMessages).joined(separator: "\n")
+            let retryDiagnostics = syncDiagnostics()
             XCTAssertTrue(retried, retryDiagnostics)
             XCTAssertEqual(puts, 2, retryDiagnostics)
             XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "synced")
