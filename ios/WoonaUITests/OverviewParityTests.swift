@@ -161,7 +161,7 @@ final class OverviewParityTests: XCTestCase {
         app.buttons["dog.new"].tap()
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         // Empty SwiftUI text fields expose their placeholder as their value.
-        XCTAssertTrue(["", "Кличка *"].contains(name.value as? String ?? "unexpected"))
+        XCTAssertTrue(["", "Name *"].contains(name.value as? String ?? "unexpected"))
         XCTAssertNotEqual(app.textFields["dog.editor.animalID"].value as? String, "ui-dog-1")
         name.tap()
         name.typeText("New animal")
