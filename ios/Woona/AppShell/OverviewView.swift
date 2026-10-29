@@ -85,6 +85,10 @@ private func errorText(_ language: AppLanguage, _ ru: String, _ en: String) -> S
 }
 
 private let serverReasons: [String: (String, String)] = [
+    "storage_quota_exceeded": ("Превышен лимит хранения аккаунта или записи. Локальные файлы сохранены. Проверьте лимиты сервера; автоматический повтор не устранит ограничение.", "The account or recording storage limit was exceeded. Local files are preserved. Review the server storage limits; automatic retries cannot resolve this limit."),
+    "storage_reservation_unavailable": ("На сервере недостаточно незарезервированного места для этой загрузки. Локальные файлы сохранены. Повторите отправку после освобождения места или завершения других загрузок.", "The server has insufficient unreserved storage for this upload. Local files are preserved. Retry after space is freed or other uploads finish."),
+    "integrity_check_busy": ("Проверка целостности уже выполняется. Локальные файлы сохранены; повторите позже.", "An integrity check is already running. Local files are preserved; retry later."),
+    "storage_scope_invalid": ("Сервер вернул сведения о месте для другого аккаунта или некорректные объёмы. Результат не применён; проверьте сервер и повторите.", "The server returned storage information for another account or invalid volumes. The result was not applied; check the server and retry."),
     "upload_offset_invalid": ("Сервер подтвердил недопустимую позицию файла. Завершение загрузки не подтверждено; исходник сохранён. Проверьте сервер и повторите отправку.", "The server acknowledged an invalid file position. Upload completion is not verified; the source is preserved. Check the server and retry."),
     "upload_offset_missing": ("Сервер не сообщил допустимую позицию принятого файла. Продолжение остановлено; исходник сохранён. Проверьте сервер и повторите отправку.", "The server did not report a valid accepted file position. The transfer stopped and the source is preserved. Check the server and retry."),
     "upload_conflict_stalled": ("Позиция загрузки не стабилизировалась после повторной сверки. Исходник сохранён; повтор продолжит отправку с подтверждённой позиции.", "The upload position did not stabilize after repeated checks. The source is preserved; a retry resumes from the confirmed position."),
@@ -377,6 +381,7 @@ func transferNextAction(_ value: String, ru: Bool) -> String {
     case "contact_support_preserve_local_data": return ru ? "сохраните локальные данные и передайте диагностику разработчику" : "preserve local data and send diagnostics to support"
     case "review_rejected_file": return ru ? "проверьте причину отклонения файла; не удаляйте оригинал" : "review why the file was rejected; preserve the original"
     case "retry_after_storage_available": return ru ? "повторите после освобождения места на сервере; локальные оригиналы сохранены" : "retry after server storage is available; local originals are preserved"
+    case "review_server_storage_limits": return ru ? "проверьте лимиты хранения записи и аккаунта на сервере; сохраните локальные оригиналы" : "review the server recording and account storage limits; preserve local originals"
     case "retry_later": return ru ? "повторите позже" : "retry later"
     default: return value
     }

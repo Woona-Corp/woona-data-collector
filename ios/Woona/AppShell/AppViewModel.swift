@@ -82,11 +82,11 @@ final class AppViewModel: ObservableObject {
     private var retirementCheckGeneration: UUID?
     @Published private(set) var isRecording = false
     @Published private(set) var isCameraDegraded = false
-    @Published var serverBaseURL = ""
-    @Published var serverToken = ""
-    @Published var serverWifiOnly = true
+    @Published var serverBaseURL = "" { didSet { if oldValue != serverBaseURL { resetServerStorageCheck() } } }
+    @Published var serverToken = "" { didSet { if oldValue != serverToken { resetServerStorageCheck() } } }
+    @Published var serverWifiOnly = true { didSet { if oldValue != serverWifiOnly { resetServerStorageCheck() } } }
     @Published var accountInput = ""
-    @Published private(set) var selectedAccountID: String?
+    @Published private(set) var selectedAccountID: String? { didSet { if oldValue != selectedAccountID { resetServerStorageCheck() } } }
     @Published private(set) var unassignedDogProfiles: [DogProfile] = []
     @Published private(set) var isAccountOperationRunning = false
     @Published private var uploadingProfileCount = 0
@@ -109,6 +109,12 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var connectionCheck = "not_checked"
     @Published private(set) var connectionCheckedAt: String?
     @Published private(set) var connectionCheckError: String?
+    @Published private(set) var serverStorageCheck = "not_checked"
+    @Published private(set) var serverStorageStatus: ServerStorageStatus?
+    @Published private(set) var serverStorageCheckedAt: String?
+    @Published private(set) var serverStorageError: String?
+    private var storageCheckGeneration: UInt64 = 0
+    private var storageCheckTask: Task<Void, Never>?
     @Published private(set) var serverTransferStatuses: [UUID: ServerTransferStatus] = [:]
     @Published private(set) var transferStatusErrors: [UUID: String] = [:]
     @Published private(set) var transferCheckedAt: [UUID: String] = [:]
@@ -161,6 +167,39 @@ final class AppViewModel: ObservableObject {
                 connectionCheckError = recordingUploadErrorText(error.localizedDescription, language: selectedLanguage) + "\n" + error.localizedDescription
             }
             connectionCheckedAt = WoonaStore.iso8601(Date())
+        }
+    }
+
+    private func resetServerStorageCheck() {
+        storageCheckGeneration &+= 1
+        storageCheckTask?.cancel(); storageCheckTask = nil
+        serverStorageCheck = "not_checked"; serverStorageStatus = nil
+        serverStorageCheckedAt = nil; serverStorageError = nil
+    }
+
+    func checkServerStorage(timeout: TimeInterval = 15) {
+        guard serverStorageCheck != "checking", !serverBaseURL.isEmpty, !serverToken.isEmpty else { return }
+        storageCheckGeneration &+= 1
+        let generation = storageCheckGeneration
+        let configuration = ServerConfiguration(baseURL: serverBaseURL, wifiOnly: serverWifiOnly, accountID: selectedAccountID)
+        let token = serverToken
+        serverStorageCheck = "checking"; serverStorageError = nil; serverStorageStatus = nil; serverStorageCheckedAt = nil
+        storageCheckTask = Task { [weak self] in
+            do {
+                guard let self else { return }
+                let value = try await self.serverClient().storageStatus(timeout: timeout)
+                guard !Task.isCancelled, generation == self.storageCheckGeneration,
+                      configuration == ServerConfiguration(baseURL: self.serverBaseURL, wifiOnly: self.serverWifiOnly, accountID: self.selectedAccountID), token == self.serverToken else { return }
+                self.serverStorageStatus = value; self.serverStorageCheck = "checked"
+                self.serverStorageCheckedAt = WoonaStore.iso8601(Date())
+            } catch {
+                guard let self, !Task.isCancelled, generation == self.storageCheckGeneration,
+                      configuration == ServerConfiguration(baseURL: self.serverBaseURL, wifiOnly: self.serverWifiOnly, accountID: self.selectedAccountID), token == self.serverToken else { return }
+                if case ServerSyncError.requestFailed(let status, _) = error, status == 404 { self.serverStorageCheck = "unavailable" }
+                else { self.serverStorageCheck = "failed" }
+                self.serverStorageError = error.localizedDescription
+                self.serverStorageCheckedAt = WoonaStore.iso8601(Date())
+            }
         }
     }
 
@@ -387,7 +426,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    deinit { networkMonitor?.cancel(); historyLoadTask?.cancel() }
+    deinit { networkMonitor?.cancel(); historyLoadTask?.cancel(); storageCheckTask?.cancel() }
 
     enum AppTab: Hashable {
         case overview

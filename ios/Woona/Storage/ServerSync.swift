@@ -3,6 +3,65 @@ import CryptoKit
 import Security
 import Darwin
 
+struct ServerStorageStatus: Decodable, Sendable {
+    struct CheckedScope: Decodable, Sendable {
+        let accountId: String?
+        let unassignedOnly: Bool
+        let includesAllAccounts: Bool
+    }
+    struct Limits: Decodable, Sendable {
+        let recordingBytes: Int64
+        let accountBytes: Int64
+        let freeSpaceReserveBytes: Int64
+    }
+    struct Account: Decodable, Sendable {
+        let declaredReservedBytes: Int64
+        let acknowledgedBytes: Int64
+        let remainingQuotaBytes: Int64?
+        let recordings: Int
+        let artifacts: Int
+    }
+    struct Storage: Decodable, Sendable {
+        let totalBytes: Int64
+        let freeBytes: Int64
+        let freeSpaceReserveBytes: Int64
+        let pendingReservedBytes: Int64
+        let pendingArtifacts: Int
+        let newReservationAvailableBytes: Int64
+        let scope: String
+    }
+    struct Admission: Decodable, Sendable {
+        let blockingReasons: [String]
+        let existingUploadsMayResume: Bool
+    }
+    let checkedScope: CheckedScope
+    let limits: Limits
+    let account: Account
+    let serverStorage: Storage
+    let status: String
+    let nextAction: String
+    let admission: Admission
+
+    func validate(accountID: String?) throws {
+        guard checkedScope.accountId == accountID,
+              checkedScope.unassignedOnly == (accountID == nil), !checkedScope.includesAllAccounts,
+              serverStorage.scope == "server",
+              [limits.recordingBytes, limits.accountBytes, limits.freeSpaceReserveBytes,
+               account.declaredReservedBytes, account.acknowledgedBytes,
+               serverStorage.totalBytes, serverStorage.freeBytes, serverStorage.freeSpaceReserveBytes,
+               serverStorage.pendingReservedBytes, serverStorage.newReservationAvailableBytes].allSatisfy({ $0 >= 0 }),
+              account.remainingQuotaBytes.map({ $0 >= 0 }) ?? true,
+              account.recordings >= 0, account.artifacts >= 0, serverStorage.pendingArtifacts >= 0 else {
+            throw ServerSyncError.transfer(code: "storage_scope_invalid", message: "Storage response scope or volumes do not match the selected account; no storage status was applied", retryable: false)
+        }
+    }
+}
+
+func storageByteText(_ bytes: Int64?, unlimitedWhenZero: Bool = false, russian: Bool) -> String {
+    guard let bytes, !(unlimitedWhenZero && bytes == 0) else { return russian ? "Без ограничений" : "Unlimited" }
+    return String(format: "%.2f %@", locale: Locale(identifier: russian ? "ru_RU" : "en_US_POSIX"), Double(bytes) / 1_073_741_824, russian ? "ГиБ" : "GiB")
+}
+
 struct ServerConfiguration: Equatable {
     var baseURL: String
     var wifiOnly: Bool
@@ -212,7 +271,15 @@ enum ServerSyncError: LocalizedError {
         if status == 409, detail?["code"] as? String == "animal_id_already_exists" { return .animalIDConflict }
         let code = detail?["code"] as? String
         let message = detail?["message"] as? String ?? body?["detail"] as? String ?? HTTPURLResponse.localizedString(forStatusCode: status)
-        return .requestFailed(status, code.map { "\($0): \(message)" } ?? message)
+        // Keep useful server diagnostics visible without retaining credentials or
+        // arbitrary response fields. The original request ID remains searchable.
+        let diagnosticKeys = ["requestId", "retryable", "nextAction", "quotaScope", "limitBytes", "reservedBytes", "requestedBytes"]
+        var diagnostics: [String: Any] = [:]
+        for key in diagnosticKeys {
+            if let value = detail?[key] ?? body?[key] { diagnostics[key] = value }
+        }
+        let extra = (try? JSONSerialization.data(withJSONObject: diagnostics, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) }
+        return .requestFailed(status, (code.map { "\($0): \(message)" } ?? message) + (diagnostics.isEmpty ? "" : "\n" + (extra ?? "")))
     }
 
     var errorDescription: String? {
@@ -413,7 +480,19 @@ final class WoonaServerClient {
 
     func deletions(timeout: TimeInterval = 20) async throws -> [ServerDeletion] {
         struct Response: Decodable { let entities: [ServerDeletion] }
-        let request = try makeRequest(method: "GET", path: "/v1/deletions")
+        let data = try await boundedMetadata(path: "/v1/deletions", timeout: timeout)
+        return try JSONDecoder().decode(Response.self, from: data).entities
+    }
+
+    func storageStatus(timeout: TimeInterval = 15) async throws -> ServerStorageStatus {
+        let data = try await boundedMetadata(path: "/v1/storage-status", timeout: timeout)
+        let value = try JSONDecoder().decode(ServerStorageStatus.self, from: data)
+        try value.validate(accountID: accountID)
+        return value
+    }
+
+    private func boundedMetadata(path: String, timeout: TimeInterval) async throws -> Data {
+        let request = try makeRequest(method: "GET", path: path)
         let gate = BoundedMetadataRequest()
         let (data, response) = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -432,7 +511,7 @@ final class WoonaServerClient {
         // timeout, task cancellation or disconnect cannot apply retirement.
         try ensureActive()
         try validate(response: response, data: data)
-        return try JSONDecoder().decode(Response.self, from: data).entities
+        return data
     }
 
     @discardableResult

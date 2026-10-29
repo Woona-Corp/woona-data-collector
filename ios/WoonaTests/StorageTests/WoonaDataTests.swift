@@ -5,6 +5,109 @@ import CryptoKit
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    private func storageFixture(account: String? = nil, unlimited: Bool = false) throws -> Data {
+        let remaining: Any = unlimited ? NSNull() : NSNumber(value: 98_784_247_808 as Int64)
+        return try JSONSerialization.data(withJSONObject: [
+            "checkedScope": ["accountId": account as Any? ?? NSNull(), "unassignedOnly": account == nil, "includesAllAccounts": false],
+            "limits": ["recordingBytes": unlimited ? 0 : 21_474_836_480, "accountBytes": unlimited ? 0 : 107_374_182_400, "freeSpaceReserveBytes": 1_073_741_824],
+            "account": ["declaredReservedBytes": 8_589_934_592, "acknowledgedBytes": 1_073_741_824, "remainingQuotaBytes": remaining, "recordings": 6, "artifacts": 18],
+            "serverStorage": ["totalBytes": 214_748_364_800, "freeBytes": 21_474_836_480, "freeSpaceReserveBytes": 1_073_741_824, "pendingReservedBytes": 7_516_192_768, "pendingArtifacts": 2, "newReservationAvailableBytes": 12_884_901_888, "scope": "server"],
+            "status": "ready", "nextAction": "none", "admission": ["blockingReasons": [], "existingUploadsMayResume": true]
+        ])
+    }
+
+    @MainActor
+    func testStorageStatusParsesScopedVolumesAndRejectsCrossAccountResponses() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [NetworkFaultProtocol.self]
+        let bytes = try storageFixture(account: "scope-a", unlimited: true)
+        NetworkFaultProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/storage-status")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Woona-Account"), "scope-a")
+            return .init(body: bytes)
+        }
+        defer { NetworkFaultProtocol.handler = nil }
+        let client = try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: "scope-a"), token: "fixture", sessionConfiguration: config)
+        let value = try await client.storageStatus()
+        XCTAssertEqual(value.account.acknowledgedBytes, 1_073_741_824)
+        XCTAssertNil(value.account.remainingQuotaBytes)
+        XCTAssertEqual(storageByteText(value.limits.accountBytes, unlimitedWhenZero: true, russian: false), "Unlimited")
+        XCTAssertEqual(storageByteText(value.account.remainingQuotaBytes, russian: true), "Без ограничений")
+        XCTAssertEqual(storageByteText(0, russian: false), "0.00 GiB")
+        XCTAssertEqual(storageByteText(1_073_741_824, russian: true), "1,00 ГиБ")
+        XCTAssertThrowsError(try value.validate(accountID: "scope-b"))
+        XCTAssertThrowsError(try value.validate(accountID: nil))
+        var body = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        body["checkedScope"] = ["accountId": "scope-a", "unassignedOnly": false, "includesAllAccounts": true]
+        let global = try JSONDecoder().decode(ServerStorageStatus.self, from: JSONSerialization.data(withJSONObject: body))
+        XCTAssertThrowsError(try global.validate(accountID: "scope-a"))
+        body["checkedScope"] = ["accountId": "scope-a", "unassignedOnly": false, "includesAllAccounts": false]
+        var volumes = try XCTUnwrap(body["serverStorage"] as? [String: Any]); volumes["freeBytes"] = -1; body["serverStorage"] = volumes
+        let invalid = try JSONDecoder().decode(ServerStorageStatus.self, from: JSONSerialization.data(withJSONObject: body))
+        XCTAssertThrowsError(try invalid.validate(accountID: "scope-a"))
+    }
+
+    @MainActor
+    func testStorageMetadataTimeoutAndCancellationDoNotWaitForConnectivity() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [HangingRetirementProtocol.self]
+        let client = try WoonaServerClient(configuration: .init(baseURL: "https://retirement.test", wifiOnly: false), token: "fixture", sessionConfiguration: config)
+        let start = ProcessInfo.processInfo.systemUptime
+        do { _ = try await client.storageStatus(timeout: 0.02); XCTFail("Storage metadata must be bounded") }
+        catch let error as URLError { XCTAssertEqual(error.code, .timedOut) }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 2)
+        let check = Task { try await client.storageStatus() }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let cancelledAt = ProcessInfo.processInfo.systemUptime; check.cancel()
+        do { _ = try await check.value; XCTFail("Cancelled metadata must not publish a result") }
+        catch is CancellationError {}
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - cancelledAt, 2)
+    }
+
+    @MainActor
+    func testStorageCheckCancelsStaleConfigurationAndTreats404AsUnsupported() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { NetworkFaultProtocol.handler = nil; try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        var hanging = true
+        let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { account in
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = hanging ? [HangingRetirementProtocol.self] : [NetworkFaultProtocol.self]
+            return try WoonaServerClient(configuration: .init(baseURL: hanging ? "https://retirement.test" : "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
+        })
+        model.serverBaseURL = "https://retirement.test"; model.serverToken = "fixture"
+        model.checkServerStorage()
+        XCTAssertEqual(model.serverStorageCheck, "checking")
+        try await Task.sleep(nanoseconds: 20_000_000)
+        model.serverToken = "new-fixture"
+        XCTAssertEqual(model.serverStorageCheck, "not_checked"); XCTAssertNil(model.serverStorageStatus)
+        hanging = false
+        let bytes = try storageFixture()
+        NetworkFaultProtocol.handler = { _ in .init(body: bytes) }
+        model.serverBaseURL = "https://network.test"; model.checkServerStorage()
+        try await awaitStorageCheck(model)
+        XCTAssertEqual(model.serverStorageCheck, "checked"); XCTAssertNotNil(model.serverStorageCheckedAt)
+        XCTAssertEqual(model.serverStorageStatus?.account.recordings, 6)
+        try await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertEqual(model.serverStorageCheck, "checked", "Old cancelled checks cannot overwrite a new configuration")
+        NetworkFaultProtocol.handler = { _ in .init(status: 404, body: Data("{}".utf8)) }
+        model.checkServerStorage(); try await awaitStorageCheck(model)
+        XCTAssertEqual(model.serverStorageCheck, "unavailable")
+        XCTAssertEqual(model.connectionCheck, "not_checked", "An old backend is not evidence that its connection failed")
+        XCTAssertNil(model.serverStorageStatus)
+    }
+
+    func testStorageErrorsRetainQuotaDetailsAndRequestIDWhileUsingLocalizedReasons() throws {
+        for (status, code, action) in [(413, "storage_quota_exceeded", "review_server_storage_limits"), (507, "storage_reservation_unavailable", "retry_after_storage_available"), (429, "integrity_check_busy", "retry_later")] {
+            let data = try JSONSerialization.data(withJSONObject: ["detail": ["code": code, "message": "fixture", "requestId": "req-quota-fixture", "nextAction": action, "quotaScope": "account", "limitBytes": 123, "reservedBytes": 100, "requestedBytes": 24]])
+            let raw = ServerSyncError.responseError(status: status, data: data).localizedDescription
+            XCTAssertTrue(raw.contains("req-quota-fixture")); XCTAssertTrue(raw.contains("limitBytes")); XCTAssertTrue(raw.contains(action))
+            XCTAssertNotEqual(recordingUploadErrorText(raw, language: .english), raw)
+            XCTAssertNotEqual(recordingUploadErrorText(raw, language: .russian), raw)
+            XCTAssertNotEqual(transferNextAction(action, ru: false), action)
+            XCTAssertNotEqual(transferNextAction(action, ru: true), action)
+        }
+        XCTAssertEqual(storageAdmissionText("account_quota_reached", russian: false), "Account storage limit reached")
+    }
+
     func testLargeHistoryReadsAreBoundedBulkQueriesWithStableKeysetPages() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -2500,4 +2603,12 @@ private func awaitHistoryForTesting(_ model: AppViewModel, allowFailure: Bool = 
     XCTAssertFalse(model.isHistoryLoading, "History read did not finish")
     XCTAssertFalse(model.isLocalRecoveryRunning, "Local recovery did not finish")
     if !allowFailure { XCTAssertNil(model.historyLoadError) }
+}
+
+
+@MainActor
+private func awaitStorageCheck(_ model: AppViewModel) async throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + 5
+    while model.serverStorageCheck == "checking", ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+    XCTAssertNotEqual(model.serverStorageCheck, "checking")
 }

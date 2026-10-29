@@ -103,6 +103,7 @@ struct SettingsView: View {
                         .buttonStyle(.bordered)
                         .disabled(!isServerConfigured || appState.connectionCheck == "checking")
                         .accessibilityIdentifier("server.check")
+                    ServerStorageDetails(appState: appState, russian: russian)
                     HStack {
                         Text(isServerConfigured ? appState.serverBaseURL : (russian ? "Не настроено" : "Not configured"))
                             .font(.subheadline)
@@ -260,6 +261,76 @@ private struct ServerConnectionEditor: View {
                     .accessibilityIdentifier("server.save")
                 }
             }
+        }
+    }
+}
+
+
+func storageAdmissionText(_ status: String, russian: Bool) -> String {
+    switch status {
+    case "ready": return russian ? "Место для новых загрузок доступно" : "Storage is available for new uploads"
+    case "capacity_reserved": return russian ? "Место зарезервировано другими загрузками" : "Capacity is reserved by other uploads"
+    case "account_quota_reached": return russian ? "Лимит хранения аккаунта исчерпан" : "Account storage limit reached"
+    default: return status
+    }
+}
+
+private struct ServerStorageDetails: View {
+    @ObservedObject var appState: AppViewModel
+    let russian: Bool
+    private var configured: Bool { !appState.serverBaseURL.isEmpty && !appState.serverToken.isEmpty }
+    private func t(_ ru: String, _ en: String) -> String { russian ? ru : en }
+    private func bytes(_ value: Int64?, limit: Bool = false) -> String { storageByteText(value, unlimitedWhenZero: limit, russian: russian) }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            Text(t("Место и лимиты сервера", "Server storage and limits")).font(.headline)
+            Text(stateText).font(.footnote).accessibilityIdentifier("server.storageStatus")
+            if appState.serverStorageCheck == "checking" { ProgressView() }
+            if let checked = appState.serverStorageCheckedAt {
+                Text(t("Проверено: ", "Checked: ") + recordingDisplayTime(checked)).font(.caption)
+            }
+            if let value = appState.serverStorageStatus {
+                Text(storageAdmissionText(value.status, russian: russian)).font(.subheadline)
+                Text(t("Аккаунт: ", "Account: ") + (value.checkedScope.accountId ?? t("без аккаунта", "unassigned")))
+                Text(t("Лимит аккаунта: ", "Account limit: ") + bytes(value.limits.accountBytes, limit: true))
+                Text(t("Заявлено и зарезервировано аккаунтом: ", "Declared and reserved by account: ") + bytes(value.account.declaredReservedBytes))
+                Text(t("Принято данных аккаунта (объём): ", "Account data received (volume): ") + bytes(value.account.acknowledgedBytes))
+                Text(t("Осталось по лимиту аккаунта: ", "Remaining account quota: ") + bytes(value.account.remainingQuotaBytes))
+                Text(t("Лимит одной записи: ", "Per-recording limit: ") + bytes(value.limits.recordingBytes, limit: true))
+                Text(russian ? "Записей: \(value.account.recordings) · файлов: \(value.account.artifacts)" : "Recordings: \(value.account.recordings) · artifacts: \(value.account.artifacts)")
+                Text(t("Сервер целиком — всего: ", "Entire server — total: ") + bytes(value.serverStorage.totalBytes))
+                Text(t("Сервер целиком — свободно на диске: ", "Entire server — free on disk: ") + bytes(value.serverStorage.freeBytes))
+                Text(t("Сервер целиком — резерв свободного места: ", "Entire server — free-space reserve: ") + bytes(value.serverStorage.freeSpaceReserveBytes))
+                Text(t("Сервер целиком — зарезервировано загрузками: ", "Entire server — reserved by uploads: ") + bytes(value.serverStorage.pendingReservedBytes))
+                Text(t("Сервер целиком — доступно новым загрузкам: ", "Entire server — available for new uploads: ") + bytes(value.serverStorage.newReservationAvailableBytes))
+                Text(russian ? "Сервер целиком — незавершённых файлов: \(value.serverStorage.pendingArtifacts)" : "Entire server — unfinished artifacts: \(value.serverStorage.pendingArtifacts)")
+                if !value.admission.blockingReasons.isEmpty {
+                    Text(t("Причины ограничений: ", "Admission restrictions: ") + value.admission.blockingReasons.map { recordingUploadErrorText($0, language: appState.selectedLanguage) }.joined(separator: "; "))
+                }
+                Text(t("Следующее действие: ", "Next action: ") + transferNextAction(value.nextAction, ru: russian))
+                Text(t("Лимиты учитывают заявленные байты незавершённых загрузок. Эти объёмы не подтверждают целостность файлов.", "Quotas include declared bytes of unfinished uploads. These volumes do not verify file integrity.")).font(.caption)
+                if value.admission.existingUploadsMayResume {
+                    Text(t("Ранее принятые загрузки могут продолжаться.", "Previously accepted uploads may resume.")).font(.caption)
+                }
+            }
+            if let error = appState.serverStorageError {
+                DisclosureGroup(t("Подробности ошибки проверки места", "Storage check error details")) {
+                    Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                }
+            }
+            Button(appState.serverStorageCheck == "failed" || appState.serverStorageCheck == "unavailable" ? t("Повторить проверку места", "Retry storage check") : t("Проверить место на сервере", "Check server storage")) { appState.checkServerStorage() }
+                .buttonStyle(.bordered).disabled(!configured || appState.serverStorageCheck == "checking").accessibilityIdentifier("server.storageCheck")
+        }.font(.footnote)
+    }
+    private var stateText: String {
+        guard configured else { return t("Подключите сервер, чтобы проверить место и лимиты.", "Connect the server to check storage and limits.") }
+        switch appState.serverStorageCheck {
+        case "checking": return t("Проверяем место и лимиты…", "Checking storage and limits…")
+        case "checked": return t("Место и лимиты проверены на момент запроса.", "Storage and limits were checked at the time of this request.")
+        case "unavailable": return t("Эта версия сервера не поддерживает проверку места и лимитов. Проверка соединения доступна отдельно.", "This server version does not support storage and limits checks. Connection checks remain available separately.")
+        case "failed": return t("Не удалось проверить место и лимиты. Повторите проверку; локальные данные сохранены.", "Storage and limits could not be checked. Retry; local data is preserved.")
+        default: return t("Место и лимиты ещё не проверены.", "Storage and limits have not been checked yet.")
         }
     }
 }
