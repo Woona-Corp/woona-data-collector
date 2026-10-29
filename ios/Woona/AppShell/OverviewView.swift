@@ -663,9 +663,19 @@ struct OverviewView: View {
                         if appState.isConnectionActive || appState.isReplayRunning {
                             Button(russian ? "ОТКЛЮЧИТЬ" : "DISCONNECT") { appState.disconnect() }.buttonStyle(.bordered)
                         } else {
-                            Button(russian ? "Новое соединение" : "New connection") { appState.bleConnectionPurpose = .record; pendingDevice = nil; pendingReplaySelection = false; pendingReplayURL = nil; isBLESelectionPresented = true }
+                            Button(russian ? "Новое соединение" : "New connection") {
+                                appState.bleConnectionPurpose = .record; pendingDevice = nil; pendingReplaySelection = false; pendingReplayURL = nil; isBLESelectionPresented = true
+                                #if DEBUG
+                                if ProcessInfo.processInfo.arguments.contains("--ui-testing") {
+                                    print("WOONA_UI_PICKER action requested=\(isBLESelectionPresented)")
+                                }
+                                #endif
+                            }
                                 .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary).accessibilityIdentifier("devices.newConnection")
                                 .disabled(!appState.canOpenBLEPicker)
+                                #if DEBUG
+                                .accessibilityValue(ProcessInfo.processInfo.arguments.contains("--ui-testing") ? (isBLESelectionPresented ? "picker requested" : "picker closed") : "")
+                                #endif
                             if appState.isBLEDisconnectPending {
                                 Text(russian ? "Ожидаем завершения отключения Bluetooth перед новым подключением…" : "Waiting for Bluetooth disconnection before a new connection…").font(.footnote)
                             }
@@ -728,6 +738,13 @@ struct OverviewView: View {
                     ScrollView { discoveryCard.padding(12) }
                         .navigationTitle(russian ? "Новое соединение" : "New connection")
                         .navigationBarTitleDisplayMode(.inline)
+                        #if DEBUG
+                        .onAppear {
+                            if ProcessInfo.processInfo.arguments.contains("--ui-testing") {
+                                print("WOONA_UI_PICKER appeared requested=\(isBLESelectionPresented)")
+                            }
+                        }
+                        #endif
                         .toolbar { ToolbarItem(placement: .cancellationAction) {
                             Button(russian ? "Закрыть" : "Close") { isBLESelectionPresented = false }
                         } }

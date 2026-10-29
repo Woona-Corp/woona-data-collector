@@ -92,7 +92,22 @@ final class OverviewParityTests: XCTestCase {
 
     func testV2PickerIsExplicitAndReturnsToRecordAfterClosingWithoutConnecting() {
         app.buttons["tab.session"].tap()
-        app.buttons["devices.newConnection"].tap()
+        XCTAssertTrue(app.navigationBars["Session"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab.session"].isSelected)
+        let newConnection = app.buttons["devices.newConnection"]
+        let connectionReady = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let button = object as? XCUIElement else { return false }
+                return button.exists && button.isEnabled && button.isHittable
+            },
+            object: newConnection
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [connectionReady], timeout: 5), .completed)
+        let readyState = XCTAttachment(string: app.debugDescription)
+        readyState.name = "ConnectionPicker-Ready-BeforeTap-Hierarchy"
+        readyState.lifetime = .keepAlways
+        add(readyState)
+        newConnection.tap()
         let purpose = app.segmentedControls["devices.purpose"]
         XCTAssertTrue(purpose.waitForExistence(timeout: 5))
         XCTAssertTrue(purpose.buttons["Record"].isSelected)
