@@ -398,7 +398,16 @@ final class WoonaDataTests: XCTestCase {
         try await awaitHistoryForTesting(model)
         let original = model.recentRecordings.map(\.id)
         let database = root.appendingPathComponent("woona.sqlite")
-        let originalHash = try WoonaStore.sha256File(database)
+        // Read live database contents only through SQLite. External open/read/
+        // close can release process-wide POSIX locks held by SQLite connections.
+        let originalProfiles = try store.profiles()
+        let originalRecordings = try store.recentRecordings(dogID: profile.id, limit: nil)
+        let originalSync = try originalRecordings.map { try store.syncJSON(recordingID: $0.id) }
+        let originalArtifacts = try originalRecordings.map { try store.artifacts(recordingID: $0.id) }
+        let originalErrors = try originalRecordings.map { try store.recordingSyncError(recordingID: $0.id) }
+        let originalProfileStates = try originalProfiles.map { try store.profileSyncState(versionID: $0.profileVersionID) }
+        let originalInventory = try store.localInventory()
+        let originalCleanup = try store.retirementCleanupStatus()
         let missingRoot = root.appendingPathComponent("unavailable-store")
         // Never rename a live SQLite vnode: Apple's VFS invalidates its open
         // descriptor, which can corrupt test isolation. Perform a real failed
@@ -408,7 +417,16 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertNotNil(model.historyLoadError)
         XCTAssertEqual(model.recentRecordings.map(\.id), original)
         XCTAssertFalse(FileManager.default.fileExists(atPath: missingRoot.appendingPathComponent("woona.sqlite").path), "A read failure must not create a new empty store")
-        XCTAssertEqual(try WoonaStore.sha256File(database), originalHash)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: database.path))
+        XCTAssertEqual(try store.profiles(), originalProfiles)
+        XCTAssertEqual(try store.recentRecordings(dogID: profile.id, limit: nil), originalRecordings)
+        XCTAssertEqual(try originalRecordings.map { try store.syncJSON(recordingID: $0.id) }, originalSync)
+        XCTAssertEqual(try originalRecordings.map { try store.artifacts(recordingID: $0.id) }, originalArtifacts)
+        XCTAssertEqual(try originalRecordings.map { try store.recordingSyncError(recordingID: $0.id) }, originalErrors)
+        XCTAssertEqual(try originalProfiles.map { try store.profileSyncState(versionID: $0.profileVersionID) }, originalProfileStates)
+        XCTAssertEqual(try store.localInventory().profiles, originalInventory.profiles)
+        XCTAssertEqual(try store.localInventory().recordings, originalInventory.recordings)
+        XCTAssertEqual(try store.retirementCleanupStatus(), originalCleanup)
         model.onHistoryReadStartForTesting = nil
         model.retryLoadingHistory(); try await awaitHistoryForTesting(model)
         XCTAssertNil(model.historyLoadError); XCTAssertEqual(model.recentRecordings.map(\.id), original)
