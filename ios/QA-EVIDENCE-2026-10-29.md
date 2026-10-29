@@ -76,8 +76,19 @@ At initial localization CI `40882781582`, all 269 unit tests and 13 of 14 UI tes
 passed, including the new English→Russian canonical-options UI test. Its sole failure
 was a pre-existing blank-new-profile assertion that still expected the Russian
 placeholder in English. It now accepts only empty or `Name *`; UUID/draft/reselection
-checks remain intact. Later migration/history/storage/restore additions require their
-own macOS/Xcode CI result; this document does not claim they passed natively.
+checks remain intact.
+
+At the next unit-only macOS/Xcode CI `40886601079` (source `09dc1f5`), 278/279 unit
+tests passed. All six historical-schema fixtures, migration rollback, bounded history,
+mixed timestamps, worker/stale-animal/read-failure checks, and storage timeout/cancel/
+scope/error tests passed. The 1,205-row page100+page100+bulk-read benchmark took
+0.111 seconds on that simulator. The sole failure was an existing removal-readiness
+test asserting immediately after AppViewModel initialization; it now awaits actual
+history/recovery readiness while retaining all file-removal and active-capture guards.
+This unit-only run did not run the UI suite. Later top-level wire-contract correction,
+actual server-generated fixture, four-request restore batches, nil-animal global queue,
+and late-insert/deletion/ROWID membership additions require their own native result.
+They must not be counted as passed based on this earlier run.
 
 Linux SQL/source checks cannot prove iOS compilation, BLE/camera behavior, MP4 quality,
 background termination or physical sensor clock alignment. Those require a signed
