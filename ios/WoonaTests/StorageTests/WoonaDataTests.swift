@@ -397,13 +397,19 @@ final class WoonaDataTests: XCTestCase {
         let model = AppViewModel(store: store, uiTesting: true)
         try await awaitHistoryForTesting(model)
         let original = model.recentRecordings.map(\.id)
-        let database = root.appendingPathComponent("woona.sqlite"), held = root.appendingPathComponent("unavailable.sqlite")
-        try FileManager.default.moveItem(at: database, to: held)
+        let database = root.appendingPathComponent("woona.sqlite")
+        let originalHash = try WoonaStore.sha256File(database)
+        let missingRoot = root.appendingPathComponent("unavailable-store")
+        // Never rename a live SQLite vnode: Apple's VFS invalidates its open
+        // descriptor, which can corrupt test isolation. Perform a real failed
+        // read-only open on an absent synthetic path inside the history worker.
+        model.onHistoryReadStartForTesting = { _ = try WoonaStore(rootDirectory: missingRoot, readOnly: true) }
         model.refreshRecordingHistory(); try await awaitHistoryForTesting(model, allowFailure: true)
         XCTAssertNotNil(model.historyLoadError)
         XCTAssertEqual(model.recentRecordings.map(\.id), original)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path), "A read failure must not create a new empty store")
-        try FileManager.default.moveItem(at: held, to: database)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingRoot.appendingPathComponent("woona.sqlite").path), "A read failure must not create a new empty store")
+        XCTAssertEqual(try WoonaStore.sha256File(database), originalHash)
+        model.onHistoryReadStartForTesting = nil
         model.retryLoadingHistory(); try await awaitHistoryForTesting(model)
         XCTAssertNil(model.historyLoadError); XCTAssertEqual(model.recentRecordings.map(\.id), original)
     }

@@ -63,7 +63,7 @@ final class AppViewModel: ObservableObject {
     private var historyGeneration: UInt64 = 0
     private var historyLoadTask: Task<Void, Never>?
 #if DEBUG
-    var onHistoryReadStartForTesting: (@Sendable () -> Void)?
+    var onHistoryReadStartForTesting: (@Sendable () throws -> Void)?
 #endif
     var hasMoreRecordings: Bool { showingAllRecordings && historyHasMore }
     var historyChangedDuringPagination: Bool { showingAllRecordings && !isHistoryLoading && historyLoadError == nil && !historyHasMore && recentRecordings.count < historyTotalCount }
@@ -1616,7 +1616,7 @@ final class AppViewModel: ObservableObject {
             let worker = Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
 #if DEBUG
-                onStart?()
+                try onStart?()
 #endif
                 let reader = try WoonaStore(rootDirectory: root, readOnly: true)
                 guard let dogID else {
