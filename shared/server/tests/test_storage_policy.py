@@ -22,6 +22,21 @@ from server.tests.test_api import DEVICE, request, expect_http
 from server.tests.tools.isolated_load_fuzz import make_fixture
 
 
+WIRE_FIXTURE = Path(__file__).resolve().parents[2] / 'testdata' / 'storage-api-contract.json'
+
+
+def assert_wire_shape(test, actual, expected, path='body'):
+    test.assertIs(type(actual), type(expected), path)
+    if isinstance(expected, dict):
+        test.assertEqual(set(actual), set(expected), path)
+        for key in expected:
+            assert_wire_shape(test, actual[key], expected[key], path + '.' + key)
+    elif isinstance(expected, list):
+        for index, item in enumerate(actual):
+            test.assertTrue(expected, path + ' unexpectedly gained array items')
+            assert_wire_shape(test, item, expected[min(index, len(expected) - 1)], path + '[]')
+
+
 class StoragePolicyTest(unittest.TestCase):
     def setUp(self):
         self.fixtures = []
@@ -101,6 +116,47 @@ class StoragePolicyTest(unittest.TestCase):
         self.assertFalse(body['retryable'])
         self.assertEqual(body['nextAction'], 'review_server_storage_limits')
         self.assertTrue(body['requestId'])
+        self.assert_absent(fixture)
+
+    def test_real_http_storage_status_matches_shared_native_wire_fixture(self):
+        fixture = json.loads(WIRE_FIXTURE.read_text())
+        self.assertEqual(fixture['contractVersion'], 1)
+        status, _, raw = request('GET', '/v1/storage-status', headers={'X-Woona-Account': self.account})
+        self.assertEqual(status, fixture['storageStatus']['httpStatus'])
+        body = json.loads(raw)
+        assert_wire_shape(self, body, fixture['storageStatus']['body'])
+        self.assertTrue(body['existingUploadsMayResume'])
+        self.assertFalse(body['automaticDeletionEnabled'])
+        self.assertNotIn('existingUploadsMayResume', body['admission'])
+
+    def test_real_http_quota_rejection_matches_shared_native_wire_fixture(self):
+        expected = json.loads(WIRE_FIXTURE.read_text())['quotaExceeded']
+        fixture = self.fixture(21 * 1024 ** 3)
+        body = expect_http(expected['httpStatus'], 'PUT', '/v1/recordings/' + fixture['recording_id'],
+                           fixture['manifest'], headers={'X-Woona-Account': self.account})
+        assert_wire_shape(self, body, expected['body'])
+        for key in ('code', 'message', 'retryable', 'nextAction', 'quotaScope', 'limitBytes',
+                    'reservedBytes', 'requestedBytes'):
+            self.assertEqual(body[key], expected['body'][key], key)
+        self.assert_absent(fixture)
+
+    def test_physical_rejection_handler_matches_real_http_shared_wire_fixture(self):
+        expected = json.loads(WIRE_FIXTURE.read_text())['reservationUnavailable']
+        fixture = self.fixture(1)
+        with patch('server.storage_policy.shutil.disk_usage', return_value=SimpleNamespace(free=0)):
+            with self.assertRaises(HTTPException) as caught:
+                self.put(fixture, self.account)
+        native = Request({'type': 'http', 'headers': []})
+        native.state.request_id = str(uuid.uuid4())
+        response = asyncio.run(api.http_error(native, caught.exception))
+        self.assertEqual(response.status_code, expected['httpStatus'])
+        self.assertEqual(response.headers['Retry-After'], expected['headers']['retry-after'])
+        body = json.loads(response.body)
+        assert_wire_shape(self, body, expected['body'])
+        for key in ('code', 'message', 'retryable', 'nextAction'):
+            self.assertEqual(body[key], expected['body'][key], key)
+        self.assertEqual(response.headers['X-Request-ID'], body['requestId'])
+        self.assertNotIn('detail', body)
         self.assert_absent(fixture)
 
     def test_pending_sizes_charge_account_quota_and_other_accounts_remain_independent(self):

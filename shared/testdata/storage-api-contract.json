@@ -1,0 +1,82 @@
+{
+  "contractVersion": 1,
+  "source": "isolated synthetic API; no production data",
+  "storageStatus": {
+    "httpStatus": 200,
+    "headers": {
+      "x-request-id": "b03a7a5a-d714-4988-844d-0d023920a4f6"
+    },
+    "body": {
+      "checkedScope": {
+        "accountId": "qa-storage-wire-contract",
+        "unassignedOnly": false,
+        "includesAllAccounts": false
+      },
+      "limits": {
+        "recordingBytes": 21474836480,
+        "accountBytes": 107374182400,
+        "freeSpaceReserveBytes": 268435456
+      },
+      "account": {
+        "declaredReservedBytes": 0,
+        "acknowledgedBytes": 0,
+        "metadataAcknowledgedBytes": 0,
+        "remainingQuotaBytes": 107374182400,
+        "recordings": 0,
+        "artifacts": 0
+      },
+      "serverStorage": {
+        "totalBytes": 16485691392,
+        "freeBytes": 15630761984,
+        "freeSpaceReserveBytes": 268435456,
+        "pendingReservedBytes": 0,
+        "pendingArtifacts": 0,
+        "newReservationAvailableBytes": 15362326528,
+        "scope": "server"
+      },
+      "status": "ready",
+      "admission": {
+        "blockingReasons": [],
+        "newArtifactUpperBoundBytes": 15362326528
+      },
+      "nextAction": "continue_upload",
+      "existingUploadsMayResume": true,
+      "automaticDeletionEnabled": false
+    }
+  },
+  "quotaExceeded": {
+    "httpStatus": 413,
+    "headers": {
+      "x-request-id": "c7dc2631-57c8-4c83-a842-1b9bc60796b3"
+    },
+    "body": {
+      "requestId": "c7dc2631-57c8-4c83-a842-1b9bc60796b3",
+      "code": "storage_quota_exceeded",
+      "message": "This manifest would exceed the configured recording or account storage quota. Preserve local originals and review the reported quota with the server operator; already accepted files may still resume.",
+      "retryable": false,
+      "nextAction": "review_server_storage_limits",
+      "quotaScope": "recording",
+      "limitBytes": 21474836480,
+      "reservedBytes": 0,
+      "requestedBytes": 22548578304
+    }
+  },
+  "reservationUnavailable": {
+    "httpStatus": 507,
+    "headers": {
+      "retry-after": "60",
+      "x-request-id": "58cd3bff-e4ed-40fb-aa24-a1a97d28f019"
+    },
+    "body": {
+      "requestId": "58cd3bff-e4ed-40fb-aa24-a1a97d28f019",
+      "code": "storage_reservation_unavailable",
+      "message": "The server cannot reserve enough remaining capacity for this new file after accounting for pending uploads and its safety reserve. Preserve local originals; existing uploads may resume and no files were removed.",
+      "retryable": true,
+      "nextAction": "retry_after_storage_available",
+      "availableBytes": 15742672896,
+      "pendingReservedBytes": 0,
+      "requestedBytes": 1,
+      "requiredBytes": 1099511627777
+    }
+  }
+}

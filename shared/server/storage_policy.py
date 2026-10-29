@@ -172,7 +172,7 @@ def storage_status(connection, root: Path, account: str | None) -> dict:
                              'includesAllAccounts': False},
         'limits': policy,
         'account': {'declaredReservedBytes': declared, 'acknowledgedBytes': acknowledged,
-                    'metadataAcknowledgedBytes': counts['acknowledged'],
+                    'metadataAcknowledgedBytes': int(counts['acknowledged']),
                     'remainingQuotaBytes': remaining,
                     'recordings': counts['recordings'], 'artifacts': counts['artifacts']},
         'serverStorage': {'totalBytes': disk.total, 'freeBytes': disk.free,
