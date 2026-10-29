@@ -307,27 +307,36 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(model.errorMessage?.contains("Synthetic keychain removal denied") == true)
     }
 
-    func testProfileDatabaseFailureIsThrownAndRetryKeepsOriginalDraft() throws {
+    func testProfileDatabaseFailureIsThrownAndRetryKeepsOriginalDraft() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try WoonaStore(rootDirectory: directory)
-        let model = AppViewModel(store: store, uiTesting: true)
-        var draft = DogQuestionnaire()
-        draft.schemaVersion = 2; draft.animalId = "retained-draft"; draft.numberOrName = "Unsaved animal"
-        var database: OpaquePointer?
-        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
-        defer { sqlite3_close(database) }
-        XCTAssertEqual(sqlite3_exec(database, "CREATE TRIGGER fail_profile_save BEFORE INSERT ON dogs BEGIN SELECT RAISE(ABORT, 'Injected database save failure'); END", nil, nil, nil), SQLITE_OK)
-        XCTAssertThrowsError(try model.saveDogProfile(draft)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Injected database save failure"))
-            XCTAssertTrue(questionnaireSaveError(error, language: .english).contains("Your draft remains open"))
+        func exerciseFixture() async throws {
+            let store = try WoonaStore(rootDirectory: directory)
+            let model = AppViewModel(store: store, uiTesting: true)
+            var draft = DogQuestionnaire()
+            draft.schemaVersion = 2; draft.animalId = "retained-draft"; draft.numberOrName = "Unsaved animal"
+            var database: OpaquePointer?
+            XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+            defer { sqlite3_close(database) }
+            XCTAssertEqual(sqlite3_exec(database, "CREATE TRIGGER fail_profile_save BEFORE INSERT ON dogs BEGIN SELECT RAISE(ABORT, 'Injected database save failure'); END", nil, nil, nil), SQLITE_OK)
+            XCTAssertThrowsError(try model.saveDogProfile(draft)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Injected database save failure"))
+                XCTAssertTrue(questionnaireSaveError(error, language: .english).contains("Your draft remains open"))
+            }
+            XCTAssertEqual(draft.numberOrName, "Unsaved animal")
+            XCTAssertTrue(try store.profiles().isEmpty)
+            XCTAssertEqual(sqlite3_exec(database, "DROP TRIGGER fail_profile_save", nil, nil, nil), SQLITE_OK)
+            try model.saveDogProfile(draft)
+            XCTAssertEqual(try store.profiles().first?.questionnaire.animalId, "retained-draft")
+            XCTAssertEqual(model.selectedDogProfile?.numberOrName, "Unsaved animal")
+            // saveDogProfile owns an asynchronous upload attempt even without a
+            // configured network. Finish it and the accepted history read before
+            // releasing handles and unlinking this fixture's SQLite files.
+            try await waitUntil("profile save and history housekeeping to finish", timeout: 10) {
+                model.canChangeAccount && !model.isHistoryLoading
+            }
         }
-        XCTAssertEqual(draft.numberOrName, "Unsaved animal")
-        XCTAssertTrue(try store.profiles().isEmpty)
-        XCTAssertEqual(sqlite3_exec(database, "DROP TRIGGER fail_profile_save", nil, nil, nil), SQLITE_OK)
-        try model.saveDogProfile(draft)
-        XCTAssertEqual(try store.profiles().first?.questionnaire.animalId, "retained-draft")
-        XCTAssertEqual(model.selectedDogProfile?.numberOrName, "Unsaved animal")
+        try await exerciseFixture()
     }
 
     func testReplaySourceCannotBePresentedAsLiveSensorCapture() {
