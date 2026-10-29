@@ -541,31 +541,32 @@ final class AppViewModel: ObservableObject {
                 do {
                     try await client.applyAccount()
                     didApplyAccount = true
+                    let restored = try await client.restoreProfiles(into: store)
+                    _ = try await client.restoreRecordings(dogIDs: restored.map(\.id), into: store)
+                    // Keep the current visible workspace until both mandatory
+                    // restores succeed. Incremental target cache remains durable.
                     selectedAccountID = account
                     accountInput = account ?? ""
                     UserDefaults.standard.set(account, forKey: "selectedAccountID")
                     serverRecordings = []
                     showingAllRecordings = false; historyLimit = 10
                     reloadProfiles()
-                    let restored = try await client.restoreProfiles(into: store)
-                    _ = try await client.restoreRecordings(dogIDs: restored.map(\.id), into: store)
-                    reloadProfiles()
                     await reloadServerRecordings()
                 } catch {
-                    // A later detail can fail after earlier profiles were saved.
-                    // Show those durable results even when background reconciliation
-                    // is also offline or unauthorized and cannot refresh the UI.
+                    // Refresh the preserved current scope. A target-account cache
+                    // stays hidden; partial results for the same account are visible.
+                    // Retain the existing dog selection when it is still present.
                     reloadProfiles(selecting: selectedDogProfile?.id)
                     let russian = selectedLanguage == .russian
                     let message: String
                     if didApplyAccount {
                         message = russian
-                            ? "Аккаунт применён. Восстановление данных не завершено; сохранённые данные доступны. Повторите «Применить аккаунт»"
-                            : "Account applied. Data restore is incomplete; saved data is available. Retry Apply account"
+                            ? "Аккаунт не переключён. Текущий аккаунт и локальные данные сохранены. Восстановление данных не завершено; повторите «Применить аккаунт»"
+                            : "The account was not switched. The current account and local data are preserved. Data restore is incomplete; retry Apply account"
                     } else {
                         message = russian
-                            ? "Не удалось применить аккаунт. Сохранённые данные доступны; проверьте причину и повторите «Применить аккаунт»"
-                            : "The account could not be applied. Saved data is available; check the cause and retry Apply account"
+                            ? "Не удалось применить аккаунт. Текущий аккаунт и локальные данные сохранены; проверьте причину и повторите «Применить аккаунт»"
+                            : "The account could not be applied. The current account and local data are preserved; check the cause and retry Apply account"
                     }
                     showError(message, error: error)
                 }

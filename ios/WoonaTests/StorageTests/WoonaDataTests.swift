@@ -741,7 +741,86 @@ final class WoonaDataTests: XCTestCase {
     }
 
     @MainActor
-    func testApplyAccountShowsProfilesSavedBeforeLaterRestoreFailureEvenWhenBackgroundCheckAlsoFails() async throws {
+    func testApplyAccountCommitsVisibleWorkspaceOnlyAfterAllMandatoryRestoresSucceed() async throws {
+        let oldAccount = UserDefaults.standard.string(forKey: "selectedAccountID")
+        defer {
+            if let oldAccount { UserDefaults.standard.set(oldAccount, forKey: "selectedAccountID") }
+            else { UserDefaults.standard.removeObject(forKey: "selectedAccountID") }
+        }
+        try await networkSource { root, _ in
+            UserDefaults.standard.removeObject(forKey: "selectedAccountID")
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let original = try store.saveProfile(self.completeDog())
+            try store.markProfileAccepted(dogID: original.id, versionID: original.profileVersionID)
+            let ids = [UUID(), UUID()]
+            var answers = self.completeDog(); answers.numberOrName = "Restored target"
+            let json = try WoonaStore.dogQuestionnaireData(answers)
+            var details: [String: Data] = [:]
+            for id in ids {
+                let version: [String: Any] = ["id": UUID().uuidString, "schemaVersion": answers.schemaVersion,
+                    "validationState": "complete", "questionnaire": try JSONSerialization.jsonObject(with: json),
+                    "contentSha256": WoonaStore.sha256(json), "clientCreatedAtUtc": "2026-10-29T10:00:00Z"]
+                let value: [String: Any] = ["id": id.uuidString, "numberOrName": answers.numberOrName,
+                    "revision": 1, "accountId": "scope-complete", "profileVersion": version, "profileVersions": [version]]
+                details["/v1/dogs/" + id.uuidString] = try JSONSerialization.data(withJSONObject: value)
+            }
+            let page = try JSONSerialization.data(withJSONObject: ["items": ids.map { ["id": $0.uuidString] }])
+            let entered = self.expectation(description: "Mandatory target recording restore reached transport")
+            let release = DispatchSemaphore(value: 0)
+            defer { release.signal() }
+            NetworkFaultProtocol.handler = { request in
+                let path = request.url!.path
+                if path == "/v1/accounts/scope-complete" { return .init(body: Data(#"{"identifier":"scope-complete"}"#.utf8)) }
+                if path == "/v1/dogs" { return .init(body: page) }
+                if let body = details[path] { return .init(body: body) }
+                if path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                if path.hasSuffix("/recordings") {
+                    if path.contains(ids[0].uuidString), request.url?.query?.contains("limit=200") == true {
+                        XCTAssertFalse(Thread.isMainThread)
+                        entered.fulfill()
+                        XCTAssertEqual(release.wait(timeout: .now() + 20), .success)
+                    }
+                    return .init(body: Data(#"{"items":[]}"#.utf8))
+                }
+                throw ServerSyncError.responseInvalid
+            }
+            let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { account in
+                let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [NetworkFaultProtocol.self]
+                return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
+            })
+            try await awaitHistoryForTesting(model)
+            model.serverBaseURL = "https://network.test"
+            model.updateTransferNetworkPath(available: true, unmetered: true)
+            let readyDeadline = Date().addingTimeInterval(10)
+            while !model.canChangeAccount, Date() < readyDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertTrue(model.canChangeAccount)
+            model.serverToken = "fixture"; model.accountInput = " SCOPE-COMPLETE "
+            model.applyAccount()
+            await self.fulfillment(of: [entered], timeout: 10)
+            XCTAssertTrue(model.isAccountOperationRunning)
+            XCTAssertNil(model.selectedAccountID, "Visible account must wait for mandatory recording restore")
+            XCTAssertNil(UserDefaults.standard.string(forKey: "selectedAccountID"))
+            XCTAssertEqual(model.accountInput, " SCOPE-COMPLETE ")
+            XCTAssertEqual(model.selectedDogProfile?.id, original.id)
+            XCTAssertEqual(model.dogProfiles.map(\.id), [original.id])
+            XCTAssertEqual(Set(try store.profiles().filter { $0.accountID == "scope-complete" }.map(\.id)), Set(ids), "Target cache can be durable while the current workspace remains unchanged")
+            release.signal()
+            let completeDeadline = Date().addingTimeInterval(20)
+            while (!model.canChangeAccount || model.isHistoryLoading), Date() < completeDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertTrue(model.canChangeAccount)
+            XCTAssertEqual(model.selectedAccountID, "scope-complete")
+            XCTAssertEqual(UserDefaults.standard.string(forKey: "selectedAccountID"), "scope-complete")
+            XCTAssertEqual(model.accountInput, "scope-complete")
+            XCTAssertEqual(Set(model.dogProfiles.map(\.id)), Set(ids))
+            XCTAssertEqual(model.selectedDogProfile?.accountID, "scope-complete")
+            XCTAssertEqual(model.hiddenProfileCount, 1)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(try store.profile(dogID: original.id, versionID: original.profileVersionID)?.contentSha256, original.contentSha256)
+        }
+    }
+
+    @MainActor
+    func testApplyAccountPreservesCurrentWorkspaceAndShowsOnlyItsPartialResultsOnFailure() async throws {
         let oldAccount = UserDefaults.standard.string(forKey: "selectedAccountID")
         defer {
             if let oldAccount { UserDefaults.standard.set(oldAccount, forKey: "selectedAccountID") }
@@ -749,95 +828,97 @@ final class WoonaDataTests: XCTestCase {
         }
         for unauthorized in [true, false] {
             for applied in [true, false] {
-                try await networkSource { root, _ in
-                    UserDefaults.standard.removeObject(forKey: "selectedAccountID")
-                    let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
-                    let original = try store.saveProfile(self.completeDog())
-                    let dogA = UUID(), dogB = UUID(), versionA = UUID()
-                    var answers = self.completeDog(); answers.numberOrName = "Partially restored A"
-                    let json = try WoonaStore.dogQuestionnaireData(answers)
-                    let time = "2026-10-29T10:00:00.123456Z"
-                    let version: [String: Any] = ["id": versionA.uuidString, "schemaVersion": answers.schemaVersion,
-                        "validationState": "complete", "questionnaire": try JSONSerialization.jsonObject(with: json),
-                        "contentSha256": WoonaStore.sha256(json), "clientCreatedAtUtc": time]
-                    let detail: [String: Any] = ["id": dogA.uuidString, "numberOrName": answers.numberOrName, "revision": 1,
-                        "accountId": "scope-partial", "updatedAtUtc": time, "profileVersion": version, "profileVersions": [version]]
-                    let detailData = try JSONSerialization.data(withJSONObject: detail)
-                    let page = try JSONSerialization.data(withJSONObject: ["items": [["id": dogA.uuidString], ["id": dogB.uuidString]]])
-                    let backgroundFailed = self.expectation(description: "The later background reconciliation also fails")
-                    let originalError = Data(#"{"code":"invalid_bearer_token","requestId":"partial-restore-req"}"#.utf8)
-                    NetworkFaultProtocol.handler = { request in
-                        let path = request.url!.path
-                        if path == "/v1/accounts/scope-partial", request.httpMethod == "PUT" {
-                            if !applied {
+                for sameAccount in [false, true] where applied || !sameAccount {
+                    try await networkSource { root, _ in
+                        UserDefaults.standard.removeObject(forKey: "selectedAccountID")
+                        let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+                        let original = try store.saveProfile(self.completeDog(), accountID: sameAccount ? "scope-partial" : nil)
+                        let dogA = UUID(), dogB = UUID(), versionA = UUID()
+                        var answers = self.completeDog(); answers.numberOrName = "Partially restored A"
+                        let json = try WoonaStore.dogQuestionnaireData(answers)
+                        let time = "2026-10-29T10:00:00.123456Z"
+                        let version: [String: Any] = ["id": versionA.uuidString, "schemaVersion": answers.schemaVersion,
+                            "validationState": "complete", "questionnaire": try JSONSerialization.jsonObject(with: json),
+                            "contentSha256": WoonaStore.sha256(json), "clientCreatedAtUtc": time]
+                        let detail: [String: Any] = ["id": dogA.uuidString, "numberOrName": answers.numberOrName, "revision": 1,
+                            "accountId": "scope-partial", "updatedAtUtc": time, "profileVersion": version, "profileVersions": [version]]
+                        let detailData = try JSONSerialization.data(withJSONObject: detail)
+                        let page = try JSONSerialization.data(withJSONObject: ["items": [["id": dogA.uuidString], ["id": dogB.uuidString]]])
+                        let backgroundFailed = self.expectation(description: "The later background reconciliation also fails")
+                        let originalError = Data(#"{"code":"invalid_bearer_token","requestId":"partial-restore-req"}"#.utf8)
+                        NetworkFaultProtocol.handler = { request in
+                            let path = request.url!.path
+                            if path == "/v1/accounts/scope-partial", request.httpMethod == "PUT" {
+                                if !applied {
+                                    if unauthorized { return .init(status: 401, body: originalError) }
+                                    throw URLError(.timedOut)
+                                }
+                                return .init(body: Data(#"{"identifier":"scope-partial"}"#.utf8))
+                            }
+                            if path == "/v1/dogs" { return .init(body: page) }
+                            if path == "/v1/dogs/" + dogA.uuidString { return .init(body: detailData) }
+                            if path == "/v1/dogs/" + dogB.uuidString {
                                 if unauthorized { return .init(status: 401, body: originalError) }
                                 throw URLError(.timedOut)
                             }
-                            return .init(body: Data(#"{"identifier":"scope-partial"}"#.utf8))
+                            if path == "/v1/deletions" {
+                                backgroundFailed.fulfill()
+                                if unauthorized { return .init(status: 401, body: Data(#"{"code":"invalid_bearer_token","requestId":"background-failure-req"}"#.utf8)) }
+                                throw URLError(.notConnectedToInternet)
+                            }
+                            throw ServerSyncError.responseInvalid
                         }
-                        if path == "/v1/dogs" { return .init(body: page) }
-                        if path == "/v1/dogs/" + dogA.uuidString { return .init(body: detailData) }
-                        if path == "/v1/dogs/" + dogB.uuidString {
-                            if unauthorized { return .init(status: 401, body: originalError) }
-                            throw URLError(.timedOut)
-                        }
-                        if path == "/v1/deletions" {
-                            backgroundFailed.fulfill()
-                            if unauthorized { return .init(status: 401, body: Data(#"{"code":"invalid_bearer_token","requestId":"background-failure-req"}"#.utf8)) }
-                            throw URLError(.notConnectedToInternet)
-                        }
-                        throw ServerSyncError.responseInvalid
-                    }
-                    let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { account in
-                        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [NetworkFaultProtocol.self]
-                        return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
-                    })
-                    try await awaitHistoryForTesting(model)
-                    model.serverBaseURL = "https://network.test"
-                    model.updateTransferNetworkPath(available: true, unmetered: true)
-                    let initialReadyDeadline = Date().addingTimeInterval(10)
-                    while !model.canChangeAccount, Date() < initialReadyDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
-                    XCTAssertTrue(model.canChangeAccount)
-                    model.selectedLanguage = unauthorized ? .english : .russian
-                    model.serverToken = "fixture"; model.accountInput = " SCOPE-PARTIAL "
-                    model.applyAccount()
-                    await self.fulfillment(of: [backgroundFailed], timeout: 20)
-                    let deadline = Date().addingTimeInterval(20)
-                    while (!model.canChangeAccount || model.isHistoryLoading), Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
-                    XCTAssertTrue(model.canChangeAccount)
-                    XCTAssertEqual(model.retirementCheckState, "failed")
-                    XCTAssertNotNil(model.retirementCheckError)
-                    let expectedPrefix: String
-                    if applied {
-                        expectedPrefix = unauthorized ? "Account applied. Data restore is incomplete; saved data is available. Retry Apply account" : "Аккаунт применён. Восстановление данных не завершено; сохранённые данные доступны. Повторите «Применить аккаунт»"
-                        XCTAssertEqual(model.selectedAccountID, "scope-partial")
-                        XCTAssertEqual(model.accountInput, "scope-partial")
-                        XCTAssertEqual(UserDefaults.standard.string(forKey: "selectedAccountID"), "scope-partial")
-                        XCTAssertEqual(model.dogProfiles.map(\.id), [dogA], "Durably restored A must be visible without another Apply or restart")
-                        XCTAssertEqual(model.selectedDogProfile?.id, dogA)
-                        XCTAssertEqual(model.hiddenProfileCount, 1)
-                        XCTAssertEqual(try store.profile(dogID: dogA, versionID: versionA)?.accountID, "scope-partial")
-                        XCTAssertEqual(try store.profile(dogID: dogA, versionID: versionA)?.questionnaire.numberOrName, "Partially restored A")
-                        XCTAssertEqual(Set(try store.profiles().map(\.id)), [original.id, dogA])
-                    } else {
-                        expectedPrefix = unauthorized ? "The account could not be applied. Saved data is available; check the cause and retry Apply account" : "Не удалось применить аккаунт. Сохранённые данные доступны; проверьте причину и повторите «Применить аккаунт»"
-                        XCTAssertNil(model.selectedAccountID)
-                        XCTAssertEqual(model.accountInput, " SCOPE-PARTIAL ")
-                        XCTAssertNil(UserDefaults.standard.string(forKey: "selectedAccountID"))
-                        XCTAssertEqual(model.dogProfiles.map(\.id), [original.id])
+                        let model = AppViewModel(store: store, uiTesting: true, syncClientFactory: { account in
+                            let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [NetworkFaultProtocol.self]
+                            return try WoonaServerClient(configuration: .init(baseURL: "https://network.test", wifiOnly: false, accountID: account), token: "fixture", sessionConfiguration: config)
+                        })
+                        if sameAccount { model.accountInput = "scope-partial"; model.applyAccount() }
+                        try await awaitHistoryForTesting(model)
+                        let originalAccount = model.selectedAccountID
                         XCTAssertEqual(model.selectedDogProfile?.id, original.id)
-                        XCTAssertNil(try store.profile(dogID: dogA, versionID: versionA))
-                        XCTAssertEqual(try store.profiles().map(\.id), [original.id])
+                        model.serverBaseURL = "https://network.test"
+                        model.updateTransferNetworkPath(available: true, unmetered: true)
+                        let initialReadyDeadline = Date().addingTimeInterval(10)
+                        while !model.canChangeAccount, Date() < initialReadyDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
+                        XCTAssertTrue(model.canChangeAccount)
+                        model.selectedLanguage = unauthorized ? .english : .russian
+                        model.serverToken = "fixture"; model.accountInput = " SCOPE-PARTIAL "
+                        model.applyAccount()
+                        await self.fulfillment(of: [backgroundFailed], timeout: 20)
+                        let deadline = Date().addingTimeInterval(20)
+                        while (!model.canChangeAccount || model.isHistoryLoading), Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+                        XCTAssertTrue(model.canChangeAccount)
+                        XCTAssertEqual(model.retirementCheckState, "failed")
+                        XCTAssertNotNil(model.retirementCheckError)
+                        let expectedPrefix: String
+                        if applied {
+                            expectedPrefix = unauthorized ? "The account was not switched. The current account and local data are preserved. Data restore is incomplete; retry Apply account" : "Аккаунт не переключён. Текущий аккаунт и локальные данные сохранены. Восстановление данных не завершено; повторите «Применить аккаунт»"
+                            XCTAssertEqual(try store.profile(dogID: dogA, versionID: versionA)?.accountID, "scope-partial")
+                            XCTAssertEqual(try store.profile(dogID: dogA, versionID: versionA)?.questionnaire.numberOrName, "Partially restored A")
+                            XCTAssertEqual(Set(try store.profiles().map(\.id)), [original.id, dogA])
+                            XCTAssertEqual(model.hiddenProfileCount, sameAccount ? 0 : 1)
+                            let visibleIDs: Set<UUID> = sameAccount ? [original.id, dogA] : [original.id]
+                            XCTAssertEqual(Set(model.dogProfiles.map(\.id)), visibleIDs, "Only partial results belonging to the preserved current scope may appear")
+                        } else {
+                            expectedPrefix = unauthorized ? "The account could not be applied. The current account and local data are preserved; check the cause and retry Apply account" : "Не удалось применить аккаунт. Текущий аккаунт и локальные данные сохранены; проверьте причину и повторите «Применить аккаунт»"
+                            XCTAssertNil(try store.profile(dogID: dogA, versionID: versionA))
+                            XCTAssertEqual(try store.profiles().map(\.id), [original.id])
+                            XCTAssertEqual(model.dogProfiles.map(\.id), [original.id])
+                        }
+                        XCTAssertEqual(model.selectedAccountID, originalAccount)
+                        XCTAssertEqual(model.accountInput, " SCOPE-PARTIAL ")
+                        XCTAssertEqual(UserDefaults.standard.string(forKey: "selectedAccountID"), originalAccount)
+                        XCTAssertEqual(model.selectedDogProfile?.id, original.id)
+                        let error = try XCTUnwrap(model.errorMessage)
+                        XCTAssertTrue(error.hasPrefix(expectedPrefix + ": "))
+                        if unauthorized {
+                            XCTAssertTrue(error.contains("Server returned 401"))
+                            XCTAssertTrue(error.contains("invalid_bearer_token"))
+                            XCTAssertTrue(error.contains("partial-restore-req"))
+                            XCTAssertFalse(error.contains("background-failure-req"))
+                        } else { XCTAssertTrue(error.hasSuffix(URLError(.timedOut).localizedDescription)) }
+                        XCTAssertEqual(try store.profile(dogID: original.id, versionID: original.profileVersionID)?.contentSha256, original.contentSha256)
                     }
-                    let error = try XCTUnwrap(model.errorMessage)
-                    XCTAssertTrue(error.hasPrefix(expectedPrefix + ": "))
-                    if unauthorized {
-                        XCTAssertTrue(error.contains("Server returned 401"))
-                        XCTAssertTrue(error.contains("invalid_bearer_token"))
-                        XCTAssertTrue(error.contains("partial-restore-req"))
-                        XCTAssertFalse(error.contains("background-failure-req"))
-                    } else { XCTAssertTrue(error.hasSuffix(URLError(.timedOut).localizedDescription)) }
-                    XCTAssertEqual(try store.profile(dogID: original.id, versionID: original.profileVersionID)?.contentSha256, original.contentSha256)
                 }
             }
         }
