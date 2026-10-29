@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+mode="${1-full}"
+case "$mode" in
+    fast|full) ;;
+    *) echo "Usage: $0 [fast|full]" >&2; exit 2 ;;
+esac
+[[ "$#" -le 1 ]] || { echo "Usage: $0 [fast|full]" >&2; exit 2; }
+
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
 sdkmanager="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
@@ -31,13 +38,16 @@ export ANDROID_HOME="$sdk_root"
 export ANDROID_SDK_ROOT="$sdk_root"
 
 { yes || true; } | "$sdkmanager" --sdk_root="$sdk_root" --licenses >/dev/null
-"$sdkmanager" --sdk_root="$sdk_root" \
-    "platform-tools" \
-    "platforms;android-36.1" \
-    "build-tools;36.0.0" \
-    "build-tools;36.1.0" \
-    "emulator" \
-    "system-images;android-31;google_apis;x86_64"
+packages=(
+    "platform-tools"
+    "platforms;android-36.1"
+    "build-tools;36.0.0"
+    "build-tools;36.1.0"
+)
+if [[ "$mode" == full ]]; then
+    packages+=("emulator" "system-images;android-31;google_apis;x86_64")
+fi
+"$sdkmanager" --sdk_root="$sdk_root" "${packages[@]}"
 
 printf 'sdk.dir=%s\n' "$sdk_root" > "$project_root/local.properties"
 echo "Android SDK ready at $sdk_root"

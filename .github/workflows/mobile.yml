@@ -44,7 +44,14 @@ jobs:
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v6
       - name: Install Android SDK
-        run: ./android/tools/setup-android-sdk.sh
+        env:
+          ANDROID_INSTRUMENTATION: ${{ inputs.android_instrumentation }}
+        run: |
+          if [[ "$ANDROID_INSTRUMENTATION" == 'true' ]]; then
+            ./android/tools/setup-android-sdk.sh full
+          else
+            ./android/tools/setup-android-sdk.sh fast
+          fi
       - name: Enable KVM for Android instrumentation
         if: inputs.android_instrumentation == true
         run: |
@@ -55,6 +62,7 @@ jobs:
         env:
           ANDROID_INSTRUMENTATION: ${{ inputs.android_instrumentation }}
         run: |
+          python3 android/tools/test_setup_android_sdk.py
           if [[ "$ANDROID_INSTRUMENTATION" == 'true' ]]; then
             ./android/tools/check.sh full
           else

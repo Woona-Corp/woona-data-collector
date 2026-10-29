@@ -26,11 +26,11 @@ Backups are disabled by the owner's explicit decision of 27 October 2026; server
 **Android:** Install JDK 21 and the Android SDK, then open `android/` in Android Studio or use:
 
 ```bash
-./android/tools/setup-android-sdk.sh
+./android/tools/setup-android-sdk.sh fast
 ./android/tools/check.sh fast
 ```
 
-The debug APK is `android/app/build/outputs/apk/debug/app-debug.apk`. The `full` check adds the API 31 managed emulator suite. The local server address in the debug build is `http://10.0.2.2:8080`; configure an HTTPS server URL and a device token in the app for a physical phone.
+The debug APK is `android/app/build/outputs/apk/debug/app-debug.apk`. The `full` check adds the API 31 managed emulator suite. SDK setup defaults to `full` (including the emulator and API 31 system image); use `./android/tools/setup-android-sdk.sh full` before running the `full` check. The debug build defaults to the production URL `https://cool-trams.digital`, with no embedded token. For local emulator testing, configure `http://10.0.2.2:8080` in the app; for a physical phone, configure a reachable HTTPS server URL and a device token.
 
 For physical-phone sync tests, start an isolated Compose project with fresh storage:
 
@@ -81,7 +81,7 @@ sudo chown -R 10001 ../var/storage # API container runs as UID 10001
 docker compose config -q
 docker compose up -d --build --wait
 curl http://127.0.0.1:8080/health/ready
-docker compose exec -T api python -m unittest -v server.tests.test_schemas server.tests.test_api
+docker compose exec -T api python -m unittest discover -v -s server/tests
 ```
 
 The Android emulator reaches the host at `10.0.2.2`; a phone needs a reachable HTTPS endpoint. [Server operations](shared/docs/target-server-plan/operations.md) covers deployment and backups.
