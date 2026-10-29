@@ -66,6 +66,7 @@ final class AppViewModel: ObservableObject {
     var onHistoryReadStartForTesting: (@Sendable () -> Void)?
 #endif
     var hasMoreRecordings: Bool { showingAllRecordings && historyHasMore }
+    var historyChangedDuringPagination: Bool { showingAllRecordings && !isHistoryLoading && historyLoadError == nil && !historyHasMore && recentRecordings.count < historyTotalCount }
     var nextHistoryPageCount: Int { min(100, max(1, historyTotalCount - recentRecordings.count)) }
     @Published private(set) var removingLocalRecordingID: UUID?
     @Published private(set) var downloadingRecordingID: UUID?

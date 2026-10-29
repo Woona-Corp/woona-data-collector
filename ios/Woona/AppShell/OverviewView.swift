@@ -521,7 +521,11 @@ struct OverviewView: View {
                     if appState.showingAllRecordings {
                         Text(russian ? "Показано \(appState.recentRecordings.count) из \(appState.historyTotalCount)" : "Shown \(appState.recentRecordings.count) of \(appState.historyTotalCount)")
                             .font(.caption).accessibilityIdentifier("history.progress")
-                        Text(russian ? "Новые записи появляются после обновления истории." : "Refresh history to load new recordings.").font(.caption).foregroundStyle(.secondary)
+                        Text(russian ? "Счётчик относится к моменту открытия. Обновите историю, чтобы учесть добавленные и удалённые записи." : "The count reflects when history was opened. Refresh history to include added and removed recordings.").font(.caption).foregroundStyle(.secondary)
+                        if appState.historyChangedDuringPagination {
+                            Text(russian ? "История изменилась во время просмотра. Обновите её, чтобы пересчитать записи." : "History changed while you were viewing it. Refresh to recount recordings.")
+                                .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("history.changed")
+                        }
                         Button(russian ? "Обновить историю" : "Refresh history") { appState.refreshRecordingHistory() }
                             .disabled(appState.isHistoryLoading).accessibilityIdentifier("history.refresh")
                     }
