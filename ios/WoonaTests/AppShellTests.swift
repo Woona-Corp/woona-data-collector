@@ -463,6 +463,14 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(fresh.questionnaire?.readyForSync, false)
         XCTAssertEqual(model.pendingPostCaptureHeartQuestionnaire?.id, id)
         XCTAssertNotEqual(id, old.id)
+        var updatedAnimal = profile.questionnaire
+        updatedAnimal.numberOrName = "Updated animal while heart prompt is pending"
+        try model.saveDogProfile(updatedAnimal, replacing: profile)
+        try await waitForHeartPromptLocalIdle(model)
+        XCTAssertEqual(model.selectedDogProfile?.id, profile.id)
+        XCTAssertNotEqual(model.selectedDogProfile?.profileVersionID, fresh.profileVersionID)
+        XCTAssertEqual(model.pendingPostCaptureHeartQuestionnaire?.id, id)
+        XCTAssertEqual(model.pendingPostCaptureHeartQuestionnaire?.profileVersionID, fresh.profileVersionID, "The capture owns its immutable version even when the selected animal has a newer version")
         model.presentPendingHeartQuestionnaire()
         XCTAssertEqual(model.heartQuestionnairePresentation?.id, id)
         XCTAssertEqual(model.heartQuestionnairePresentation?.profileVersionID, fresh.profileVersionID)
