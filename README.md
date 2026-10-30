@@ -84,11 +84,11 @@ curl http://127.0.0.1:8080/health/ready
 docker compose exec -T api python -m unittest discover -v -s server/tests
 ```
 
-The Android emulator reaches the host at `10.0.2.2`; a phone needs a reachable HTTPS endpoint. [Server operations](shared/docs/target-server-plan/operations.md) covers deployment and backups.
+The Android emulator reaches the host at `10.0.2.2`; a phone needs a reachable HTTPS endpoint. [Server operations](shared/docs/target-server-plan/operations.md) covers deployment and backups. [Dependency/build locking](shared/server/DEPENDENCY_BUILD.md) defines the hash-locked Python graph and pinned base; [deployment provenance](shared/server/DEPLOYMENT_PROVENANCE.md) defines verified image inputs and preflight. A dirty deployment checkout's HEAD is not proof of running image source.
 
 ## Checks and releases
 
-Every push to `main` and every pull request runs Android unit tests, lint, a debug APK build, iOS simulator tests, and the Docker-backed server/API suite. Releases are independent; a platform-specific fix does not require releasing the other client. Keep functionality and shared contracts compatible across Android and iOS, and track temporary feature gaps explicitly. Marketing and build versions may differ.
+Pushes to `main` and pull requests select Android, iOS and server checks by a tested changed-path policy. Shared contracts/fixtures/workflows and unknown or unavailable diffs run all checks; platform-owned paths run their owners. Tags and manual scopes preserve full distribution coverage. The large ZIP64 fixture remains default-on, with a narrow ordinary-CI opt-out only for unrelated changes. See [CI selection policy](.github/ci/POLICY.md). Releases are independent; a platform-specific fix does not require releasing the other client. Keep functionality and shared contracts compatible across Android and iOS, and track temporary feature gaps explicitly. Marketing and build versions may differ.
 
 | Release | Trigger | Checks and delivery |
 | --- | --- | --- |

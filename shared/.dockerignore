@@ -8,6 +8,9 @@
 !docs/target-server-plan/models/**
 !testdata/
 !testdata/**
+# Sole generated evidence exception; outside the hashed public source scopes.
+!build-provenance/
+!build-provenance/source-manifest.json
 
 # Local secrets, databases, environments and generated duplicates are never inputs.
 **/.env

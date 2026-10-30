@@ -14,7 +14,8 @@ import uuid
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from server.safety import active_entity_sql, identity_lock
+from server.safety import active_entity_sql, identity_lock, try_identity_lock
+from server.storage_diagnostics import DiagnosticBudget, unavailable
 
 GIB = 1024 ** 3
 RESERVATION_ID = uuid.UUID('8209d0c4-70f5-42d0-8c33-a49e23275fc0')
@@ -62,15 +63,19 @@ def quota_error(scope: str, limit: int, reserved: int, requested: int) -> None:
             'requestedBytes': requested})
 
 
-def pending_reservation(connection, root: Path) -> tuple[int, int]:
+def pending_reservation(connection, root: Path, *, budget: DiagnosticBudget | None = None) -> tuple[int, int]:
     # Snapshot pending metadata first, then measure free space. Concurrent
     # successful writes can only make this estimate conservative. Internal
     # downward resets take reservation_lock before truncating/resetting.
-    rows = connection.execute(text(f'''SELECT a.id,a.expected_size_bytes,a.stored_size_bytes
+    statement = f'''SELECT a.id,a.expected_size_bytes,a.stored_size_bytes
         FROM artifacts a JOIN recordings r ON r.id=a.recording_id JOIN dogs d ON d.id=r.dog_id
-        WHERE a.storage_status <> 'available' AND {ACTIVE_ARTIFACTS}''')).mappings().all()
+        WHERE a.storage_status <> 'available' AND {ACTIVE_ARTIFACTS}'''
+    rows = (budget.rows(connection, statement) if budget is not None else
+            connection.execute(text(statement)).mappings().all())
     pending = 0
     for row in rows:
+        if budget is not None:
+            budget.check()
         try:
             part = root / 'incoming' / f"{row['id']}.part"
             info = part.lstat()
@@ -118,14 +123,18 @@ def check_account_assignment(connection, dog_id, account: str) -> None:
                 reserved_bytes(connection, dog_id=dog_id))
 
 
-def current_acknowledged_bytes(connection, root: Path, account) -> int:
-    rows = connection.execute(text(f'''SELECT a.id,a.storage_status,a.server_relative_path,
+def current_acknowledged_bytes(connection, root: Path, account, *, budget: DiagnosticBudget | None = None) -> int:
+    statement = f'''SELECT a.id,a.storage_status,a.server_relative_path,
         a.expected_size_bytes,a.stored_size_bytes
         FROM artifacts a JOIN recordings r ON r.id=a.recording_id JOIN dogs d ON d.id=r.dog_id
-        WHERE {ACTIVE_ARTIFACTS} AND d.account_id IS NOT DISTINCT FROM CAST(:account AS text)'''),
-        {'account': account}).mappings().all()
+        WHERE {ACTIVE_ARTIFACTS} AND d.account_id IS NOT DISTINCT FROM CAST(:account AS text)'''
+    parameters = {'account': account}
+    rows = (budget.rows(connection, statement, parameters) if budget is not None else
+            connection.execute(text(statement), parameters).mappings().all())
     total = 0
     for row in rows:
+        if budget is not None:
+            budget.check()
         try:
             if row['storage_status'] == 'available':
                 path = (root / (row['server_relative_path'] or '')).resolve()
@@ -147,9 +156,16 @@ def current_acknowledged_bytes(connection, root: Path, account) -> int:
 def storage_status(connection, root: Path, account: str | None) -> dict:
     # Account accounting and global filesystem capacity are separate scopes;
     # no identifiers or amounts belonging to another individual account leak.
-    reservation_lock(connection)
+    budget = DiagnosticBudget(
+        min(10_000, max(1, setting('WOONA_STORAGE_STATUS_MAX_ARTIFACTS', 1000))),
+        min(5000, max(1, setting('WOONA_STORAGE_STATUS_TIMEOUT_MS', 2000))))
+    budget.query(connection)
+    if not try_identity_lock(connection, 'storage-reservation', RESERVATION_ID):
+        raise unavailable('reservation_lock')
     policy = limits()
+    budget.query(connection)
     declared = reserved_bytes(connection, account=account)
+    budget.query(connection)
     active_parents = ' AND '.join((active_entity_sql('dog', 'd.id'),
         active_entity_sql('profile', 'r.dog_profile_version_id'), active_entity_sql('recording', 'r.id')))
     counts = connection.execute(text(f'''SELECT count(DISTINCT r.id) AS recordings,
@@ -158,9 +174,11 @@ def storage_status(connection, root: Path, account: str | None) -> dict:
         LEFT JOIN artifacts a ON a.recording_id=r.id AND {active_entity_sql('artifact', 'a.id')}
         WHERE {active_parents} AND d.account_id IS NOT DISTINCT FROM CAST(:account AS text)'''),
         {'account': account}).mappings().one()
-    pending, pending_files = pending_reservation(connection, root)
-    acknowledged = current_acknowledged_bytes(connection, root, account)
+    pending, pending_files = pending_reservation(connection, root, budget=budget)
+    acknowledged = current_acknowledged_bytes(connection, root, account, budget=budget)
+    budget.check()
     disk = shutil.disk_usage(root)
+    budget.check()
     usable = max(0, disk.free - policy['freeSpaceReserveBytes'] - pending)
     remaining = max(0, policy['accountBytes'] - declared) if policy['accountBytes'] else None
     blocked = []
