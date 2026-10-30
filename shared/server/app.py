@@ -11,6 +11,7 @@ import threading
 import tempfile
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -686,7 +687,7 @@ def apply_profile(
         existing_profile["dog_id"] == dog.id
         and existing_profile["questionnaire"] == profile.questionnaire
     )
-    content_hash = existing_profile["content_sha256"] if same_existing else sha256_bytes(canonical_json(profile.questionnaire))
+    content_hash = existing_profile["content_sha256"] if existing_profile is not None and same_existing else sha256_bytes(canonical_json(profile.questionnaire))
     if profile.validation_state == "complete":
         if profile.schema_version != profile.questionnaire.get("schemaVersion"):
             raise HTTPException(422, detail={"code": "profile_schema_version_mismatch"})
@@ -909,6 +910,9 @@ def add_reference(recording_id: uuid.UUID, artifact: ArtifactPayload,
     if artifact.type not in REFERENCE_TYPES:
         raise HTTPException(422, detail={"code": "reference_type_required"})
     validate_artifact(artifact)
+    reference_metadata = artifact.reference_metadata
+    if reference_metadata is None:
+        raise HTTPException(422, detail={"code": "reference_metadata_required"})
     with engine.begin() as connection:
         identity_lock(connection, "recording", recording_id)
         identity_lock(connection, "artifact", artifact.id)
@@ -922,7 +926,7 @@ def add_reference(recording_id: uuid.UUID, artifact: ArtifactPayload,
         existing = connection.execute(text("SELECT * FROM artifacts WHERE id=:id OR (recording_id=:recording AND file_name=:name)"),
                                       {"id": artifact.id, "recording": recording_id, "name": artifact.file_name}).mappings().first()
         if existing:
-            reference = json.loads(artifact.reference_metadata.model_dump_json(by_alias=True))
+            reference = json.loads(reference_metadata.model_dump_json(by_alias=True))
             if (existing["id"] != artifact.id or existing["recording_id"] != recording_id
                     or existing["artifact_type"] != artifact.type or existing["file_name"] != artifact.file_name
                     or existing["sha256"] != artifact.sha256 or existing["expected_size_bytes"] != artifact.size_bytes
@@ -1160,16 +1164,18 @@ def artifact_row(
     return row
 
 
-def assert_owner(row: Any, device_id: uuid.UUID) -> None:
+def assert_owner(row: Mapping[str, Any] | None, device_id: uuid.UUID) -> Mapping[str, Any]:
     if row is None:
         raise HTTPException(404, detail={"code": "artifact_not_found"})
     if row["capture_device_id"] != device_id:
         raise HTTPException(403, detail={"code": "artifact_not_owned"})
+    return row
 
 
-def assert_artifact_exists(row: Any) -> None:
+def assert_artifact_exists(row: Mapping[str, Any] | None) -> Mapping[str, Any]:
     if row is None:
         raise HTTPException(404, detail={"code": "artifact_not_found"})
+    return row
 
 
 def artifact_lock(artifact_id: uuid.UUID) -> threading.Lock:
@@ -1188,7 +1194,7 @@ def head_artifact(
 ) -> Response:
     with engine.connect() as connection:
         row = artifact_row(connection, artifact_id)
-    assert_owner(row, device_id)
+    row = assert_owner(row, device_id)
     offset = row["stored_size_bytes"]
     if row["storage_status"] != "available":
         try:
@@ -1235,8 +1241,7 @@ def persist_artifact_chunk(
     length = len(body)
     with artifact_lock(artifact_id):
         with engine.begin() as connection:
-            row = artifact_row(connection, artifact_id, for_update=True)
-            assert_owner(row, device_id)
+            row = assert_owner(artifact_row(connection, artifact_id, for_update=True), device_id)
             if row["storage_status"] == "available":
                 raise HTTPException(
                     409,
@@ -1309,8 +1314,7 @@ def complete_artifact(
     hash_mismatch = False
     with artifact_lock(artifact_id):
         with engine.begin() as connection:
-            row = artifact_row(connection, artifact_id, for_update=True)
-            assert_owner(row, device_id)
+            row = assert_owner(artifact_row(connection, artifact_id, for_update=True), device_id)
             if row["storage_status"] == "available":
                 return {
                     "artifactId": str(artifact_id),
@@ -1749,6 +1753,8 @@ def get_recording(
         ).mappings().all()
     if recording is None:
         raise HTTPException(404, detail={"code": "recording_not_found"})
+    if sync is None:
+        raise HTTPException(503, detail={"code": "recording_metadata_incomplete"})
     return {
         "id": str(recording["id"]),
         "dogId": str(recording["dog_id"]),
@@ -1891,7 +1897,7 @@ def download_artifact(
 ):
     with engine.connect() as connection:
         row = artifact_row(connection, artifact_id)
-    assert_artifact_exists(row)
+    row = assert_artifact_exists(row)
     if row["storage_status"] != "available" or not row["server_relative_path"]:
         raise HTTPException(409, detail={"code": "artifact_not_available"})
     path = (STORAGE_ROOT / row["server_relative_path"]).resolve()

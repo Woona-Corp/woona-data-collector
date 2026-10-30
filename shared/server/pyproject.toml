@@ -25,3 +25,13 @@ test = [
 [tool.setuptools]
 packages = ["server"]
 package-dir = {server = "."}
+
+[tool.pyright]
+include = ["."]
+exclude = [".venv", "**/__pycache__"]
+extraPaths = [".."]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.13"
+pythonPlatform = "Linux"
+typeCheckingMode = "standard"
