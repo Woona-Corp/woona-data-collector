@@ -3,6 +3,9 @@
 
 Compiles the production exporter unchanged, then validates its archives with Python's
 standard ZIP reader and SQLite (not another copy of the production ZIP parser).
+The >4 GiB fixture runs by default. Only ordinary dependency-selected CI may
+explicitly set WOONA_SKIP_ZIP64_LARGE=1; storage/exporter and release checks must
+leave it enabled. This gate does not skip any XCTest target or archive assertions.
 """
 import hashlib
 import json
@@ -189,7 +192,7 @@ class CompleteArchiveCompatibilityTests(unittest.TestCase):
         (self.base / "outside").write_text("secret outside data root")
         self.run_export(success=False, reason="Symbolic link")
 
-    @unittest.skipUnless(os.environ.get("WOONA_TEST_ZIP64_LARGE") == "1", "Set WOONA_TEST_ZIP64_LARGE=1 for a 4+ GiB streaming fixture")
+    @unittest.skipIf(os.environ.get("WOONA_SKIP_ZIP64_LARGE") == "1", "Ordinary CI explicitly omitted the 4+ GiB streaming fixture")
     def test_file_larger_than_4_gib_is_readable(self):
         self.run_export("large-file")
         with zipfile.ZipFile(self.base / "out.zip") as archive:

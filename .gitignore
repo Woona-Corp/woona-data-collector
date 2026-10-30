@@ -23,6 +23,8 @@ project.zip
 shared/.env.label
 var/
 test-run/
+# Generated candidate evidence, never source-controlled.
+shared/build-provenance/
 __pycache__/
 *.py[cod]
 **/xcuserdata/

@@ -9,6 +9,10 @@ services:
         max-file: "5"
 
   api:
+    build:
+      target: verified
+      args:
+        WOONA_SOURCE_ID: ${WOONA_SOURCE_ID:?set the reviewed full source commit}
     restart: unless-stopped
     environment:
       WOONA_ENVIRONMENT: production
@@ -50,7 +54,7 @@ services:
         max-file: "5"
 
   cloudbeaver:
-    image: dbeaver/cloudbeaver:26.1.4
+    image: dbeaver/cloudbeaver:26.1.4@sha256:c0975db279e488c6f770e4a5a74e7f8d388d5bc53c75bce82647e82cb6358a3f
     restart: unless-stopped
     env_file: .env.team
     environment:
@@ -80,7 +84,7 @@ services:
         max-file: "5"
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
     restart: unless-stopped
     depends_on:
       api:
