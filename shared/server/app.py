@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from weakref import WeakValueDictionary
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -24,11 +25,13 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from server.safety import (LOCAL_ONLY_TOKEN, active_entity_sql, append_upload,
                            identity_lock, production_auth_guard)
 from server.integrity_audit import audit_limits, integrity_page
+from server.storage_diagnostics import unavailable as storage_diagnostic_unavailable
 from server.storage_policy import (check_account_assignment, reserve_artifact, reserve_manifest,
                                    reservation_lock, storage_status, limits as storage_limits)
 
@@ -62,7 +65,8 @@ ARTIFACT_RULES = {
 }
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-artifact_locks: dict[uuid.UUID, threading.Lock] = {}
+# A holder/waiter keeps a strong reference; idle UUIDs must not accumulate.
+artifact_locks: WeakValueDictionary[uuid.UUID, threading.Lock] = WeakValueDictionary()
 artifact_locks_guard = threading.Lock()
 logger = logging.getLogger("woona.api")
 
@@ -1220,7 +1224,15 @@ async def patch_artifact(
             raise HTTPException(413, detail={"code": "chunk_too_large"})
     if len(body) != length:
         raise HTTPException(400, detail={"code": "content_length_mismatch"})
+    # Keep the lock, transaction, reconciliation, fsync and commit on ONE worker.
+    # No acknowledgement may escape before that entire durable section finishes.
+    return await run_in_threadpool(persist_artifact_chunk, artifact_id, device_id, upload_offset, body)
 
+
+def persist_artifact_chunk(
+    artifact_id: uuid.UUID, device_id: uuid.UUID, upload_offset: int, body: bytearray,
+) -> Response:
+    length = len(body)
     with artifact_lock(artifact_id):
         with engine.begin() as connection:
             row = artifact_row(connection, artifact_id, for_update=True)
@@ -1933,8 +1945,13 @@ def get_storage_status(
     device_id: Annotated[uuid.UUID, Depends(authenticated_device)],
     account: Annotated[str | None, Depends(selected_account)] = None,
 ) -> dict[str, Any]:
-    with engine.begin() as connection:
-        return storage_status(connection, STORAGE_ROOT, account)
+    try:
+        with engine.begin() as connection:
+            return storage_status(connection, STORAGE_ROOT, account)
+    except DBAPIError as error:
+        if getattr(error.orig, 'sqlstate', None) == '57014':
+            raise storage_diagnostic_unavailable('query_budget') from error
+        raise
 
 
 @app.get("/v1/integrity")

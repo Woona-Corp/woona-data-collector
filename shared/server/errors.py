@@ -1,6 +1,7 @@
 """Stable machine actions and safe explanations for API failures."""
 
 ERRORS = {
+    'storage_status_busy': ('Storage diagnostics could not finish within their lock, query or file-inspection budget. Wait for Retry-After and retry; upload admission is checked separately, no capacity is promised and no files were removed.', 'retry_later'),
     'storage_quota_exceeded': ('This manifest would exceed the configured recording or account storage quota. Preserve local originals and review the reported quota with the server operator; already accepted files may still resume.', 'review_server_storage_limits'),
     'storage_reservation_unavailable': ('The server cannot reserve enough remaining capacity for this new file after accounting for pending uploads and its safety reserve. Preserve local originals; existing uploads may resume and no files were removed.', 'retry_after_storage_available'),
     'integrity_check_busy': ('The bounded integrity audit is busy, cooling down, or reached its database query budget. Wait for Retry-After before continuing the audit; recording uploads use a separate admission path.', 'retry_later'),

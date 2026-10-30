@@ -14,12 +14,21 @@ from sqlalchemy import text
 LOCAL_ONLY_TOKEN = "change-me-local-token"
 
 
+def identity_lock_key(kind: str, identity: uuid.UUID) -> int:
+    return int.from_bytes(hashlib.sha256(f"woona:{kind}:{identity}".encode()).digest()[:8],
+                          "big", signed=True)
+
+
 def identity_lock(connection, kind: str, identity: uuid.UUID) -> None:
     # Row locks cannot serialize creation of an absent row. Transaction-scoped
     # advisory locks also work across API workers and release on rollback.
-    key = int.from_bytes(hashlib.sha256(f"woona:{kind}:{identity}".encode()).digest()[:8],
-                         "big", signed=True)
-    connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+    connection.execute(text("SELECT pg_advisory_xact_lock(:key)"),
+                       {"key": identity_lock_key(kind, identity)})
+
+
+def try_identity_lock(connection, kind: str, identity: uuid.UUID) -> bool:
+    return bool(connection.execute(text("SELECT pg_try_advisory_xact_lock(:key)"),
+                                   {"key": identity_lock_key(kind, identity)}).scalar_one())
 
 
 def production_auth_guard(connection, token: str) -> None:

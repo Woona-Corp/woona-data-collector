@@ -93,7 +93,20 @@ Timer/service templates удалены из текущей конфигурац�
   `admission.blockingReasons` различает `account_quota_reached` и
   `server_capacity_reserved`. Даже при лимите `existingUploadsMayResume=true`:
   уже принятые файлы можно завершить, а `ready` не обещает место сверх показанной
-  верхней границы `newArtifactUpperBoundBytes`.
+  верхней границы `newArtifactUpperBoundBytes`. Диагностика не ждёт занятый
+  reservation lock и использует общий budget просмотра pending/account rows:
+  `WOONA_STORAGE_STATUS_MAX_ARTIFACTS=1000` (hard cap10000) и
+  `WOONA_STORAGE_STATUS_TIMEOUT_MS=2000` (hard cap5000). SQL получает оставшийся
+  transaction-local `statement_timeout`; между file inspections проверяется
+  cooperative deadline, который не прерывает отдельный зависший kernel call.
+  При contention/исчерпании budget возвращается HTTP503 `storage_status_busy`,
+  `Retry-After: 1` и phase, без частичной ёмкости или обещания admission.
+  Успешный JSON-контракт не менялся. Эти лимиты не урезают authoritative
+  reservation/admission и не препятствуют продолжению принятых uploads.
+- PATCH upload читает ограниченный chunk асинхронно, затем выполняет весь
+  synchronous critical section (artifact lock, DB transaction, reconciliation,
+  запись, fsync и commit) на одном worker thread. ACK остаётся после commit;
+  lock существует, пока есть holder/waiter, и не накапливается для idle UUID.
 - `/v1/integrity` с device token проверяет только выбранный `X-Woona-Account`;
   без него — непривязанные записи. По умолчанию одна страница содержит до 50
   available artifacts, хешируются файлы до 16 MiB и не более 32 MiB суммарно,
