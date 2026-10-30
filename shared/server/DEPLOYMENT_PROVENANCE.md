@@ -53,11 +53,13 @@ Operator observation v1 has exactly these keys:
 {"image_digest":"sha256:<64 lowercase hex>","source_id":"<full commit>","manifest_sha256":"<canonical manifest hash>","schema_revision":"0009","uid":10001}
 ```
 
-Use one consistent image identity kind: the running container's resolved local
-image ID (configuration digest) versus the expected local image ID, **or** a
-verified immutable platform image digest on both sides. An OCI index digest,
-platform manifest digest and local image ID are different values: do not compare
-or silently substitute them. A mutable tag is never accepted as a digest.
+Use one consistent image identity kind **within each comparison**. Docker's
+resolved local image ID can be a configuration digest or a platform manifest
+digest, depending on its image store/version; it is not universally portable.
+An OCI index, platform manifest and configuration digest are different values:
+never compare different kinds or silently substitute them. A mutable tag is never
+accepted. A store transition requires the archive proof below, independently
+observed consumer identity and a separate consumer-side comparison.
 
 `compare` requires exact source, manifest, image, schema and non-root UID matches;
 there is deliberately no guessed backward/forward migration compatibility. The
@@ -131,8 +133,9 @@ The probe verifies final `/app` bytes, expected full source id, actual UID, and
 Alembic's exact single current head `0009`. Image ID comes from Docker; source,
 manifest hash and schema come from the verified manifest; UID comes from
 `os.getuid()`. CI binds these in `image-binding.json` and runs `compare`.
-This is local configuration-digest evidence, **not** a registry/platform digest
-or authenticated attestation. No image digest is inserted into its own image.
+This records the CI engine's actual local identity, **not** a claim of a pullable
+registry reference or authenticated attestation. Record its kind before comparing
+across engines. No image digest is inserted into its own image.
 
 Ordinary successful runs retain only small `server-image-provenance` metadata
 for seven days: input list, manifest, verification, image binding and explicit
@@ -149,11 +152,48 @@ provenance. Use only repository-authorized private Actions artifact access; no
 access policy or workflow permissions are changed and nothing is published to
 GHCR. There is no scheduled export, release asset, environment dump, DB, or storage
 export. Before any separately authorized exact-image deployment, check archive
-SHA-256, load in an isolated environment, inspect the loaded local image ID against
-`image-binding.json`, rerun the no-migration tree/UID verification and `compare`,
+SHA-256, load in an isolated environment, compare same-kind loaded identities
+against `image-binding.json` (or establish the archive bridge below), rerun the
+no-migration tree/UID verification and consumer-side `compare`,
 and independently apply the operator gates below. Artifacts are not permanent
 rollback retention or deployment authorization. Local Docker is absent in the
 current integration environment; CI must still prove build and Docker-backed tests.
+
+### Image-store transitions: prove the archive identity chain
+
+An observed 2026-10-30 transfer exposed a real distinction: CI recorded the image
+configuration digest, while the VPS Docker29.1.3 reported the loaded OCI platform
+manifest digest. The API was **not** replaced on the initial mismatch. These are
+not equal hashes and neither observation should be overwritten to make them equal.
+
+For this Docker-save/OCI layout, the separately retained archive SHA-256, OCI index,
+platform-manifest blob, configuration blob and layer descriptors establish the
+chain. Without extracting into a host filesystem:
+
+1. Verify the complete archive against its trusted CI checksum. Reject duplicate
+   member names, links, unsafe paths, ambiguous platforms or unsupported layouts.
+2. Verify the OCI index's selected platform-manifest digest/size against that blob's
+   actual bytes; verify the manifest's configuration digest/size against the actual
+   configuration blob. The latter must equal the CI producer configuration identity.
+   Check OS/architecture, ordered layers, descriptor sizes/hashes and configuration
+   rootfs diff IDs. Compressed layers need correct compressed/diff-ID handling;
+   do not apply an uncompressed-only proof to another format.
+3. Independently inspect the loaded consumer image. Its reported kind/value must
+   match the corresponding **proven** configuration or platform-manifest identity.
+   Retain original producer binding, archive checksum, identity-chain evidence and
+   consumer observation separately. Do not edit the producer's recorded ID.
+4. Run the image's explicit no-migration verification entrypoint as UID10001 with
+   no network, verify source bytes/schema/full source ID again, and run `compare`
+   using the independently expected **consumer-kind** digest. Repeat against the
+   running container after an authorized rollout. Unknown/missing links are a stop,
+   not permission to accept an arbitrary replacement ID.
+
+The source-manifest CLI does not parse OCI archives or authenticate this bridge;
+that remains an independently reviewed operator gate. Five synthetic transfer-proof
+cases (valid, wrong producer, broken config link, changed layer, duplicate member)
+and an actual15-layer archive were checked for the observed transition. This does
+not promise support for every archive format or engine. No production data is
+needed for this proof; application start/migration is not part of it.
 
 Build-maintainer invariants:
 
