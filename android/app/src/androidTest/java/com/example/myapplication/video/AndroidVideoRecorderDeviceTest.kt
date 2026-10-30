@@ -179,14 +179,28 @@ class AndroidVideoRecorderDeviceTest {
 
     private fun attachPreview(): SurfaceView {
         val surfaceReady = CountDownLatch(1)
+        val lastSurfaceEvent = AtomicReference("No surface callback")
         lateinit var preview: SurfaceView
         activityRule.scenario.onActivity { activity ->
             preview = SurfaceView(activity).apply {
                 holder.addCallback(
                     object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) = surfaceReady.countDown()
-                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
-                        override fun surfaceDestroyed(holder: SurfaceHolder) = Unit
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            lastSurfaceEvent.set("created: ${holder.surfaceFrame}")
+                            recorder.setPreviewSurface(holder.surface)
+                        }
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                            lastSurfaceEvent.set("changed: ${width}x$height, valid=${holder.surface.isValid}")
+                            recorder.setPreviewSurface(holder.surface)
+                            if (holder.surface.isValid && width > 0 && height > 0 &&
+                                isAttachedToWindow && isShown && this@apply.width > 0 && this@apply.height > 0) {
+                                surfaceReady.countDown()
+                            }
+                        }
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            lastSurfaceEvent.set("destroyed: ${holder.surfaceFrame}")
+                            recorder.setPreviewSurface(null)
+                        }
                     },
                 )
             }
@@ -195,23 +209,33 @@ class AndroidVideoRecorderDeviceTest {
                 ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
             )
         }
-        assertTrue("Visible camera preview surface was not created", surfaceReady.await(10, TimeUnit.SECONDS))
+        val ready = surfaceReady.await(10, TimeUnit.SECONDS)
+        assertTrue("Visible camera preview was not ready: ${lastSurfaceEvent.get()}", ready)
         return preview
     }
 
     private fun assertVisibleCameraFrame(preview: SurfaceView) {
-        val bitmap = Bitmap.createBitmap(preview.width, preview.height, Bitmap.Config.ARGB_8888)
+        lateinit var bitmap: Bitmap
         val copied = CountDownLatch(1)
         val result = AtomicReference<Int>()
-        PixelCopy.request(
-            preview,
-            bitmap,
-            { copyResult ->
-                result.set(copyResult)
-                copied.countDown()
-            },
-            Handler(Looper.getMainLooper()),
-        )
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val state = "attached=${preview.isAttachedToWindow}, shown=${preview.isShown}, " +
+                "size=${preview.width}x${preview.height}, valid=${preview.holder.surface.isValid}, " +
+                "frame=${preview.holder.surfaceFrame}"
+            assertTrue("Preview lost readiness before PixelCopy: $state",
+                preview.isAttachedToWindow && preview.isShown && preview.width > 0 &&
+                    preview.height > 0 && preview.holder.surface.isValid)
+            bitmap = Bitmap.createBitmap(preview.width, preview.height, Bitmap.Config.ARGB_8888)
+            PixelCopy.request(
+                preview,
+                bitmap,
+                { copyResult ->
+                    result.set(copyResult)
+                    copied.countDown()
+                },
+                Handler(Looper.getMainLooper()),
+            )
+        }
         assertTrue("Timed out copying the visible camera preview", copied.await(10, TimeUnit.SECONDS))
         assertEquals(PixelCopy.SUCCESS, result.get())
 
