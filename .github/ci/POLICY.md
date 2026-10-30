@@ -58,6 +58,12 @@ unchanged.
 The two modified build/distribution workflows pin each existing action version to
 its resolved full GitHub commit (read-only upstream ref inspection, 2026-10-30),
 without a major-version upgrade. Every checkout sets `persist-credentials: false`.
+The selector's private-repository fetch receives the existing read-only workflow
+token through a step-scoped environment variable, converted to a GitHub-only
+header in the fetch child's temporary environment. It is never placed in argv,
+remote URLs, `.git/config`, output or artifacts; other Git commands receive no
+selector token/header. Removing persisted credentials must not silently turn
+every private-repository diff into the conservative all-jobs fallback.
 Gradle cache writes are restricted to main; tag builds disable Gradle caching
 entirely so signed Android releases do not consume a shared build cache. Existing
 release signing, upload gates, artifact scopes and TestFlight serialization are

@@ -50,6 +50,8 @@ jobs:
         run: python3 -m unittest discover -s .github/ci -p 'test_*.py' -v
       - name: Select dependency-aware checks
         id: select
+        env:
+          WOONA_CI_FETCH_TOKEN: ${{ github.token }}
         run: python3 .github/ci/select_checks.py
 
   android:

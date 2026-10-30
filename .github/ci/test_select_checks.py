@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
-from select_checks import ALL, changed_paths, decision
+from select_checks import ALL, changed_paths, decision, git
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE, HEAD, MERGE = "a" * 40, "b" * 40, "c" * 40
@@ -161,6 +161,29 @@ class DiffTests(unittest.TestCase):
 
 
 class WorkflowHardeningTests(unittest.TestCase):
+    def test_private_fetch_uses_only_temporary_host_scoped_credentials(self):
+        token = 'synthetic-private-fetch-token'
+        with patch.dict(os.environ, {'WOONA_CI_FETCH_TOKEN': token,
+                                     'GIT_CONFIG_COUNT': '1',
+                                     'GIT_CONFIG_KEY_0': 'advice.detachedHead',
+                                     'GIT_CONFIG_VALUE_0': 'false'}, clear=True), \
+                patch('select_checks.subprocess.run') as run:
+            run.return_value.stdout = b'output'
+            self.assertEqual(git('fetch', 'origin', BASE), b'output')
+            call = run.call_args
+            self.assertNotIn(token, repr(call.args))
+            env = call.kwargs['env']
+            self.assertNotIn('WOONA_CI_FETCH_TOKEN', env)
+            self.assertEqual(env['GIT_CONFIG_COUNT'], '2')
+            self.assertEqual(env['GIT_CONFIG_KEY_0'], 'advice.detachedHead')
+            self.assertEqual(env['GIT_CONFIG_KEY_1'], 'http.https://github.com/.extraheader')
+            self.assertTrue(env['GIT_CONFIG_VALUE_1'].startswith('AUTHORIZATION: basic '))
+            git('diff', '--no-ext-diff', BASE, HEAD, '--')
+            env = run.call_args.kwargs['env']
+            self.assertNotIn('WOONA_CI_FETCH_TOKEN', env)
+            self.assertNotIn('GIT_CONFIG_KEY_1', env)
+            self.assertEqual(env['GIT_CONFIG_COUNT'], '1')
+
     def test_publish_workflows_pin_actions_and_do_not_persist_checkout_credentials(self):
         for name in ('mobile.yml', 'testflight.yml'):
             with self.subTest(workflow=name):

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Dependency-aware CI selection. Stdlib only; uncertainty always runs full checks."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -48,8 +49,19 @@ def result(jobs, large, reason):
 
 
 def git(*args):
+    env = dict(os.environ)
+    token = env.pop('WOONA_CI_FETCH_TOKEN', '')
+    if args and args[0] == 'fetch' and token:
+        # One child process only: no credential in argv, URL, Git config or artifacts.
+        count = int(env.get('GIT_CONFIG_COUNT', '0'))
+        if not 0 <= count < 100:
+            raise ValueError('Unsupported temporary Git configuration')
+        encoded = base64.b64encode(('x-access-token:' + token).encode()).decode('ascii')
+        env.update({'GIT_CONFIG_COUNT': str(count + 1),
+                    f'GIT_CONFIG_KEY_{count}': 'http.https://github.com/.extraheader',
+                    f'GIT_CONFIG_VALUE_{count}': 'AUTHORIZATION: basic ' + encoded})
     return subprocess.run(["git", *args], check=True, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, timeout=90).stdout
+                          stderr=subprocess.PIPE, timeout=90, env=env).stdout
 
 
 def changed_paths(event_name, event, run=git):
