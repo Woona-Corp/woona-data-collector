@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from typing import ClassVar
 import unittest
 import zipfile
 
@@ -87,6 +88,9 @@ catch { print("FAILED: \(error.localizedDescription)"); exit(3) }
 
 
 class CompleteArchiveCompatibilityTests(unittest.TestCase):
+    compiled: ClassVar[tempfile.TemporaryDirectory]
+    binary: ClassVar[Path]
+
     @classmethod
     def setUpClass(cls):
         if sys.platform != "darwin" or not shutil.which("swiftc"):

@@ -1,6 +1,7 @@
 """Hermetic policy, Git and ZIP64 gate tests; no SDK, network or third-party modules."""
 import os
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import tempfile
@@ -157,6 +158,21 @@ class DiffTests(unittest.TestCase):
                            check=True, stdout=subprocess.PIPE)
             self.assertEqual(output.read_text(), "android=true\nios=true\nserver=true\nzip64_large=true\n")
             self.assertIn("unavailable/empty diff", summary.read_text())
+
+
+class WorkflowHardeningTests(unittest.TestCase):
+    def test_publish_workflows_pin_actions_and_do_not_persist_checkout_credentials(self):
+        for name in ('mobile.yml', 'testflight.yml'):
+            with self.subTest(workflow=name):
+                content = (ROOT / '.github/workflows' / name).read_text()
+                references = re.findall(r'\buses:\s*([^\s]+)', content)
+                self.assertTrue(references)
+                self.assertTrue(all(re.fullmatch(r'[^@]+@[0-9a-f]{40}', ref) for ref in references))
+                self.assertEqual(content.count('uses: actions/checkout@'),
+                                 content.count('persist-credentials: false'))
+        mobile = (ROOT / '.github/workflows/mobile.yml').read_text()
+        self.assertIn("cache-disabled: ${{ startsWith(github.ref, 'refs/tags/') }}", mobile)
+        self.assertIn("cache-read-only: ${{ github.ref != 'refs/heads/main' }}", mobile)
 
 
 class ZIP64GateTests(unittest.TestCase):

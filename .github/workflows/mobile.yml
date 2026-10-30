@@ -43,7 +43,9 @@ jobs:
       server: ${{ steps.select.outputs.server }}
       zip64_large: ${{ steps.select.outputs.zip64_large }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Test CI selection policy
         run: python3 -m unittest discover -s .github/ci -p 'test_*.py' -v
       - name: Select dependency-aware checks
@@ -58,12 +60,17 @@ jobs:
     env:
       ANDROID_SDK_ROOT: ${{ github.workspace }}/.android-sdk
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: '21'
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          cache-disabled: ${{ startsWith(github.ref, 'refs/tags/') }}
       - name: Install Android SDK
         env:
           ANDROID_INSTRUMENTATION: ${{ inputs.android_instrumentation }}
@@ -91,7 +98,7 @@ jobs:
           fi
       - name: Preserve Android test diagnostics
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: android-test-diagnostics
           path: |
@@ -131,7 +138,7 @@ jobs:
           mkdir -p release-assets
           cp android/app/build/outputs/apk/debug/app-debug.apk release-assets/Woona-Android-debug.apk
           (cd release-assets && sha256sum *.apk > SHA256SUMS-android.txt)
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: android-apk
           path: release-assets/
@@ -143,7 +150,9 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Verify complete data archives with independent ZIP and SQLite readers
         env:
           # Only ordinary, non-storage CI opts out. Full/developer runs default on.
@@ -194,7 +203,7 @@ jobs:
       - name: Verify session export attachments
         if: ${{ success() && inputs.ios_test_filter == '' && (inputs.sanitizer == '' || inputs.sanitizer == 'none') }}
         run: python3 ios/tools/check-recording-export.py "$RUNNER_TEMP/WoonaTestAttachments"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: ios-recording-export-proof
@@ -207,7 +216,7 @@ jobs:
           xcrun xcresulttool export diagnostics --path "$RUNNER_TEMP/WoonaTests.xcresult" --output-path "$RUNNER_TEMP/WoonaFailure" || true
           find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f -name 'Woona*' -exec cp {} "$RUNNER_TEMP/WoonaFailure/" \; || true
           find "$RUNNER_TEMP/WoonaFailure" -type f -name '*.ips' -exec cat {} \;
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: failure()
         with:
           name: ios-failure-diagnostics
@@ -227,7 +236,9 @@ jobs:
       WOONA_STORAGE_ROOT_HOST: ../test-run/ci-storage
       WOONA_BUILD_TARGET: verified
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Validate Compose and disabled backup policy
         run: |
           python3 tools/check_questionnaire_presentation.py
@@ -293,7 +304,7 @@ jobs:
           docker compose -p woona-ci exec -T api python -m pip check
           docker compose -p woona-ci exec -T api python -m unittest discover -v -s server/tests
       - name: Retain candidate provenance metadata
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: server-image-provenance
           path: ${{ runner.temp }}/server-provenance/
@@ -308,7 +319,7 @@ jobs:
           (cd "$RUNNER_TEMP/server-image" && sha256sum server-image.tar > SHA256SUMS)
       - name: Retain private exact-image export (manual only)
         if: github.event_name == 'workflow_dispatch' && inputs.export_server_image == true && (inputs.scope == 'server' || inputs.scope == 'all')
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: server-verified-image
           path: ${{ runner.temp }}/server-image/
@@ -325,7 +336,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: android-apk
           path: release-assets/

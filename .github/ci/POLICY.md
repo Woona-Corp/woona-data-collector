@@ -53,6 +53,16 @@ No cancellation policy was added. TestFlight retains its existing serialized
 never be superseded by an ordinary PR. Scheduling/queued-run behavior is otherwise
 unchanged.
 
+## Fixed action inputs and release cache isolation
+
+The two modified build/distribution workflows pin each existing action version to
+its resolved full GitHub commit (read-only upstream ref inspection, 2026-10-30),
+without a major-version upgrade. Every checkout sets `persist-credentials: false`.
+Gradle cache writes are restricted to main; tag builds disable Gradle caching
+entirely so signed Android releases do not consume a shared build cache. Existing
+release signing, upload gates, artifact scopes and TestFlight serialization are
+unchanged. Hermetic tests guard these invariants alongside job selection.
+
 ## Validation
 
 From the repository root on Linux:
