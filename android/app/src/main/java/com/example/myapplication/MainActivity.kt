@@ -209,7 +209,10 @@ class MainActivity : ComponentActivity() {
             return@registerForActivityResult
         }
         val profileId = requireNotNull(selectedProfileId)
-        val questionnaire = pendingReplayQuestionnaire ?: return@registerForActivityResult
+        // A replay has no camera/video artifact. Force this before manifest creation
+        // so a stale questionnaire draft cannot produce a 422 upload.
+        val questionnaire = (pendingReplayQuestionnaire ?: return@registerForActivityResult)
+            .copy(videoRequested = false)
         val recording = runCatching {
             woonaDatabase.beginRecording(
                 profileId = profileId,
@@ -432,7 +435,8 @@ class MainActivity : ComponentActivity() {
                                 deviceFeatureController.createLogShareIntent(this)
                             }
                         },
-                        showReplayAction = true,
+                        // Debug/QA packet-dump replay must not be exposed to field users.
+                        showReplayAction = BuildConfig.DEBUG,
                         onReplayRequest = {
                             if (deviceFeatureController.uiState.isReplayPreparing) {
                                 deviceFeatureController.cancelReplayPreparation()
@@ -555,6 +559,7 @@ class MainActivity : ComponentActivity() {
                         SessionQuestionnaireDialog(
                             language = selectedLanguage,
                             externalError = sessionPreparationError,
+                            videoAllowed = pendingLiveAddress != null,
                             onDismiss = {
                                 pendingLiveAddress = null
                                 pendingReplayQuestionnaire = null; sessionPreparationError = null

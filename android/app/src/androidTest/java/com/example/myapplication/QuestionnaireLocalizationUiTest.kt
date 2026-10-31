@@ -41,6 +41,16 @@ class QuestionnaireLocalizationUiTest {
         compose.runOnIdle { assertEquals(listOf("Аллюр/движение"),saved?.plannedActivities);assertEquals(listOf("Асфальт"),saved?.surfaces) }
     }
 
+    @Test fun replayQuestionnaireHidesVideoAndForcesItOff() {
+        var saved: SessionQuestionnaire? = null
+        compose.setContent { MaterialTheme { SessionQuestionnaireDialog(AppLanguage.ENGLISH, {}, { saved = it }, videoAllowed = false) } }
+        compose.onNodeWithText("Record video").assertDoesNotExist()
+        compose.onNodeWithText("Session number *").performTextInput("Replay no video")
+        compose.onNodeWithText("Gait/movement").performScrollTo().performClick()
+        compose.onNodeWithText("Validate and save").performClick()
+        compose.runOnIdle { assertEquals(false, saved?.videoRequested); assertEquals(listOf("Аллюр/движение"), saved?.plannedActivities) }
+    }
+
     @Test fun englishHeartSectionsOptionsAndRawTextsRemainDistinct() {
         val original=HeartQuestionnaire(mapOf("knownHeartCondition" to "yes","heartRelevantMedication" to "yes","preRecordingState" to "sleeping","actualActivity" to "rest","referenceMethod" to "bpm_only"),listOf("none"),referenceBpm=90.0,referenceMeasuredAtUtc="2026-10-29T10:00:00Z")
         var saved:HeartQuestionnaire?=null
