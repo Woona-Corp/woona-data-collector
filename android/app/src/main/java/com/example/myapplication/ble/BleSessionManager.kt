@@ -802,8 +802,10 @@ class BleSessionManager(
     override fun stopScanning() {
         scanHandler.removeCallbacks(stopScanRunnable)
         if (!hasScanPermission()) {
+            // Stopping an already-inactive scan is not a capture failure. A fresh
+            // install may not have Nearby-devices permission yet; replay must not
+            // be finalized just because this best-effort cleanup cannot run.
             transition(BleSessionEvent.ScanStopped)
-            listener.onError(appTextResolver.getString(R.string.ble_missing_scan_permission_stop))
             return
         }
 
