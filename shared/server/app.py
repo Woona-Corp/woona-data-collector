@@ -7,12 +7,15 @@ import logging
 import math
 import os
 import re
+import stat
+import sys
 import threading
 import tempfile
 import time
 import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -25,7 +28,7 @@ from jsonschema import Draft202012Validator, ValidationError as SchemaValidation
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -70,6 +73,29 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 artifact_locks: WeakValueDictionary[uuid.UUID, threading.Lock] = WeakValueDictionary()
 artifact_locks_guard = threading.Lock()
 logger = logging.getLogger("woona.api")
+request_id_var: ContextVar[str] = ContextVar("woona_request_id", default="")
+
+
+def configure_logging() -> None:
+    # uvicorn configures its own loggers, not "woona.api"; without this handler
+    # requestId/duration JSON lines are silently dropped by lastResort.
+    if logger.handlers:
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
+configure_logging()
+
+
+def log_event(event: str, *, level: int = logging.INFO, **fields: Any) -> None:
+    payload = {"event": event, **fields}
+    if "requestId" not in payload:
+        payload["requestId"] = request_id_var.get()
+    logger.log(level, json.dumps(payload, separators=(",", ":"), default=str))
 
 
 def utc_isoformat(value: datetime) -> str:
@@ -350,6 +376,28 @@ def canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def normalize_json_numbers(value: Any) -> Any:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: normalize_json_numbers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize_json_numbers(item) for item in value]
+    return value
+
+
+def json_values_equal(left: Any, right: Any) -> bool:
+    return canonical_json(normalize_json_numbers(left)) == canonical_json(
+        normalize_json_numbers(right)
+    )
+
+
+def utc_values_equal(left: datetime | None, right: datetime | None) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return left.astimezone(timezone.utc) == right.astimezone(timezone.utc)
+
+
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -477,21 +525,21 @@ async def request_id_middleware(request: Request, call_next):
     supplied_id = request.headers.get("X-Request-ID", "")
     request_id = supplied_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied_id) else str(uuid.uuid4())
     request.state.request_id = request_id
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
-    logger.info(
-        json.dumps(
-            {
-                "requestId": request_id,
-                "method": request.method,
-                "path": request.url.path,
-                "status": response.status_code,
-                "durationMs": round((time.monotonic() - started) * 1000, 2),
-            },
-            separators=(",", ":"),
+    token = request_id_var.set(request_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        log_event(
+            "request",
+            requestId=request_id,
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+            durationMs=round((time.monotonic() - started) * 1000, 2),
         )
-    )
-    return response
+        return response
+    finally:
+        request_id_var.reset(token)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -506,6 +554,15 @@ async def http_error(request: Request, exception: StarletteHTTPException) -> JSO
     if isinstance(exception.detail, str) and exception.detail:
         content['detail'] = exception.detail
     content.update({key: value for key, value in detail.items() if key != "code"})
+    log_event(
+        "request_rejected",
+        level=logging.WARNING if exception.status_code >= 400 else logging.INFO,
+        requestId=content["requestId"],
+        method=request.scope.get("method", ""),
+        path=request.scope.get("path", ""),
+        status=exception.status_code,
+        code=code,
+    )
     return JSONResponse(
         status_code=exception.status_code,
         content=content,
@@ -541,6 +598,29 @@ async def constraint_error(request: Request, exception: IntegrityError) -> JSONR
     }
     if getattr(original, "sqlstate", None) == "23505" and constraint in codes:
         return await http_error(request, HTTPException(409, detail={"code": codes[constraint]}))
+    return await unexpected_error(request, exception)
+
+
+@app.exception_handler(OperationalError)
+async def operational_error(request: Request, exception: OperationalError) -> JSONResponse:
+    sqlstate = getattr(exception.orig, "sqlstate", None)
+    message = str(exception.orig).lower()
+    if sqlstate == "40P01" or "deadlock detected" in message:
+        log_event(
+            "database_deadlock_retry",
+            level=logging.WARNING,
+            requestId=getattr(request.state, "request_id", ""),
+            method=request.scope.get("method", ""),
+            path=request.scope.get("path", ""),
+        )
+        return await http_error(
+            request,
+            HTTPException(
+                503,
+                detail={"code": "concurrent_transaction"},
+                headers={"Retry-After": "1"},
+            ),
+        )
     return await unexpected_error(request, exception)
 
 
@@ -838,11 +918,24 @@ def put_profile(
 ) -> dict[str, Any]:
     if dog_id != payload.dog.id or profile_id != payload.profile_version.id:
         raise HTTPException(422, detail={"code": "path_payload_id_mismatch"})
+    log_event(
+        "profile_put_start",
+        dogId=str(dog_id),
+        profileId=str(profile_id),
+        schemaVersion=payload.profile_version.schema_version,
+        validationState=payload.profile_version.validation_state,
+    )
     with engine.begin() as connection:
         revision = apply_profile(
             connection, payload.dog, payload.profile_version, device_id, account
         )
         accepted = connection.execute(text("SELECT id,schema_version,validation_state,questionnaire,content_sha256,client_created_at FROM dog_profile_versions WHERE id=:id"), {"id": profile_id}).mappings().one()
+    log_event(
+        "profile_put_committed",
+        dogId=str(dog_id),
+        profileId=str(profile_id),
+        dogRevision=revision,
+    )
     return {
         "dogId": str(dog_id),
         "dogRevision": revision,
@@ -872,6 +965,78 @@ def required_artifact_types(recording: RecordingPayload) -> set[str]:
 
 
 REFERENCE_TYPES = {"ecg", "heart_rate", "rr"}
+
+
+def assert_manifest_matches_existing(
+    recording_id: uuid.UUID,
+    existing: Mapping[str, Any],
+    sync_row: Mapping[str, Any] | None,
+    manifest: RecordingManifest,
+) -> None:
+    recording = manifest.recording
+    checks: list[tuple[str, Any, Any]] = [
+        ("source", existing["source"], recording.source),
+        ("capture_status", existing["capture_status"], recording.capture_status),
+        ("timezone", existing["timezone"], recording.timezone),
+        ("questionnaire_schema_version", existing["questionnaire_schema_version"], recording.questionnaire_schema_version),
+        ("questionnaire_validation_state", existing["questionnaire_validation_state"], recording.questionnaire_validation_state),
+        ("video_requested", existing["video_requested"], recording.video_requested),
+        ("sensor_hardware_id", existing["sensor_hardware_id"], recording.sensor_hardware_id),
+        ("app_version", existing["app_version"], recording.app_version),
+        ("protocol_version", existing["protocol_version"], recording.protocol_version),
+        ("capture_error_code", existing["capture_error_code"], recording.capture_error_code),
+        ("capture_error_message", existing["capture_error_message"], recording.capture_error_message),
+    ]
+    conflicts = [name for name, current, incoming in checks if not json_values_equal(current, incoming)]
+    if existing["dog_profile_version_id"] != manifest.dog_profile_version.id:
+        conflicts.append("dog_profile_version_id")
+    if not utc_values_equal(existing["started_at"], recording.started_at_utc):
+        conflicts.append("started_at_utc")
+    if not utc_values_equal(existing["ended_at"], recording.ended_at_utc):
+        conflicts.append("ended_at_utc")
+    if sync_row is None:
+        conflicts.append("sync")
+    else:
+        for key, incoming in manifest.sync.model_dump().items():
+            if key not in sync_row:
+                continue
+            current = sync_row[key]
+            if isinstance(incoming, datetime) or isinstance(current, datetime):
+                same = utc_values_equal(current, incoming)
+            else:
+                same = json_values_equal(current, incoming)
+            if not same:
+                conflicts.append(f"sync.{key}")
+    mutable_differences = []
+    if existing["session_label"] != recording.session_label:
+        mutable_differences.append("session_label")
+    if not json_values_equal(existing["session_questionnaire"], recording.session_questionnaire):
+        mutable_differences.append("session_questionnaire")
+    if mutable_differences:
+        # The manifest owns capture metadata; the questionnaire/revision endpoint
+        # owns edits. An old manifest replay must not undo an accepted edit, but
+        # the ignored difference is logged explicitly instead of being silent.
+        log_event(
+            "manifest_questionnaire_ignored",
+            level=logging.WARNING,
+            recordingId=str(recording_id),
+            fields=mutable_differences,
+            questionnaireRevision=existing.get("questionnaire_revision"),
+        )
+    if conflicts:
+        log_event(
+            "manifest_replay_conflict",
+            level=logging.WARNING,
+            recordingId=str(recording_id),
+            fields=sorted(set(conflicts)),
+        )
+        raise HTTPException(
+            409,
+            detail={
+                "code": "immutable_recording_conflict",
+                "fields": sorted(set(conflicts)),
+            },
+        )
 
 
 def validate_artifact(artifact: ArtifactPayload) -> None:
@@ -984,8 +1149,18 @@ def put_recording(
     for artifact in manifest.artifacts:
         validate_artifact(artifact)
 
+    log_event(
+        "manifest_received",
+        recordingId=str(recording_id),
+        artifactCount=len(manifest.artifacts),
+        captureStatus=manifest.recording.capture_status,
+        videoRequested=manifest.recording.video_requested,
+    )
     with engine.begin() as connection:
         identity_lock(connection, "recording", recording_id)
+        # Same dog lock order as put_profile: dog advisory before the dog row.
+        # The reverse order here deadlocks with a concurrent profile PUT.
+        identity_lock(connection, "dog", manifest.dog.id)
         # Preserve account-scoped 404s before reporting a manifest collision.
         assert_dog_account(connection, manifest.dog.id, account)
         # All paths creating an artifact take the same global UUID locks. Sort
@@ -1000,17 +1175,32 @@ def put_recording(
         existing = connection.execute(
             text(
                 """
-                SELECT dog_id,capture_device_id
+                SELECT dog_id,capture_device_id,dog_profile_version_id,source,
+                       capture_status,started_at,ended_at,timezone,session_label,
+                       questionnaire_schema_version,questionnaire_validation_state,
+                       session_questionnaire,video_requested,sensor_hardware_id,
+                       app_version,protocol_version,capture_error_code,
+                       capture_error_message,ingest_status,questionnaire_revision
                 FROM recordings WHERE id=:id FOR UPDATE
                 """
             ),
             {"id": recording_id},
         ).mappings().first()
         if existing is not None:
+            log_event(
+                "manifest_replay",
+                recordingId=str(recording_id),
+                ingestStatus=existing["ingest_status"],
+            )
             if existing["capture_device_id"] != device_id:
                 raise HTTPException(403, detail={"code": "recording_not_owned"})
             if existing["dog_id"] != manifest.dog.id:
                 raise HTTPException(409, detail={"code": "immutable_recording_conflict"})
+            sync_row = connection.execute(
+                text("SELECT * FROM recording_sync WHERE recording_id=:id FOR UPDATE"),
+                {"id": recording_id},
+            ).mappings().first()
+            assert_manifest_matches_existing(recording_id, existing, sync_row, manifest)
         revision = apply_profile(
             connection,
             manifest.dog,
@@ -1111,9 +1301,15 @@ def put_recording(
             ),
             {"recording": recording_id},
         ).mappings().all()
+    log_event(
+        "manifest_committed",
+        recordingId=str(recording_id),
+        ingestStatus=existing["ingest_status"] if existing is not None else "uploading",
+        artifactCount=len(result_rows),
+    )
     return {
         "recordingId": str(recording_id),
-        "ingestStatus": "uploading",
+        "ingestStatus": existing["ingest_status"] if existing is not None else "uploading",
         "dogRevision": revision,
         "artifacts": [
             {
@@ -1187,6 +1383,59 @@ def incoming_path(artifact_id: uuid.UUID) -> Path:
     return STORAGE_ROOT / "incoming" / f"{artifact_id}.part"
 
 
+def require_stored_file(row: Mapping[str, Any]) -> None:
+    relative = row.get("server_relative_path")
+    artifact_id = str(row.get("id", ""))
+    if not relative:
+        log_event("stored_file_missing", level=logging.ERROR, artifactId=artifact_id)
+        raise HTTPException(
+            409,
+            detail={"code": "stored_file_missing", "artifactId": artifact_id},
+        )
+    path = (STORAGE_ROOT / relative).resolve()
+    if STORAGE_ROOT not in path.parents or path.is_symlink():
+        log_event("stored_file_outside_root", level=logging.ERROR, artifactId=artifact_id)
+        raise HTTPException(
+            409,
+            detail={"code": "stored_file_missing", "artifactId": artifact_id},
+        )
+    try:
+        info = path.stat()
+    except FileNotFoundError as error:
+        log_event("stored_file_missing", level=logging.ERROR, artifactId=artifact_id)
+        raise HTTPException(
+            409,
+            detail={"code": "stored_file_missing", "artifactId": artifact_id},
+        ) from error
+    except OSError as error:
+        log_event("stored_file_unreadable", level=logging.ERROR, artifactId=artifact_id)
+        raise HTTPException(503, detail={"code": "storage_unavailable"}) from error
+    if not stat.S_ISREG(info.st_mode):
+        log_event("stored_file_not_regular", level=logging.ERROR, artifactId=artifact_id)
+        raise HTTPException(
+            409,
+            detail={"code": "stored_file_missing", "artifactId": artifact_id},
+        )
+    expected = int(row["expected_size_bytes"])
+    if info.st_size != expected:
+        log_event(
+            "stored_file_size_mismatch",
+            level=logging.ERROR,
+            artifactId=artifact_id,
+            expectedBytes=expected,
+            actualBytes=info.st_size,
+        )
+        raise HTTPException(
+            409,
+            detail={
+                "code": "stored_file_size_mismatch",
+                "artifactId": artifact_id,
+                "expectedBytes": expected,
+                "actualBytes": info.st_size,
+            },
+        )
+
+
 @app.head("/v1/artifacts/{artifact_id}/content")
 def head_artifact(
     artifact_id: uuid.UUID,
@@ -1195,12 +1444,21 @@ def head_artifact(
     with engine.connect() as connection:
         row = artifact_row(connection, artifact_id)
     row = assert_owner(row, device_id)
+    if row["storage_status"] == "available":
+        require_stored_file(row)
     offset = row["stored_size_bytes"]
     if row["storage_status"] != "available":
         try:
             offset = min(offset, incoming_path(artifact_id).stat().st_size)
         except FileNotFoundError:
             offset = 0
+    log_event(
+        "artifact_head",
+        level=logging.DEBUG,
+        artifactId=str(artifact_id),
+        storageStatus=row["storage_status"],
+        offset=offset,
+    )
     return Response(
         headers={
             "Upload-Offset": str(offset),
@@ -1232,11 +1490,31 @@ async def patch_artifact(
         raise HTTPException(400, detail={"code": "content_length_mismatch"})
     # Keep the lock, transaction, reconciliation, fsync and commit on ONE worker.
     # No acknowledgement may escape before that entire durable section finishes.
-    return await run_in_threadpool(persist_artifact_chunk, artifact_id, device_id, upload_offset, body)
+    request_id = getattr(request.state, "request_id", "")
+    log_event(
+        "chunk_received",
+        level=logging.DEBUG,
+        requestId=request_id,
+        artifactId=str(artifact_id),
+        uploadOffset=upload_offset,
+        bytes=length,
+    )
+    return await run_in_threadpool(
+        persist_artifact_chunk,
+        artifact_id,
+        device_id,
+        upload_offset,
+        body,
+        request_id,
+    )
 
 
 def persist_artifact_chunk(
-    artifact_id: uuid.UUID, device_id: uuid.UUID, upload_offset: int, body: bytearray,
+    artifact_id: uuid.UUID,
+    device_id: uuid.UUID,
+    upload_offset: int,
+    body: bytearray,
+    request_id: str = "",
 ) -> Response:
     length = len(body)
     with artifact_lock(artifact_id):
@@ -1292,6 +1570,14 @@ def persist_artifact_chunk(
                 ),
                 {"offset": next_offset, "id": artifact_id},
             )
+    log_event(
+        "chunk_committed",
+        level=logging.DEBUG,
+        requestId=request_id,
+        artifactId=str(artifact_id),
+        uploadOffset=next_offset,
+        bytes=length,
+    )
     return Response(status_code=204, headers={"Upload-Offset": str(next_offset)})
 
 
@@ -1312,10 +1598,13 @@ def complete_artifact(
     device_id: Annotated[uuid.UUID, Depends(authenticated_device)],
 ) -> dict[str, Any]:
     hash_mismatch = False
+    log_event("artifact_complete_start", artifactId=str(artifact_id))
     with artifact_lock(artifact_id):
         with engine.begin() as connection:
             row = assert_owner(artifact_row(connection, artifact_id, for_update=True), device_id)
             if row["storage_status"] == "available":
+                require_stored_file(row)
+                log_event("artifact_complete_idempotent", artifactId=str(artifact_id))
                 return {
                     "artifactId": str(artifact_id),
                     "sha256": row["sha256"],
@@ -1345,6 +1634,12 @@ def complete_artifact(
                 not candidate.is_file()
                 or candidate.stat().st_size != row["expected_size_bytes"]
             ):
+                log_event(
+                    "artifact_part_missing",
+                    level=logging.ERROR,
+                    artifactId=str(artifact_id),
+                    expectedBytes=row["expected_size_bytes"],
+                )
                 raise HTTPException(409, detail={"code": "part_file_missing"})
             digest = hashlib.sha256()
             with candidate.open("rb") as source:
@@ -1368,6 +1663,11 @@ def complete_artifact(
                     {"id": artifact_id},
                 )
                 hash_mismatch = True
+                log_event(
+                    "artifact_hash_mismatch",
+                    level=logging.ERROR,
+                    artifactId=str(artifact_id),
+                )
             else:
                 if candidate == part:
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1391,6 +1691,11 @@ def complete_artifact(
                 )
         if hash_mismatch:
             raise HTTPException(422, detail={"code": "artifact_hash_mismatch"})
+    log_event(
+        "artifact_completed",
+        artifactId=str(artifact_id),
+        bytes=row["expected_size_bytes"],
+    )
     return {
         "artifactId": str(artifact_id),
         "sha256": row["sha256"],
@@ -1404,6 +1709,7 @@ def complete_recording(
     recording_id: uuid.UUID,
     device_id: Annotated[uuid.UUID, Depends(authenticated_device)],
 ) -> dict[str, Any]:
+    log_event("recording_complete_start", recordingId=str(recording_id))
     with engine.begin() as connection:
         ensure_not_retired(connection, "recording", recording_id)
         recording = connection.execute(
@@ -1422,7 +1728,7 @@ def complete_recording(
         artifacts = connection.execute(
             text(
                 """
-                SELECT id,artifact_type,expected_size_bytes,sha256,storage_status
+                SELECT id,artifact_type,expected_size_bytes,sha256,storage_status,server_relative_path
                 FROM artifacts WHERE recording_id=:id AND artifact_type NOT IN ('ecg','heart_rate','rr') ORDER BY id
                 """
             ),
@@ -1432,10 +1738,19 @@ def complete_recording(
             str(row["id"]) for row in artifacts if row["storage_status"] != "available"
         ]
         if unavailable:
+            log_event(
+                "recording_complete_blocked",
+                level=logging.WARNING,
+                recordingId=str(recording_id),
+                code="artifacts_incomplete",
+                artifactCount=len(unavailable),
+            )
             raise HTTPException(
                 409,
                 detail={"code": "artifacts_incomplete", "artifacts": unavailable},
             )
+        for row in artifacts:
+            require_stored_file(row)
         receipt_data = [
             {
                 "id": str(row["id"]),
@@ -1465,6 +1780,13 @@ def complete_recording(
             text("SELECT server_verified_at FROM recordings WHERE id=:id"),
             {"id": recording_id},
         ).scalar_one()
+    log_event(
+        "recording_completed",
+        recordingId=str(recording_id),
+        artifactCount=len(artifacts),
+        totalBytes=sum(row["expected_size_bytes"] for row in artifacts),
+        receiptSha256=receipt,
+    )
     return {
         "recordingId": str(recording_id),
         "ingestStatus": "complete",
@@ -1743,7 +2065,7 @@ def get_recording(
             text(
                 """
                 SELECT id,artifact_type,file_name,mime_type,expected_size_bytes,
-                       sha256,storage_status,reference_metadata
+                       sha256,storage_status,server_relative_path,reference_metadata
                 FROM artifacts WHERE recording_id=:id
                   AND """ + active_entity_sql("artifact", "artifacts.id") + """
                 ORDER BY id
@@ -1755,6 +2077,9 @@ def get_recording(
         raise HTTPException(404, detail={"code": "recording_not_found"})
     if sync is None:
         raise HTTPException(503, detail={"code": "recording_metadata_incomplete"})
+    for row in artifacts:
+        if row["storage_status"] == "available":
+            require_stored_file(row)
     return {
         "id": str(recording["id"]),
         "dogId": str(recording["dog_id"]),
@@ -1847,6 +2172,7 @@ def get_recording_status(
     recording_id: uuid.UUID,
     device_id: Annotated[uuid.UUID, Depends(authenticated_device)],
 ) -> dict[str, Any]:
+    log_event("sync_status_requested", level=logging.DEBUG, recordingId=str(recording_id))
     with engine.connect() as connection:
         ensure_not_retired(connection, "recording", recording_id)
         row = connection.execute(
@@ -1867,9 +2193,9 @@ def get_recording_status(
         artifacts = connection.execute(text("""
             SELECT id,artifact_type,file_name,expected_size_bytes,stored_size_bytes,
                    sha256,storage_status,server_relative_path,verified_at,
-                   upload_updated_at,error_code,error_message
+                   upload_updated_at,error_code,error_message,
+                   (""" + active_entity_sql("artifact", "artifacts.id") + """) AS is_active
             FROM artifacts WHERE recording_id=:id
-              AND """ + active_entity_sql("artifact", "artifacts.id") + """
             ORDER BY id
         """), {"id": recording_id}).mappings().all()
     if row is None:
