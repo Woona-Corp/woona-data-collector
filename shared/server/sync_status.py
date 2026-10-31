@@ -110,7 +110,11 @@ def artifact_status(row, storage_root: Path) -> dict:
 def recording_status(recording, artifact_rows, storage_root: Path, *, now=None) -> dict:
     storage_root = storage_root.resolve()
     now = now or datetime.now(timezone.utc)
-    artifacts = [artifact_status(row, storage_root) for row in artifact_rows]
+    # Retired artifacts remain part of the frozen capture receipt, but are not
+    # displayed or required for progress. Keeping both views on the same rows
+    # prevents an administrative retirement from looking like disk corruption.
+    visible_rows = [row for row in artifact_rows if row.get('is_active', True)]
+    artifacts = [artifact_status(row, storage_root) for row in visible_rows]
     capture_files = [item for item in artifacts if item['partOfCaptureReceipt']]
     total_bytes = sum(item['sizeBytes'] for item in capture_files)
     uploaded = sum(item['uploadedBytes'] for item in capture_files)
@@ -144,7 +148,7 @@ def recording_status(recording, artifact_rows, storage_root: Path, *, now=None) 
         state, retryable, action = 'metadata_pending', True, 'upload_manifest'
     else:
         state, retryable, action = 'uploading', True, 'resume_upload'
-    progress_times = [row.get('upload_updated_at') for row in artifact_rows if row['artifact_type'] not in REFERENCE_TYPES]
+    progress_times = [row.get('upload_updated_at') for row in visible_rows if row['artifact_type'] not in REFERENCE_TYPES]
     progress_times = [value for value in progress_times if value is not None]
     last_progress = max(progress_times) if progress_times else recording.get('server_updated_at')
     age = max(0, int((now - last_progress).total_seconds())) if last_progress else None
