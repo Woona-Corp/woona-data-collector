@@ -30,14 +30,15 @@ struct CompleteDataArchive: Sendable {
     func create(in destination: URL, checkCancelled: () throws -> Void = { try Task.checkCancellation() }, onProgress: (Progress) -> Void = { _ in }) throws -> URL {
         let manager = FileManager.default
         let parent = destination.deletingLastPathComponent()
+        let partial = destination.appendingPathExtension("part")
         let roots = [Root(prefix: "data/Woona", directory: dataDirectory)] + additionalRoots
         for root in roots {
-            let path = root.directory.resolvingSymlinksInPath().standardizedFileURL.path + "/"
-            guard !destination.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(path) else { throw completeArchiveError("Archive must be outside the data being exported") }
+            guard !Self.includes(destination, in: root), !Self.includes(partial, in: root) else {
+                throw completeArchiveError("Archive must be outside the data being exported")
+            }
         }
         guard !manager.fileExists(atPath: destination.path) else { throw completeArchiveError("Archive destination already exists") }
         try manager.createDirectory(at: parent, withIntermediateDirectories: true)
-        let partial = destination.appendingPathExtension("part")
         let snapshot = parent.appendingPathComponent("snapshot-\(UUID().uuidString).sqlite")
         guard !manager.fileExists(atPath: partial.path) else { throw completeArchiveError("Partial archive destination already exists") }
         defer { try? manager.removeItem(at: snapshot) }
@@ -104,6 +105,22 @@ struct CompleteDataArchive: Sendable {
             try? manager.removeItem(at: partial)
             throw error
         }
+    }
+
+    // Match inventory's filtering of each path component, including directories.
+    private static func includes(_ url: URL, in root: Root) -> Bool {
+        let base = root.directory.resolvingSymlinksInPath().standardizedFileURL.path
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        if path == base { return true }
+        guard path.hasPrefix(base + "/") else { return false }
+        guard root.legacyOnly else { return true }
+        let relative = String(path.dropFirst(base.count + 1))
+        var prefix = ""
+        for component in relative.split(separator: "/") {
+            prefix = prefix.isEmpty ? String(component) : prefix + "/" + component
+            if !legacyData(prefix) { return false }
+        }
+        return true
     }
 
     private func inventory(_ roots: [Root]) throws -> [Source] {

@@ -78,6 +78,29 @@ final class CompleteDataArchiveTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
     }
 
+    func testArchiveCanUseExcludedTemporarySubtreeButNotIncludedOutput() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = try fixture(base)
+        let temporary = base.appendingPathComponent("temporary", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        try Data("cached recording".utf8).write(to: temporary.appendingPathComponent("ble_dump.bin"))
+        let exporter = CompleteDataArchive(dataDirectory: root, additionalRoots: [
+            .init(prefix: "data/recovered-temporary", directory: temporary, legacyOnly: true)
+        ])
+        let destination = temporary.appendingPathComponent("WoonaAllData-fixture/out.zip")
+        _ = try exporter.create(in: destination)
+        let entries = try storedEntries(Data(contentsOf: destination))
+        XCTAssertEqual(entries["data/recovered-temporary/ble_dump.bin"], Data("cached recording".utf8))
+        XCTAssertNotNil(entries["data/Woona/woona.sqlite"])
+        XCTAssertNotNil(entries["manifest.json"])
+        XCTAssertEqual(entries.count, 3)
+        XCTAssertThrowsError(try exporter.create(in: root.appendingPathComponent("out.zip")))
+        // The ZIP is excluded by legacyOnly, but its .part file would be included.
+        XCTAssertThrowsError(try exporter.create(in: temporary.appendingPathComponent("ble_out.zip")))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporary.appendingPathComponent("ble_out.zip.part").path))
+    }
+
     func testInsufficientSpacePreservesOriginalAndDoesNotPublishArchive() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: base) }

@@ -105,6 +105,30 @@ class CompleteArchiveExporterTest {
         assertThrows(IllegalArgumentException::class.java) { CompleteArchiveExporter().export(emptyList(), snapshot, output, "{}") }
         assertEquals("existing", output.readText())
     }
+    @Test fun excludedCacheSubtreeCanHoldArchiveWithoutIncludingItself() = fixture { base, root, snapshot ->
+        val cache = File(base, "cache").apply { mkdirs() }
+        File(cache, "ble_old.bin").writeText("cached recording")
+        val destination = File(cache, "woona_complete_exports/run/out.zip")
+        val roots = listOf(
+            CompleteArchiveExporter.Root("data/Woona", root),
+            CompleteArchiveExporter.Root("data/recovered-cache", cache, CompleteArchiveExporter::isLegacyData),
+        )
+        val output = CompleteArchiveExporter().export(roots, snapshot, destination, "{}")
+        ZipFile(output).use { zip ->
+            assertEquals("cached recording", zip.getInputStream(zip.getEntry("data/recovered-cache/ble_old.bin")).reader().readText())
+            assertNotNull(zip.getEntry("data/Woona/woona.sqlite"))
+            assertNotNull(zip.getEntry("manifest.json"))
+            assertEquals(3, zip.size())
+        }
+    }
+    @Test fun includedOutputOrPartialInsideRootRemainsForbidden() = fixture { base, root, snapshot ->
+        val filteredRoot = CompleteArchiveExporter.Root("data/Woona", root) { !it.endsWith(".zip") }
+        assertThrows(IllegalArgumentException::class.java) {
+            CompleteArchiveExporter().export(listOf(filteredRoot), snapshot, File(root, "out.zip"), "{}")
+        }
+        assertFalse(File(root, "out.zip.part").exists())
+        assertFalse(File(root, "out.zip").exists())
+    }
     @Test fun largeFileUsesBoundedReadsAndValidZip() = fixture { base, root, snapshot ->
         val video = File(root, "video.mp4")
         video.outputStream().use { out -> repeat(128) { out.write(ByteArray(65_536) { n -> (n % 251).toByte() }) } }

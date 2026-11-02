@@ -1,5 +1,7 @@
 package com.example.myapplication.data
 
+import android.content.Context
+import android.content.ContextWrapper
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -8,9 +10,36 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.json.JSONObject
+import java.util.zip.ZipFile
 
 @RunWith(AndroidJUnit4::class)
 class CompleteDataArchiveTest {
+    @Test fun completeArchiveUsesExcludedCacheDirectoryAndIncludesLocalData() {
+        val base = ApplicationProvider.getApplicationContext<Context>()
+        val sandbox = File(base.cacheDir, "archive-full-${System.nanoTime()}").apply { mkdirs() }
+        val files = File(sandbox, "files").apply { mkdirs() }
+        val cache = File(sandbox, "cache").apply { mkdirs() }
+        val context = object : ContextWrapper(base) {
+            override fun getFilesDir(): File = files
+            override fun getCacheDir(): File = cache
+            override fun getApplicationContext(): Context = this
+        }
+        try {
+            WoonaDatabase(context).use { }
+            File(files, "Woona/recordings/orphan.bin").apply { parentFile!!.mkdirs(); writeText("original") }
+            File(cache, "ble_dump.bin").writeText("cached data")
+            val archive = createCompleteDataArchive(context)
+            assertTrue(archive.isFile)
+            ZipFile(archive).use { zip ->
+                assertNotNull(zip.getEntry("data/Woona/woona.sqlite"))
+                assertEquals("original", zip.getInputStream(zip.getEntry("data/Woona/recordings/orphan.bin")).reader().readText())
+                assertEquals("cached data", zip.getInputStream(zip.getEntry("data/recovered-cache/ble_dump.bin")).reader().readText())
+                assertNotNull(zip.getEntry("manifest.json"))
+            }
+            assertEquals("original", File(files, "Woona/recordings/orphan.bin").readText())
+        } finally { sandbox.deleteRecursively() }
+    }
+
     @Test fun unfinalizedHistoryAndUnavailableFilesRemainExplicitInRecoveryArchive() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val root = File(context.cacheDir, "archive-recovery-${System.nanoTime()}").apply { mkdirs() }
