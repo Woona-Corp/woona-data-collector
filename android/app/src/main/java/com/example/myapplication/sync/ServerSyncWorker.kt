@@ -164,8 +164,10 @@ class RecordingSyncWorker(
             if (accepted?.receiptSha256 != null) {
                 val restored = database.restoreServerMetadata(listOf(client.fetchDog(accepted.dogId)),listOf(accepted))
                 if (restored.recordingConflicts > 0) {
+                    // Store a language-neutral fallback: the UI localizes by code
+                    // for the current shell language.
                     database.markRecordingSyncError(recordingId, false, "metadata_conflict",
-                        "Файлы или метаданные записи отличаются от серверной версии. Локальные файлы сохранены.")
+                        "Local files or metadata differ from the server version. Local files are preserved.")
                     return Result.failure()
                 }
                 database.markRecordingSynced(recordingId,accepted.receiptSha256,requireNotNull(accepted.verifiedAtUtc))
@@ -174,7 +176,7 @@ class RecordingSyncWorker(
             }
             require(dogQuestionnaireFromJson(record.profile.questionnaireJson).validate().isValid &&
                 sessionQuestionnaireFromJson(record.sessionQuestionnaireJson).validate().isValid) {
-                "Анкета не прошла локальную проверку"
+                "Questionnaire failed local validation"
             }
             val profileReceipt = client.uploadProfile(record.profile)
             profileReceipt.profileVersion?.let { database.acceptServerProfile(record.dogId, it) }
@@ -270,7 +272,7 @@ object ServerSyncScheduler {
     /** Credentials are durably disabled before cancellation; neither queue nor files are cleared. */
     fun disconnect(context: Context) {
         synchronized(com.example.myapplication.data.completeArchiveLifecycleLock) {
-            check(!com.example.myapplication.data.isCompleteArchiveExporting) { "Дождитесь завершения экспорта / Wait for archive export to finish" }
+            check(!com.example.myapplication.data.isCompleteArchiveExporting) { "Wait for the archive export to finish" }
             ServerSettingsStore(context).clearToken()
             ServerTransferRegistry.cancelAll()
         }

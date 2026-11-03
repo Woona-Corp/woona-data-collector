@@ -53,6 +53,8 @@ interface PacketReplayController : AutoCloseable {
     }
 
     fun stop()
+    /** A stopped replay may still have a worker or dispatched lifecycle callback in flight. */
+    fun hasPendingWork(): Boolean = false
 }
 
 class DebugPacketReplayController(
@@ -87,6 +89,12 @@ class DebugPacketReplayController(
     private val workerLock = Any()
 
     private var activeRun: ReplayRun? = null
+    private val workerThreads = mutableSetOf<Thread>()
+    private var pendingLifecycleCallbacks = 0
+
+    override fun hasPendingWork(): Boolean = synchronized(workerLock) {
+        workerThreads.isNotEmpty() || pendingLifecycleCallbacks != 0
+    }
 
     override fun startReplay(source: ReplayInputSource) {
         val predecessorThreads = stopActiveRun()
@@ -123,6 +131,9 @@ class DebugPacketReplayController(
                         if (activeRun === run) {
                             activeRun = null
                         }
+                        // Dispatched lifecycle callbacks have their own barrier;
+                        // this worker can make no further submissions or posts.
+                        workerThreads.remove(Thread.currentThread())
                     }
                 }
             },
@@ -132,10 +143,12 @@ class DebugPacketReplayController(
 
         synchronized(workerLock) {
             activeRun = run
+            workerThreads.add(thread)
         }
         try {
             thread.start()
         } catch (exception: Exception) {
+            synchronized(workerLock) { workerThreads.remove(thread) }
             if (claimTerminalCallback(run)) {
                 onError(appTextResolver.getString(R.string.replay_failed), exception)
             }
@@ -269,18 +282,32 @@ class DebugPacketReplayController(
         ensureNotStopped(run)
         val callbackFinished = CountDownLatch(1)
         val callbackFailure = AtomicReference<Exception?>()
-        val dispatched = callbackDispatcher {
-            try {
-                if (isCurrentRun(run) && !run.isStopRequested()) {
-                    callback()
-                }
-            } catch (exception: Exception) {
-                callbackFailure.set(exception)
-            } finally {
-                callbackFinished.countDown()
+        val callbackRetired = AtomicBoolean(false)
+        synchronized(workerLock) { pendingLifecycleCallbacks++ }
+        fun retireCallback() {
+            if (callbackRetired.compareAndSet(false, true)) {
+                synchronized(workerLock) { pendingLifecycleCallbacks-- }
             }
         }
+        val dispatched = try {
+            callbackDispatcher {
+                try {
+                    if (isCurrentRun(run) && !run.isStopRequested()) {
+                        callback()
+                    }
+                } catch (exception: Exception) {
+                    callbackFailure.set(exception)
+                } finally {
+                    callbackFinished.countDown()
+                    retireCallback()
+                }
+            }
+        } catch (exception: Exception) {
+            retireCallback()
+            throw exception
+        }
         if (!dispatched) {
+            retireCallback()
             throw IllegalStateException("Replay lifecycle callback could not be dispatched")
         }
 

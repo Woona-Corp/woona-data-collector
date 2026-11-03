@@ -77,6 +77,7 @@ private val serverReasons = mapOf(
     "revision_conflict" to ("Анкета изменилась на сервере. Восстановите актуальную версию перед редактированием" to "The questionnaire changed on the server. Restore its current version before editing"),
     "immutable_artifact_conflict" to ("Локальные данные не совпадают с уже сохранённой серверной версией" to "Local data conflicts with the version already saved on the server"),
     "immutable_capture_field" to ("Локальные данные не совпадают с уже сохранённой серверной версией" to "Local data conflicts with the version already saved on the server"),
+    "metadata_conflict" to ("Файлы или метаданные записи отличаются от серверной версии. Локальные файлы сохранены." to "The recording files or metadata differ from the server version. Local files are preserved."),
     "immutable_profile_conflict" to ("Локальные данные не совпадают с уже сохранённой серверной версией" to "Local data conflicts with the version already saved on the server"),
     "immutable_recording_conflict" to ("Локальные данные не совпадают с уже сохранённой серверной версией" to "Local data conflicts with the version already saved on the server"),
     "receipt_conflict" to ("Локальные данные не совпадают с уже сохранённой серверной версией" to "Local data conflicts with the version already saved on the server"),

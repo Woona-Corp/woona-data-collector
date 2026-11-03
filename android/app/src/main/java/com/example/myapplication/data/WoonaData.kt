@@ -1641,7 +1641,7 @@ class WoonaDatabase(
         ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
 
     private fun artifactFilesIn(directory: File): List<Pair<ArtifactType, File>> {
-        return listOf(
+        val known = listOf(
             ArtifactType.PACKET to File(directory, "packets.bin"),
             ArtifactType.PACKET_TIMELINE to File(directory, "packet_timeline.bin"),
             ArtifactType.RAW to File(directory, "raw_fragments.binlog"),
@@ -1653,6 +1653,19 @@ class WoonaDatabase(
             ArtifactType.VIDEO to File(directory, "video.mp4"),
             ArtifactType.SYNC to File(directory, "sync.json"),
         ).filter { (_, file) -> file.exists() }
+        // Recovery files are additional original bytes, not replacements for raw
+        // or packet artifacts. Discover them after process interruption as well.
+        val entries = if (directory.exists()) {
+            directory.listFiles() ?: throw java.io.IOException("Cannot list recording directory for recovery artifacts")
+        } else emptyArray()
+        val recovery = entries.filter { it.name.matches(Regex("packet-recovery-[0-9a-fA-F-]{36}\\.bin")) }
+            .sortedBy { it.name }.map { file ->
+                require(file.isFile && !Files.isSymbolicLink(file.toPath()) && file.canonicalFile.parentFile == directory.canonicalFile) {
+                    "Invalid packet recovery artifact path"
+                }
+                ArtifactType.IMPORTED_SOURCE to file
+            }
+        return known + recovery
     }
 
     private fun createArtifactsTable(db: SQLiteDatabase) {

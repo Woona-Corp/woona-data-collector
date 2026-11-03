@@ -79,6 +79,26 @@ class RetirementCleanupTest {
         assertEquals(RetirementCleanupStatus(0,null,0),database.retirementCleanupStatus())
     }
 
+    @Test fun transientIoFailureKeepsIntentAndOriginalUntilLocalRetry() {
+        val (record, file) = record()
+        database.applyServerDeletions(listOf(marker(record.id))) { _, _ -> throw java.io.IOException("synthetic failure") }
+        assertEquals("SOLE SYNTHETIC ORIGINAL", file.readText())
+        assertEquals(1, database.retirementCleanupStatus().pending)
+        database.close(); database = WoonaDatabase(ApplicationProvider.getApplicationContext(), root)
+        assertEquals(0, database.retryRetirementCleanup().pending)
+        assertFalse(file.exists())
+    }
+
+    @Test fun failedOutboxAcknowledgementRetainsIntentForIdempotentRetry() {
+        val (record, file) = record()
+        database.writableDatabase.execSQL("CREATE TRIGGER reject_outbox_delete BEFORE DELETE ON local_deletion_outbox BEGIN SELECT RAISE(ABORT,'synthetic acknowledgement failure'); END")
+        database.applyServerDeletions(listOf(marker(record.id)))
+        assertFalse(file.exists())
+        assertEquals(1, database.retirementCleanupStatus().pending)
+        database.writableDatabase.execSQL("DROP TRIGGER reject_outbox_delete")
+        assertEquals(0, database.retryRetirementCleanup().pending)
+    }
+
     @Test fun version7UpgradeAddsOutboxWithoutChangingFilesOffsetsOrQuestionnaire() {
         val (record,file)=record()
         val artifact=record.artifacts.single()

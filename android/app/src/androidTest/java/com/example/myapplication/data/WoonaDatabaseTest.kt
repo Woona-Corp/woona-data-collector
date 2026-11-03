@@ -18,6 +18,26 @@ import org.json.JSONObject
 @RunWith(AndroidJUnit4::class)
 class WoonaDatabaseTest {
     @Test
+    fun interruptedCaptureRegistersDurablePacketRecoveryWithoutChangingOriginalBytes() {
+        val dog = database.saveProfile(completeDogQuestionnaire("Recovery"))
+        val recording = database.beginRecording(dog.id, RecordingSource.LIVE, completeSessionQuestionnaire())
+        database.markRecording(recording.id)
+        val dir = database.recordingDirectory(recording.relativeDirectory)
+        val bytes = byteArrayOf(0x57, 0x50, 0x52, 0x45, 0, 1, 2, 3)
+        val recovery = File(dir, "packet-recovery-${java.util.UUID.randomUUID()}.bin").apply { writeBytes(bytes) }
+        val original = File(dir, "packets.bin").apply { writeBytes(byteArrayOf(9, 8, 7)) }
+        database.interruptUnfinished()
+        database.close()
+        database = WoonaDatabase(ApplicationProvider.getApplicationContext(), root)
+        val restored = requireNotNull(database.recording(recording.id))
+        assertEquals(RecordingStatus.INTERRUPTED, restored.status)
+        val artifact = restored.artifacts.single { it.fileName == recovery.name }
+        assertEquals(ArtifactType.IMPORTED_SOURCE, artifact.type)
+        org.junit.Assert.assertArrayEquals(bytes, recovery.readBytes())
+        org.junit.Assert.assertArrayEquals(byteArrayOf(9, 8, 7), original.readBytes())
+    }
+
+    @Test
     fun captureFailureIsVisibleInHistoryAfterRestartEvenWhenSynced() {
         val dog = database.saveProfile(completeDogQuestionnaire("Capture failure"))
         val session = database.beginRecording(dog.id, RecordingSource.LIVE, completeSessionQuestionnaire())
@@ -257,6 +277,8 @@ class WoonaDatabaseTest {
     @After
     fun tearDown() {
         database.close()
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        if (root == File(context.filesDir, "Woona")) ActivityDatabase.resetForTesting()
         root.deleteRecursively()
     }
 
@@ -884,6 +906,7 @@ class WoonaDatabaseTest {
     @Test fun restoredPendingQuestionnaireCannotBeSavedOfflineOrThrough404Fallback() {
         database.close(); root.deleteRecursively()
         val context=ApplicationProvider.getApplicationContext<android.content.Context>()
+        ActivityDatabase.resetForTesting()
         root=File(context.filesDir,"Woona");root.deleteRecursively()
         val store=com.example.myapplication.sync.ServerSettingsStore(context)
         context.getSharedPreferences("woona_server",android.content.Context.MODE_PRIVATE).edit().clear().commit()
@@ -946,6 +969,7 @@ class WoonaDatabaseTest {
     @Test fun startupRecoveryKeepsMainResponsiveBlocksCaptureAndPreservesUnknownEnd() {
         database.close();root.deleteRecursively()
         val context=ApplicationProvider.getApplicationContext<android.content.Context>()
+        ActivityDatabase.resetForTesting()
         root=File(context.filesDir,"Woona");root.deleteRecursively()
         context.getSharedPreferences("woona_server",android.content.Context.MODE_PRIVATE).edit().clear().commit()
         database=WoonaDatabase(context,root)

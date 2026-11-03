@@ -9,6 +9,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -408,7 +409,12 @@ class PacketCaptureProcessorTest {
             assertTrue(firstUpdateEntered.await(1, TimeUnit.SECONDS))
             assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(validPacket(counter = 2, timerMillis = 20)))
             assertEquals(PacketSubmitResult.OVERFLOW, processor.submit(validPacket(counter = 3, timerMillis = 30)))
+            assertEquals(1L, processor.droppedFragments())
             releaseFirstUpdate.countDown()
+            assertTrue(processor.finishCapture(2_000))
+            assertEquals(1L, processor.droppedFragments())
+            processor.useSessionDirectory(File(directory, "next").apply { mkdirs() })
+            assertEquals("Overflow from the preceding capture must not taint the next", 0L, processor.droppedFragments())
         } finally {
             releaseFirstUpdate.countDown()
             processor.close()
@@ -473,6 +479,36 @@ class PacketCaptureProcessorTest {
 
         val file = requireNotNull(processor.currentPacketFile())
         assertArrayEquals(firstPacket, file.readBytes())
+    }
+
+    @Test
+    fun stopCapture_preservesQueuedFragmentsDuringDrain() {
+        val directory = Files.createTempDirectory("packet-stop-queued").toFile()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val first = validPacket(counter = 10, timerMillis = 50)
+        val second = validPacket(counter = 11, timerMillis = 60)
+        val processor = PacketCaptureProcessor(
+            packetFileStore = BlePacketFileStore(directory),
+            rawFragmentFileStore = BleRawFragmentFileStore(directory),
+            diagnosticLogFileStore = BleDiagnosticLogFileStore(directory),
+            onPacketProcessed = {},
+            onAcceptedPacketTimestamp = { _, _, _ -> entered.countDown(); release.await(2, TimeUnit.SECONDS) },
+            onError = { message, throwable -> throw AssertionError(message, throwable) },
+        )
+        try {
+            assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(first))
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(second))
+            processor.stopCapture()
+            assertEquals(false, processor.finishCapture(20))
+            release.countDown()
+            assertTrue(processor.finishCapture(1_000))
+            assertArrayEquals(first + second, requireNotNull(processor.currentPacketFile()).readBytes())
+        } finally {
+            release.countDown()
+            processor.close()
+        }
     }
 
     @Test
@@ -561,6 +597,206 @@ class PacketCaptureProcessorTest {
             assertEquals(if (headers.size == 2) 0L else 1L, last.packetsRejected)
             assertTrue(requireNotNull(last.lastPacketIssue).contains(issue))
             assertTrue(last.chartSamplesByStream.values.flatten().first().startsNewSegment)
+        }
+    }
+
+    @Test
+    fun rawWriteFailureRetainsAdmittedQueueAndPreventsSuccessOrReset() {
+        val directory = Files.createTempDirectory("packet-write-failure").toFile()
+        val notDirectory = java.io.File(directory, "not-a-directory").apply { writeText("x") }
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val processor = PacketCaptureProcessor(
+            packetFileStore = BlePacketFileStore(directory),
+            rawFragmentFileStore = BleRawFragmentFileStore(notDirectory, timestampProvider = {
+                entered.countDown()
+                release.await(2, TimeUnit.SECONDS)
+                1L
+            }),
+            diagnosticLogFileStore = BleDiagnosticLogFileStore(directory),
+            onPacketProcessed = {},
+            onError = { _, _ -> },
+            maxPendingFragments = 2,
+        )
+        try {
+            assertEquals(PacketRecoveryResult.NoFailure, processor.recoverPendingFragments(directory))
+            assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(byteArrayOf(1), 11, 111))
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(byteArrayOf(2), 22, 222))
+            assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(byteArrayOf(3), 33, 333))
+            release.countDown()
+            try {
+                processor.finishCapture(2_000)
+                org.junit.Assert.fail("failure must be reported")
+            } catch (_: IllegalStateException) { }
+            try {
+                processor.resetSession()
+                org.junit.Assert.fail("failed session must not be reset")
+            } catch (_: IllegalStateException) { }
+            assertEquals(PacketSubmitResult.REJECTED, processor.submit(byteArrayOf(4)))
+            // Inspect the bounded retained queue: neither admitted tail was discarded.
+            val field = processor.javaClass.getDeclaredField("queue").apply { isAccessible = true }
+            assertEquals(2, (field.get(processor) as java.util.Queue<*>).size)
+            val failed = processor.javaClass.getDeclaredField("failedFragment").apply { isAccessible = true }
+            assertTrue(failed.get(processor) != null)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            var result: PacketRecoveryResult
+            do {
+                result = processor.recoverPendingFragments(notDirectory)
+                if (result == PacketRecoveryResult.Busy) Thread.yield()
+            } while (result == PacketRecoveryResult.Busy && System.nanoTime() < deadline)
+            assertEquals(PacketRecoveryResult.Failed, result)
+            assertEquals(2, (field.get(processor) as java.util.Queue<*>).size)
+            assertTrue(failed.get(processor) != null)
+            assertEquals("x", notDirectory.readText())
+
+            val recovered = processor.recoverPendingFragments(directory) as PacketRecoveryResult.Recovered
+            assertEquals(directory.canonicalFile, requireNotNull(recovered.file.parentFile).canonicalFile)
+            java.io.DataInputStream(recovered.file.inputStream()).use { input ->
+                val magic = ByteArray(8).also(input::readFully)
+                assertArrayEquals(byteArrayOf(87, 80, 82, 69, 67, 79, 86, 0), magic)
+                assertEquals(1, input.readInt())
+                assertEquals(3, input.readInt())
+                listOf(Triple(11L, 111L, 1), Triple(22L, 222L, 2), Triple(33L, 333L, 3)).forEach { (wall, mono, byte) ->
+                    assertEquals(wall, input.readLong())
+                    assertEquals(mono, input.readLong())
+                    assertEquals(1, input.readInt())
+                    assertEquals(byte, input.readUnsignedByte())
+                }
+                assertEquals(-1, input.read())
+            }
+            assertEquals(0, (field.get(processor) as java.util.Queue<*>).size)
+            assertNull(failed.get(processor))
+            assertEquals(recovered, processor.recoverPendingFragments(directory))
+            assertEquals("x", notDirectory.readText())
+            try {
+                processor.finishCapture(100)
+                org.junit.Assert.fail("recovery must not mark the capture successful")
+            } catch (_: IllegalStateException) { }
+            try {
+                processor.resetSession()
+                org.junit.Assert.fail("recovery must not reopen a failed session")
+            } catch (_: IllegalStateException) { }
+        } finally {
+            release.countDown()
+            processor.close()
+        }
+    }
+
+    @Test
+    fun rawFlushFailureRecoversBoundedBatchAndQueuedFragmentsOnce() {
+        val directory = Files.createTempDirectory("packet-flush-failure").toFile()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val raw = BleRawFragmentFileStore(directory)
+        val processor = PacketCaptureProcessor(
+            packetFileStore = BlePacketFileStore(directory),
+            rawFragmentFileStore = raw,
+            diagnosticLogFileStore = BleDiagnosticLogFileStore(directory),
+            onPacketProcessed = {},
+            onError = { _, _ -> },
+            flushRaw = {
+                entered.countDown()
+                release.await(2, TimeUnit.SECONDS)
+                throw java.io.IOException("injected raw flush failure")
+            },
+        )
+        try {
+            for (i in 1..64) {
+                assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(byteArrayOf(i.toByte()), i.toLong(), i * 10L))
+            }
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            val batch = processor.javaClass.getDeclaredField("unflushedFragments").apply { isAccessible = true }
+            assertEquals(64, (batch.get(processor) as List<*>).size)
+            assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(byteArrayOf(65), 65, 650))
+            release.countDown()
+            try {
+                processor.finishCapture(2_000)
+                org.junit.Assert.fail("flush failure must not succeed")
+            } catch (_: IllegalStateException) { }
+            processor.close()
+            val recovery = processor.recoverPendingFragments(directory) as PacketRecoveryResult.Recovered
+            java.io.DataInputStream(recovery.file.inputStream()).use { input ->
+                input.skipBytes(8)
+                assertEquals(1, input.readInt())
+                assertEquals(65, input.readInt())
+                for (i in 1..65) {
+                    assertEquals(i.toLong(), input.readLong())
+                    assertEquals(i * 10L, input.readLong())
+                    assertEquals(1, input.readInt())
+                    assertEquals(i, input.readUnsignedByte())
+                }
+                assertEquals(-1, input.read())
+            }
+            assertEquals(PacketSubmitResult.REJECTED, processor.submit(byteArrayOf(1)))
+        } finally {
+            release.countDown()
+            processor.close()
+        }
+    }
+
+    @Test
+    fun recoveryWaitsForFailedInFlightFragmentAndWorksAfterClose() {
+        val directory = Files.createTempDirectory("packet-recovery-inflight").toFile()
+        val invalid = java.io.File(directory, "not-a-directory").apply { writeText("original") }
+        val failed = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val processor = PacketCaptureProcessor(
+            packetFileStore = BlePacketFileStore(directory),
+            rawFragmentFileStore = BleRawFragmentFileStore(invalid),
+            diagnosticLogFileStore = BleDiagnosticLogFileStore(directory),
+            onPacketProcessed = {},
+            onError = { _, _ -> failed.countDown(); release.await(2, TimeUnit.SECONDS) },
+        )
+        try {
+            assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(byteArrayOf(42), 10, 20))
+            assertTrue(failed.await(2, TimeUnit.SECONDS))
+            assertEquals(PacketRecoveryResult.Busy, processor.recoverPendingFragments(directory))
+            release.countDown()
+            processor.close()
+            val recovery = processor.recoverPendingFragments(directory) as PacketRecoveryResult.Recovered
+            java.io.DataInputStream(recovery.file.inputStream()).use { input ->
+                input.skipBytes(8)
+                assertEquals(1, input.readInt())
+                assertEquals(1, input.readInt())
+                assertEquals(10L, input.readLong())
+                assertEquals(20L, input.readLong())
+                assertEquals(1, input.readInt())
+                assertEquals(42, input.readUnsignedByte())
+            }
+            assertEquals("original", invalid.readText())
+        } finally {
+            release.countDown()
+            processor.close()
+        }
+    }
+
+    @Test
+    fun resetRejectsUndrainedCaptureWithoutDiscardingFragments() {
+        val directory = Files.createTempDirectory("packet-reset-pending").toFile()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val processor = PacketCaptureProcessor(
+            packetFileStore = BlePacketFileStore(directory),
+            rawFragmentFileStore = BleRawFragmentFileStore(directory),
+            diagnosticLogFileStore = BleDiagnosticLogFileStore(directory),
+            onPacketProcessed = { entered.countDown(); release.await(2, TimeUnit.SECONDS) },
+            onError = { _, _ -> },
+        )
+        try {
+            processor.submit(validPacket(1, 1))
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            processor.submit(validPacket(2, 2))
+            try {
+                processor.resetSession()
+                org.junit.Assert.fail("reset must reject an in-flight fragment")
+            } catch (_: IllegalStateException) { }
+            release.countDown()
+            assertTrue(processor.finishCapture(2_000))
+            assertArrayEquals(validPacket(1, 1) + validPacket(2, 2), requireNotNull(processor.currentPacketFile()).readBytes())
+        } finally {
+            release.countDown()
+            processor.close()
         }
     }
 

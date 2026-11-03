@@ -17,6 +17,13 @@ import com.example.myapplication.storage.BlePacketFileStore
 import com.example.myapplication.storage.BlePacketTimelineFileStore
 import com.example.myapplication.storage.BleRawFragmentFileStore
 import java.io.File
+import java.io.DataOutputStream
+import java.io.FileOutputStream
+import java.nio.channels.FileChannel
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
+import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -56,7 +63,17 @@ enum class PacketSubmitResult {
     REJECTED,
 }
 
+sealed class PacketRecoveryResult {
+    data class Recovered(val file: File) : PacketRecoveryResult()
+    object Unsupported : PacketRecoveryResult()
+    object NoFailure : PacketRecoveryResult()
+    object Busy : PacketRecoveryResult()
+    object Failed : PacketRecoveryResult()
+}
+
 interface PacketCaptureController : AutoCloseable {
+    /** Exports retained fragments after a failure; never repairs the original files. */
+    fun recoverPendingFragments(directory: File): PacketRecoveryResult = PacketRecoveryResult.Unsupported
     fun submit(packetFragment: ByteArray): PacketSubmitResult
     fun submit(
         packetFragment: ByteArray,
@@ -65,6 +82,8 @@ interface PacketCaptureController : AutoCloseable {
     ): PacketSubmitResult = submit(packetFragment)
     fun recordDiagnosticEvent(type: PacketDiagnosticType, message: String)
     fun stopCapture()
+    /** Count of fragments refused due to queue overflow in the current capture. */
+    fun droppedFragments(): Long = 0L
     fun finishCapture(timeoutMillis: Long): Boolean {
         stopCapture()
         flush()
@@ -101,6 +120,7 @@ class PacketCaptureProcessor(
     private val monotonicNanosProvider: () -> Long = System::nanoTime,
     private val summaryIntervalMillis: Long = DEFAULT_SUMMARY_INTERVAL_MS,
     private val maxPendingFragments: Int = MAX_PENDING_FRAGMENTS,
+    private val flushRaw: () -> Unit = { rawFragmentFileStore.flush() },
 ) : PacketCaptureController {
     private val processingLock = Any()
     private val queueAdmissionLock = Any()
@@ -143,6 +163,71 @@ class PacketCaptureProcessor(
     private var queueWarningLevel = -1
     private var lastSummaryWallClockMillis = wallClockMillisProvider()
     private var inFlightFragments = 0
+    // A failed append may have partially written. Retain the failed fragment and the
+    // bounded queue, but never retry blindly or report this session as successful.
+    @Volatile private var processingFailure: Exception? = null
+    // Protected by processingLock. A successful flush reaches the kernel, not fsync.
+    private val unflushedFragments = mutableListOf<QueuedFragment>()
+    private var unflushedBytes = 0
+    private var failedFragment: QueuedFragment? = null
+    private var recoveryFile: File? = null
+
+    override fun recoverPendingFragments(directory: File): PacketRecoveryResult {
+        // Same lock order as reset. Keep admission and polling frozen until publication.
+        synchronized(processingLock) {
+            synchronized(queueAdmissionLock) {
+                synchronized(idleMonitor) {
+                    recoveryFile?.let { return PacketRecoveryResult.Recovered(it) }
+                    if (processingFailure == null) return PacketRecoveryResult.NoFailure
+                    if (inFlightFragments != 0) return PacketRecoveryResult.Busy
+                    var temporary: java.nio.file.Path? = null
+                    try {
+                        val dir = directory.toPath().toRealPath()
+                        if (!Files.isDirectory(dir)) return PacketRecoveryResult.Failed
+                        val name = "packet-recovery-${UUID.randomUUID()}.bin"
+                        temporary = Files.createTempFile(dir, ".packet-recovery-", ".tmp")
+                        val fragments = unflushedFragments.toList() +
+                            listOfNotNull(failedFragment?.takeUnless { failed -> unflushedFragments.any { it === failed } }) + queue.toList()
+                        FileOutputStream(temporary.toFile()).use { stream ->
+                            val output = DataOutputStream(stream)
+                            // Big endian: magic, version, count, then wall ms, monotonic ns,
+                            // byte length and bytes for each fragment in admission order.
+                            output.write(byteArrayOf(87, 80, 82, 69, 67, 79, 86, 0)) // WPRECOV\0
+                            output.writeInt(1)
+                            output.writeInt(fragments.size)
+                            fragments.forEach { fragment ->
+                                output.writeLong(fragment.receivedAtMillis)
+                                output.writeLong(fragment.receivedAtMonotonicNs)
+                                output.writeInt(fragment.bytes.size)
+                                output.write(fragment.bytes)
+                            }
+                            output.flush()
+                            stream.fd.sync()
+                        }
+                        val destination = dir.resolve(name)
+                        Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
+                        temporary = null
+                        // A synced file alone does not make the rename durable.
+                        FileChannel.open(dir, StandardOpenOption.READ).use { it.force(true) }
+                        val file = destination.toFile()
+                        recoveryFile = file
+                        unflushedFragments.clear()
+                        unflushedBytes = 0
+                        failedFragment = null
+                        queue.clear()
+                        idleMonitor.notifyAll()
+                        return PacketRecoveryResult.Recovered(file)
+                    } catch (_: Exception) {
+                        // A published file may exist if directory sync failed. Keep memory
+                        // and never overwrite or remove it on retry.
+                        return PacketRecoveryResult.Failed
+                    } finally {
+                        temporary?.let { try { Files.deleteIfExists(it) } catch (_: Exception) { } }
+                    }
+                }
+            }
+        }
+    }
 
     private val workerThread = Thread(::runLoop, WORKER_THREAD_NAME).apply {
         priority = Thread.MAX_PRIORITY
@@ -163,6 +248,7 @@ class PacketCaptureProcessor(
         receivedAtMonotonicNs: Long,
     ): PacketSubmitResult {
         if (packetFragment.isEmpty()) return PacketSubmitResult.ACCEPTED
+        if (packetFragment.size > MAX_UNFLUSHED_BYTES) return PacketSubmitResult.REJECTED
 
         val copiedFragment = packetFragment.clone()
         return synchronized(queueAdmissionLock) {
@@ -189,14 +275,17 @@ class PacketCaptureProcessor(
         }
     }
 
+    override fun droppedFragments(): Long = droppedFragmentCount.get()
+
     override fun finishCapture(timeoutMillis: Long): Boolean {
         synchronized(queueAdmissionLock) {
             isAcceptingFragments = false
         }
-        val finished = awaitQueueIdle(timeoutMillis)
+        if (!awaitQueueIdle(timeoutMillis)) return false
+        checkProcessingFailure()
         emitPendingQueueOverflowDiagnostic()
         flush()
-        return finished
+        return true
     }
 
     override fun recordDiagnosticEvent(
@@ -217,18 +306,27 @@ class PacketCaptureProcessor(
 
     override fun useSessionDirectory(directory: File) {
         synchronized(processingLock) {
-            packetFileStore.useSessionDirectory(directory)
-            rawFragmentFileStore.useSessionDirectory(directory)
-            diagnosticLogFileStore.useSessionDirectory(directory)
-            packetTimelineFileStore?.useSessionDirectory(directory)
+            checkProcessingFailure()
+            try {
+                flushRawBatchLocked()
+                packetFileStore.useSessionDirectory(directory)
+                rawFragmentFileStore.useSessionDirectory(directory)
+                diagnosticLogFileStore.useSessionDirectory(directory)
+                packetTimelineFileStore?.useSessionDirectory(directory)
+                // The preceding capture is drained before a new directory is
+                // admitted; its overflow must not taint a new PREPARING row.
+                droppedFragmentCount.set(0L)
+            } catch (exception: Exception) {
+                latchFailure(exception)
+                throw exception
+            }
         }
     }
 
     override fun stopCapture() {
         synchronized(queueAdmissionLock) {
+            // Closing admission must not invalidate fragments already admitted.
             isAcceptingFragments = false
-            sessionId++
-            queue.clear()
         }
         notifyQueueIdleWaiters()
     }
@@ -237,9 +335,24 @@ class PacketCaptureProcessor(
         try {
             synchronized(processingLock) {
                 synchronized(queueAdmissionLock) {
-                    isAcceptingFragments = true
-                    sessionId++
-                    queue.clear()
+                    synchronized(idleMonitor) {
+                        checkProcessingFailure()
+                        check(queue.isEmpty() && inFlightFragments == 0) { "Cannot reset an undrained capture" }
+                        isAcceptingFragments = false
+                        // Reset stores before changing the generation or reopening admission.
+                        try {
+                            flushRawBatchLocked()
+                            packetFileStore.resetSession()
+                            rawFragmentFileStore.resetSession()
+                            diagnosticLogFileStore.resetSession()
+                            packetTimelineFileStore?.resetSession()
+                        } catch (exception: Exception) {
+                            processingFailure = exception
+                            isAcceptingFragments = false
+                            throw exception
+                        }
+                        sessionId++
+                    }
                 }
                 packetAssembler.reset()
                 packetStats.reset()
@@ -259,27 +372,33 @@ class PacketCaptureProcessor(
                 maxObservedQueueDepth = 0
                 queueWarningLevel = -1
                 lastSummaryWallClockMillis = wallClockMillisProvider()
-                packetFileStore.resetSession()
-                rawFragmentFileStore.resetSession()
-                diagnosticLogFileStore.resetSession()
-                packetTimelineFileStore?.resetSession()
+                synchronized(queueAdmissionLock) { isAcceptingFragments = true }
             }
             notifyQueueIdleWaiters()
         } catch (exception: Exception) {
             onError(appTextResolver.getString(R.string.failed_reset_capture_session), exception)
+            throw exception
         }
     }
 
     override fun flush() {
         try {
             synchronized(processingLock) {
-                diagnosticLogFileStore.flush()
-                rawFragmentFileStore.flush()
-                packetFileStore.flush()
-                packetTimelineFileStore?.flush()
+                checkProcessingFailure()
+                try {
+                    diagnosticLogFileStore.flush()
+                    flushRawBatchLocked()
+                    packetFileStore.flush()
+                    packetTimelineFileStore?.flush()
+                } catch (exception: Exception) {
+                    latchFailure(exception)
+                    throw exception
+                }
             }
         } catch (exception: Exception) {
+            latchFailure(exception)
             onError(appTextResolver.getString(R.string.failed_flush_buffered_output), exception)
+            throw exception
         }
     }
 
@@ -294,9 +413,11 @@ class PacketCaptureProcessor(
     override fun currentLogFile(): File? = diagnosticLogFileStore.currentFile()
 
     override fun close() {
-        isAcceptingFragments = false
+        synchronized(queueAdmissionLock) { isAcceptingFragments = false }
         isRunning = false
-        workerThread.interrupt()
+        // Wake an idle worker without interrupting an in-flight callback or
+        // append: interruption there would itself create a persistence failure.
+        java.util.concurrent.locks.LockSupport.unpark(workerThread)
 
         try {
             workerThread.join()
@@ -309,31 +430,51 @@ class PacketCaptureProcessor(
         }
 
         try {
-            emitPendingQueueOverflowDiagnostic()
-            diagnosticLogFileStore.flush()
-            diagnosticLogFileStore.close()
-            rawFragmentFileStore.flush()
-            rawFragmentFileStore.close()
-            packetFileStore.flush()
-            packetFileStore.close()
-            packetTimelineFileStore?.flush()
-            packetTimelineFileStore?.close()
+            synchronized(processingLock) {
+                // Closing a buffered stream can retry a partially failed write.
+                // Leave all originals untouched after any persistence failure.
+                checkProcessingFailure()
+                try {
+                    emitPendingQueueOverflowDiagnostic()
+                    diagnosticLogFileStore.flush()
+                    flushRawBatchLocked()
+                    packetFileStore.flush()
+                    packetTimelineFileStore?.flush()
+                    diagnosticLogFileStore.close()
+                    rawFragmentFileStore.close()
+                    packetFileStore.close()
+                    packetTimelineFileStore?.close()
+                } catch (exception: Exception) {
+                    latchFailure(exception)
+                    throw exception
+                }
+            }
         } catch (exception: Exception) {
             onError(appTextResolver.getString(R.string.failed_close_buffered_output), exception)
         }
     }
 
+    private fun flushRawBatchLocked() {
+        flushRaw()
+        unflushedFragments.clear()
+        unflushedBytes = 0
+    }
+
     private fun runLoop() {
-        while (isRunning || !queue.isEmpty() || pendingQueueOverflowCount.get() > 0L) {
+        while (processingFailure == null && (isRunning || !queue.isEmpty() || pendingQueueOverflowCount.get() > 0L)) {
             try {
                 emitPendingQueueOverflowDiagnostic()
                 val chunk = pollNextChunk()
                 if (chunk == null) {
-                    Thread.sleep(QUEUE_POLL_TIMEOUT_MS)
+                    java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(QUEUE_POLL_TIMEOUT_MS))
                     continue
                 }
                 try {
                     processChunk(chunk)
+                } catch (exception: Exception) {
+                    failedFragment = chunk
+                    latchFailure(exception)
+                    onError(appTextResolver.getString(R.string.background_packet_processing_failed), exception)
                 } finally {
                     markFragmentComplete()
                 }
@@ -344,16 +485,32 @@ class PacketCaptureProcessor(
                 Thread.currentThread().interrupt()
                 return
             } catch (exception: Exception) {
+                latchFailure(exception)
                 onError(appTextResolver.getString(R.string.background_packet_processing_failed), exception)
             }
         }
     }
 
+    private fun latchFailure(exception: Exception) {
+        synchronized(queueAdmissionLock) {
+            if (processingFailure == null) processingFailure = exception
+            isAcceptingFragments = false
+        }
+        notifyQueueIdleWaiters()
+    }
+
+    private fun checkProcessingFailure() {
+        processingFailure?.let { throw IllegalStateException("Capture persistence or processing failed", it) }
+    }
+
     private fun pollNextChunk(): QueuedFragment? {
-        synchronized(idleMonitor) {
-            val chunk = queue.poll() ?: return null
-            inFlightFragments++
-            return chunk
+        synchronized(queueAdmissionLock) {
+            synchronized(idleMonitor) {
+                if (processingFailure != null) return null
+                val chunk = queue.poll() ?: return null
+                inFlightFragments++
+                return chunk
+            }
         }
     }
 
@@ -362,6 +519,7 @@ class PacketCaptureProcessor(
         val deadline = System.nanoTime() + timeoutNanos
         synchronized(idleMonitor) {
             while (!queue.isEmpty() || inFlightFragments > 0) {
+                checkProcessingFailure()
                 val remainingNanos = deadline - System.nanoTime()
                 if (remainingNanos <= 0L) {
                     return false
@@ -394,10 +552,19 @@ class PacketCaptureProcessor(
     private fun processChunk(fragment: QueuedFragment) {
         val acceptedPacketTimestamps = mutableListOf<Triple<Long, Long, Long>>()
         val updates = synchronized(processingLock) {
+            checkProcessingFailure()
             if (fragment.sessionId != sessionId) {
                 return@synchronized emptyList()
             }
 
+            // Flush before adding an item that would exceed the byte limit. The
+            // in-flight fragment remains separately retained if this flush fails.
+            if (unflushedBytes + fragment.bytes.size > MAX_UNFLUSHED_BYTES) {
+                flushRawBatchLocked()
+            }
+            // Retain before append: append itself can fail after a partial write.
+            unflushedFragments.add(fragment)
+            unflushedBytes += fragment.bytes.size
             try {
                 rawFragmentFileStore.appendFragment(
                     sequence = receivedFragmentCount,
@@ -407,14 +574,9 @@ class PacketCaptureProcessor(
                 )
                 receivedFragmentCount++
                 receivedRawBytes += fragment.bytes.size.toLong()
+                if (unflushedFragments.size >= MAX_UNFLUSHED_FRAGMENTS) flushRawBatchLocked()
             } catch (exception: Exception) {
-                synchronized(queueAdmissionLock) {
-                    isAcceptingFragments = false
-                    sessionId++
-                    queue.clear()
-                }
-                onError(appTextResolver.getString(R.string.failed_persist_raw_fragment), exception)
-                return@synchronized emptyList()
+                throw exception
             }
 
             val updates = mutableListOf<PacketProcessingUpdate>()
@@ -509,35 +671,7 @@ class PacketCaptureProcessor(
                                         packetBytes = validation.packet.bytes.size,
                                     )
                                 } catch (exception: Exception) {
-                                    val packetWriteFailureMessage =
-                                        appTextResolver.getString(R.string.failed_write_accepted_packet)
-                                    registerRejection(packetWriteFailureMessage)
-                                    onError(appTextResolver.getString(R.string.failed_append_validated_packet), exception)
-                                    updates += PacketProcessingUpdate(
-                                        packetsReceived = packetStats.snapshot().packetsReceived,
-                                        packetsLost = packetStats.snapshot().packetsLost,
-                                        packetsRejected = rejectedPackets,
-                                        timerRegressionRejects = timerRegressionRejects,
-                                        fragmentsReceived = queuedFragmentCount.get(),
-                                        rawBytesReceived = receivedRawBytes,
-                                        fragmentsPersisted = receivedFragmentCount,
-                                        fragmentsDropped = droppedFragmentCount.get(),
-                                        chartSamplesByStream = emptyMap(),
-                                        lastPacketIssue = packetWriteFailureMessage,
-                                        rejectionBreakdown = buildRejectionBreakdown(),
-                                        diagnosticEvents = listOf(
-                                            createDiagnosticEvent(
-                                                type = PacketDiagnosticType.REJECTED,
-                                                message = buildRejectedPacketMessage(
-                                                    reason = packetWriteFailureMessage,
-                                                    packetLength = validation.packet.bytes.size,
-                                                    counter = validation.packet.counter,
-                                                    timerMillis = validation.packet.timerMillis,
-                                                ),
-                                            ),
-                                        ),
-                                    )
-                                    continue
+                                    throw exception
                                 }
 
                                 val previousTimerMillis = if (lastAcceptedTimerMillis == UNINITIALIZED_TIMER_MILLIS) {
@@ -776,7 +910,9 @@ class PacketCaptureProcessor(
                 message = event.message,
             )
         } catch (exception: Exception) {
+            latchFailure(exception)
             onError(appTextResolver.getString(R.string.failed_persist_diagnostic_log_event), exception)
+            throw exception
         }
         return event
     }
@@ -915,6 +1051,8 @@ class PacketCaptureProcessor(
 
     private companion object {
         const val MAX_PENDING_FRAGMENTS = 512
+        const val MAX_UNFLUSHED_FRAGMENTS = 64
+        const val MAX_UNFLUSHED_BYTES = 65_536
         const val CHART_DOWNSAMPLE_THRESHOLD = 500
         const val CHART_DOWNSAMPLE_STEP = 4
         const val QUEUE_POLL_TIMEOUT_MS = 100L

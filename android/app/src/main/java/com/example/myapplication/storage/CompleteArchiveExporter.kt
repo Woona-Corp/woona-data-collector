@@ -27,11 +27,13 @@ class CompleteArchiveExporter {
     ): File {
         require(!destination.exists()) { "Archive destination already exists" }
         val target = destination.canonicalFile
-        require(roots.none { target.toPath().startsWith(it.directory.canonicalFile.toPath()) }) {
+        val partial = File(target.parentFile, target.name + ".part")
+        // An excluded subtree is not inventoried, even if it lives under a root.
+        // Check both names: a filter may include the partial but exclude the ZIP.
+        require(roots.none { it.includesPath(target) || it.includesPath(partial) }) {
             "Archive destination must be outside the data being exported"
         }
         target.parentFile?.let { if (!it.isDirectory && !it.mkdirs()) throw IOException("Cannot create archive directory") }
-        val partial = File(target.parentFile, target.name + ".part")
         require(!partial.exists()) { "A partial archive already exists at this destination" }
         val sources = listOf(source("data/Woona/woona.sqlite", databaseSnapshot)) + inventory(roots)
         require(sources.map { it.name }.toSet().size == sources.size) { "Duplicate archive entry" }
@@ -84,6 +86,20 @@ class CompleteArchiveExporter {
             partial.delete()
             throw failure
         }
+    }
+
+    private fun Root.includesPath(file: File): Boolean {
+        val base = directory.canonicalFile.toPath()
+        val path = file.canonicalFile.toPath()
+        if (!path.startsWith(base)) return false
+        val relative = base.relativize(path)
+        if (relative.toString().isEmpty()) return true
+        var prefix = ""
+        for (segment in relative) {
+            prefix = if (prefix.isEmpty()) segment.toString() else "$prefix/$segment"
+            if (!include(prefix)) return false
+        }
+        return true
     }
 
     private fun inventory(roots: List<Root>): List<Source> = roots.flatMap { root ->

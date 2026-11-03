@@ -23,6 +23,7 @@ class QuestionnaireLocalizationUiTest {
         compose.onNodeWithText("Enter an animal ID (up to 100 characters)").assertExists()
         compose.onNodeWithText("Animal number/ID *").performTextInput("locale-id")
         compose.onNodeWithText("Name *").performTextInput("Активность")
+        androidx.test.espresso.Espresso.closeSoftKeyboard()
         listOf("Species","Shelter/camp/collection site","Breed","If mixed breed — similar breed/type","Size","Age, years","Age, months","Age information source","Sex","Neutered/spayed","Weight, kg","Weight information source","BCS (1-9)","Muscle mass assessment","Neck circumference, cm","Coat length","Undercoat","Clipped/shaved areas","Where and why the coat was clipped","Veterinary diagnoses","Diagnoses (description)","Confirmed disease category","Disease category — other details","Chronic lameness/joint problems","Regular medications and doses","History/important comments","Housing","Housing — other details","Walks (frequency and duration)","Living with other animals","Recording permission","Notes","Recording specialist's full name").forEach(::see)
         compose.onNodeWithText("Small").performScrollTo().performClick()
         compose.onNodeWithText("Validate and save").performClick()
@@ -33,6 +34,7 @@ class QuestionnaireLocalizationUiTest {
         var saved:SessionQuestionnaire?=null
         compose.setContent { MaterialTheme { SessionQuestionnaireDialog(AppLanguage.ENGLISH,{}, {saved=it}) } }
         compose.onNodeWithText("Session number *").performTextInput("EN session")
+        androidx.test.espresso.Espresso.closeSoftKeyboard()
         listOf("Session type","Session date (YYYY-MM-DD)","Recording start time (HH:MM, for import)","End time (HH:MM, for import)","Actual duration, min (for import)","Recording operator","Planned recording activities *").forEach(::see)
         compose.onNodeWithText("Gait/movement").performScrollTo().performClick()
         listOf("Recording format — other details","Session location","Surface","Surface — other details","Air temperature, °C","Sensor unit position","Sensor unit position — other details","Collar tightness","Animal's state before recording","State before recording — other details","Last medication time (heart rate/breathing/activity)","Notes","Recording specialist's full name","Record video").forEach(::see)
@@ -46,6 +48,7 @@ class QuestionnaireLocalizationUiTest {
         compose.setContent { MaterialTheme { SessionQuestionnaireDialog(AppLanguage.ENGLISH, {}, { saved = it }, videoAllowed = false) } }
         compose.onNodeWithText("Record video").assertDoesNotExist()
         compose.onNodeWithText("Session number *").performTextInput("Replay no video")
+        androidx.test.espresso.Espresso.closeSoftKeyboard()
         compose.onNodeWithText("Gait/movement").performScrollTo().performClick()
         compose.onNodeWithText("Validate and save").performClick()
         compose.runOnIdle { assertEquals(false, saved?.videoRequested); assertEquals(listOf("Аллюр/движение"), saved?.plannedActivities) }
@@ -68,5 +71,13 @@ class QuestionnaireLocalizationUiTest {
         see("Enter a device/source (up to 200 characters)")
     }
 
-    private fun see(label:String) { val node=compose.onNodeWithText(label); if(runCatching { node.assertIsDisplayed() }.isFailure) node.performScrollTo(); node.assertIsDisplayed() }
+    private fun see(label: String) {
+        try {
+            val node = compose.onNodeWithText(label)
+            if (runCatching { node.assertIsDisplayed() }.isFailure) node.performScrollTo()
+            node.assertIsDisplayed()
+        } catch (error: AssertionError) {
+            throw AssertionError("Could not display questionnaire label: $label", error)
+        }
+    }
 }

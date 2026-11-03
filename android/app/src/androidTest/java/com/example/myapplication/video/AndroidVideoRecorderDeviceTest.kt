@@ -7,7 +7,6 @@ import android.graphics.SurfaceTexture
 import android.media.MediaMetadataRetriever
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import android.view.PixelCopy
 import android.view.Surface
@@ -115,6 +114,72 @@ class AndroidVideoRecorderDeviceTest {
         assertTrue(output.isFile)
         assertTrue(output.length() > 0L)
         assertVideoMatchesPreviewAspectRatio(output)
+    }
+
+    @Test
+    fun cameraStopTimeoutRetainsOnePendingOperationUntilTheFileIsFinished() {
+        val visiblePreview = attachPreview()
+        recorder.setPreviewSurface(visiblePreview.holder.surface)
+        val started = CountDownLatch(1)
+        assertTrue(recorder.start(output, onStarted = { started.countDown() }, onError = { _, _ -> started.countDown() }))
+        assertTrue(started.await(15, TimeUnit.SECONDS))
+        Thread.sleep(500)
+        val handler = cameraHandler(recorder)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        handler.post { entered.countDown(); release.await(15, TimeUnit.SECONDS) }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            org.junit.Assert.assertThrows(VideoStopPendingException::class.java) { recorder.stop(50) }
+            org.junit.Assert.assertThrows(VideoStopPendingException::class.java) { recorder.stop(50) }
+            assertTrue(recorder.hasPendingStop())
+            release.countDown()
+            val stopped = requireNotNull(recorder.stop(8_000))
+            assertNotNull(stopped.startInfo)
+            assertTrue(!recorder.hasPendingStop())
+            assertTrue(output.isFile && output.length() > 0)
+        } finally { release.countDown() }
+    }
+
+    @Test
+    fun staleFirstFrameCallbackCannotReachTheNextCameraRecording() {
+        val visiblePreview = attachPreview()
+        recorder.setPreviewSurface(visiblePreview.holder.surface)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val oldCalls = java.util.concurrent.atomic.AtomicInteger()
+        val nextCalls = java.util.concurrent.atomic.AtomicInteger()
+        val newStarted = CountDownLatch(1)
+        val second = File(context.cacheDir, "physical-camera-next-${UUID.randomUUID()}.mp4")
+        Handler(Looper.getMainLooper()).post { entered.countDown(); release.await(30, TimeUnit.SECONDS) }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            assertTrue(recorder.start(output, onStarted = { oldCalls.incrementAndGet() }, onError = { _, _ -> }))
+            waitForFirstFrame(recorder)
+            // A camera callback precedes the first encoded MediaRecorder sample.
+            Thread.sleep(1_500)
+            val stopped = requireNotNull(recorder.stop(8_000))
+            assertNotNull("Stop must retain frame metadata even before the UI callback", stopped.startInfo)
+            assertTrue(recorder.start(second, onStarted = { nextCalls.incrementAndGet(); newStarted.countDown() }, onError = { _, _ -> }))
+            waitForFirstFrame(recorder)
+            release.countDown()
+            assertTrue("Second recording never received its own first frame", newStarted.await(10, TimeUnit.SECONDS))
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            assertEquals(0, oldCalls.get())
+            assertEquals(1, nextCalls.get())
+            Thread.sleep(1_500)
+            assertNotNull(recorder.stop(8_000))
+        } finally { release.countDown(); second.delete() }
+    }
+
+    private fun cameraHandler(value: AndroidVideoRecorder): Handler =
+        AndroidVideoRecorder::class.java.getDeclaredField("cameraHandler").apply { isAccessible = true }.get(value) as Handler
+
+    private fun waitForFirstFrame(value: AndroidVideoRecorder) {
+        val field = AndroidVideoRecorder::class.java.getDeclaredField("firstFrameInfo").apply { isAccessible = true }
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        while (field.get(value) == null && System.nanoTime() < deadline) Thread.sleep(25)
+        assertNotNull("Camera never produced a first frame", field.get(value))
     }
 
     @Test
@@ -249,11 +314,6 @@ class AndroidVideoRecorderDeviceTest {
 
         val screenshot = File(requireNotNull(context.getExternalFilesDir(null)), "physical-camera-preview.png")
         screenshot.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        ParcelFileDescriptor.AutoCloseInputStream(
-            InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
-                "cp ${screenshot.absolutePath} /sdcard/Download/physical-camera-preview.png",
-            ),
-        ).use { it.readBytes() }
     }
 
     private fun assertVideoMatchesPreviewAspectRatio(file: File) {
@@ -328,7 +388,7 @@ class AndroidVideoRecorderDeviceTest {
             }
 
             Log.i(TEST_LOG_TAG, "capture complete; finalizing local artifacts")
-            controller.onDisconnectRequested()
+            controller.onDisconnectRequested().get(15, TimeUnit.SECONDS)
             Log.i(TEST_LOG_TAG, "local artifacts finalized; verifying server round-trip")
             val completed = requireNotNull(database.recording(recording.id))
             assertTrue(completed.status == RecordingStatus.COMPLETED)
@@ -346,6 +406,101 @@ class AndroidVideoRecorderDeviceTest {
             assertTrue(completed.artifacts.filter { it.type != ArtifactType.DIAGNOSTIC }.all { it.sizeBytes > 0L })
             verifyServerRoundTripIfConfigured(database, recording.id, root)
         } finally {
+            controller.close()
+            database.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun delayedCameraStopKeepsRecordingOpenUntilVideoHasFinished() {
+        val root = File(context.cacheDir, "delayed-camera-stop-${System.nanoTime()}")
+        val database = WoonaDatabase(context, root)
+        lateinit var mockBle: MockBleSessionController
+        val controller = createDeviceFeatureController(
+            context = context, filesDir = root, fileProviderAuthority = "${context.packageName}.provider",
+            serviceUuid = UUID.randomUUID(), characteristicUuid = UUID.randomUUID(), descriptorUuid = UUID.randomUUID(),
+            bleSessionControllerFactory = { listener -> MockBleSessionController(listener).also { mockBle = it } }, woonaDatabase = database,
+        )
+        val release = CountDownLatch(1)
+        try {
+            val profile = database.saveProfile(completeDog())
+            val recording = database.beginRecording(profile.id, RecordingSource.LIVE, completeSession())
+            controller.beginRecordingSession(recording)
+            controller.setVideoPreviewSurface(surface)
+            controller.onConnectRequested(MOCK_ADDRESS)
+            mockBle.listener.onStateChanged(BleSessionState.CONNECTED)
+            mockBle.listener.onCaptureReady()
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            controller.startSynchronizedSession()
+            mockBle.listener.onPacketReceived(validPacket(counter = 1, timerMillis = 50), System.currentTimeMillis(), android.os.SystemClock.elapsedRealtimeNanos())
+            waitUntil("Camera did not enter RECORDING") { controller.uiState.videoState == VideoCaptureState.RECORDING }
+            val video = controller.javaClass.getDeclaredField("videoRecorder").apply { isAccessible = true }.get(controller) as AndroidVideoRecorder
+            val entered = CountDownLatch(1)
+            cameraHandler(video).post { entered.countDown(); release.await(20, TimeUnit.SECONDS) }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val stop = controller.onDisconnectRequested()
+            waitUntil("Camera stop was not posted") { video.hasPendingStop() }
+            Thread.sleep(4_500)
+            assertTrue("Stop must remain pending while camera thread is blocked", !stop.isDone)
+            assertEquals(RecordingStatus.RECORDING, database.recording(recording.id)?.status)
+            release.countDown()
+            stop.get(15, TimeUnit.SECONDS)
+            val complete = requireNotNull(database.recordingSyncRecord(recording.id))
+            assertEquals("completed", complete.captureStatus)
+            assertNotNull(complete.sync.videoFirstFrameMonotonicNs)
+            assertTrue(complete.artifacts.any { it.type == ArtifactType.VIDEO.value && it.sizeBytes > 0 })
+        } finally {
+            release.countDown()
+            controller.close()
+            database.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun inactiveCameraFailureIsPersistedEvenWhenItsUiCallbackIsDelayed() {
+        val root = File(context.cacheDir, "camera-callback-race-${System.nanoTime()}")
+        val database = WoonaDatabase(context, root)
+        lateinit var mockBle: MockBleSessionController
+        val controller = createDeviceFeatureController(
+            context = context, filesDir = root, fileProviderAuthority = "${context.packageName}.provider",
+            serviceUuid = UUID.randomUUID(), characteristicUuid = UUID.randomUUID(), descriptorUuid = UUID.randomUUID(),
+            bleSessionControllerFactory = { listener -> MockBleSessionController(listener).also { mockBle = it } }, woonaDatabase = database,
+        )
+        val releaseMain = CountDownLatch(1)
+        try {
+            val profile = database.saveProfile(completeDog())
+            val recording = database.beginRecording(profile.id, RecordingSource.LIVE, completeSession())
+            controller.beginRecordingSession(recording)
+            controller.setVideoPreviewSurface(surface)
+            controller.onConnectRequested(MOCK_ADDRESS)
+            mockBle.listener.onStateChanged(BleSessionState.CONNECTED)
+            mockBle.listener.onCaptureReady()
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            controller.startSynchronizedSession()
+            mockBle.listener.onPacketReceived(validPacket(counter = 1, timerMillis = 50), System.currentTimeMillis(), android.os.SystemClock.elapsedRealtimeNanos())
+            waitUntil("Camera did not enter RECORDING") { controller.uiState.videoState == VideoCaptureState.RECORDING }
+            val video = controller.javaClass.getDeclaredField("videoRecorder").apply { isAccessible = true }.get(controller) as AndroidVideoRecorder
+            val mainBlocked = CountDownLatch(1)
+            Handler(Looper.getMainLooper()).post { mainBlocked.countDown(); releaseMain.await(20, TimeUnit.SECONDS) }
+            assertTrue(mainBlocked.await(5, TimeUnit.SECONDS))
+            val failed = CountDownLatch(1)
+            cameraHandler(video).post {
+                AndroidVideoRecorder::class.java.getDeclaredMethod("fail", String::class.java, Throwable::class.java)
+                    .apply { isAccessible = true }.invoke(video, "Synthetic camera failure", java.io.IOException("fixture"))
+                failed.countDown()
+            }
+            assertTrue(failed.await(5, TimeUnit.SECONDS))
+            assertTrue(!video.isActive())
+            val stop = controller.onDisconnectRequested()
+            waitUntil("Recording did not terminalize") { database.recording(recording.id)?.status == RecordingStatus.COMPLETED }
+            assertEquals("camera_failed", database.recording(recording.id)?.captureErrorCode)
+            assertTrue("UI teardown should wait until main thread is released", !stop.isDone)
+            releaseMain.countDown()
+            stop.get(10, TimeUnit.SECONDS)
+        } finally {
+            releaseMain.countDown()
             controller.close()
             database.close()
             root.deleteRecursively()
@@ -391,7 +546,7 @@ class AndroidVideoRecorderDeviceTest {
             )
             val partialVideo = File(database.recordingDirectory(recording.relativeDirectory), "video.mp4")
             val videoExistedBeforeStop = partialVideo.exists()
-            controller.onDisconnectRequested()
+            controller.onDisconnectRequested().get(15, TimeUnit.SECONDS)
 
             val completed = requireNotNull(database.recordingSyncRecord(recording.id))
             assertEquals("camera_failed", completed.captureErrorCode)

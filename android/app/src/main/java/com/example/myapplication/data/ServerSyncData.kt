@@ -507,64 +507,68 @@ fun WoonaDatabase.applyServerDeletions(
     entities: List<Pair<String, String>>,
     deleteEntry: (File, Boolean) -> Boolean = { file, directory -> if (directory) file.deleteRecursively() else file.delete() },
 ): Int {
+    // Retain the exact connection for the entire transaction, including its
+    // finally block. Re-entering the helper there can open another connection.
+    val db = writableDatabase
     val accepted = entities.toMutableSet()
-    readableDatabase.rawQuery("SELECT kind,id_sha256 FROM deferred_retirements", null).use { cursor ->
-        while (cursor.moveToNext()) accepted += cursor.getString(0) to cursor.getString(1)
-    }
     fun marker(kind: String, id: String): Pair<String,String> = kind to MessageDigest.getInstance("SHA-256")
         .digest(id.lowercase().toByteArray()).joinToString("") { "%02x".format(it) }
     fun retired(kind: String, id: String): Boolean = marker(kind,id) in accepted
     val directories = mutableListOf<File>()
     val ids = mutableListOf<String>()
-    writableDatabase.rawQuery("SELECT id,dog_id,status,relative_directory FROM recordings", null).use { cursor ->
-        while (cursor.moveToNext()) {
-            if (cursor.getString(2) in setOf("preparing", "recording")) continue
-            if (retired("recording", cursor.getString(0)) || retired("dog", cursor.getString(1))) {
-                ids += cursor.getString(0)
-                directories += recordingDirectory(cursor.getString(3))
+    db.beginTransaction()
+    try {
+        // Select candidates and persist their cleanup intents atomically.
+        db.rawQuery("SELECT kind,id_sha256 FROM deferred_retirements", null).use { cursor ->
+            while (cursor.moveToNext()) accepted += cursor.getString(0) to cursor.getString(1)
+        }
+        db.rawQuery("SELECT id,dog_id,status,relative_directory FROM recordings", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                if (cursor.getString(2) in setOf("preparing", "recording")) continue
+                if (retired("recording", cursor.getString(0)) || retired("dog", cursor.getString(1))) {
+                    ids += cursor.getString(0)
+                    directories += recordingDirectory(cursor.getString(3))
+                }
             }
         }
-    }
-    writableDatabase.beginTransaction()
-    try {
         // Files are untouched until every retirement row and cleanup intent commits.
-        directories.forEach { enqueueRetirementCleanup(writableDatabase, it, directory = true) }
-        ids.forEach { writableDatabase.delete("recordings", "id=?", arrayOf(it)) }
+        directories.forEach { enqueueRetirementCleanup(db, it, directory = true) }
+        ids.forEach { db.delete("recordings", "id=?", arrayOf(it)) }
         val artifacts = mutableListOf<Pair<String,File>>()
-        writableDatabase.rawQuery("SELECT id,relative_path FROM artifacts WHERE recording_id NOT IN (SELECT id FROM recordings WHERE status IN ('preparing','recording'))",null).use { cursor ->
+        db.rawQuery("SELECT id,relative_path FROM artifacts WHERE recording_id NOT IN (SELECT id FROM recordings WHERE status IN ('preparing','recording'))",null).use { cursor ->
             while (cursor.moveToNext()) if (retired("artifact",cursor.getString(0))) artifacts += cursor.getString(0) to resolveRelativePath(cursor.getString(1))
         }
         artifacts.forEach { (id,file) ->
-            enqueueRetirementCleanup(writableDatabase, file, directory = false)
-            writableDatabase.delete("artifacts","id=?",arrayOf(id))
+            enqueueRetirementCleanup(db, file, directory = false)
+            db.delete("artifacts","id=?",arrayOf(id))
         }
         val profiles = mutableListOf<String>()
-        writableDatabase.rawQuery("SELECT id,dog_id FROM dog_profile_versions WHERE id NOT IN (SELECT dog_profile_version_id FROM recordings)", null).use { cursor ->
+        db.rawQuery("SELECT id,dog_id FROM dog_profile_versions WHERE id NOT IN (SELECT dog_profile_version_id FROM recordings)", null).use { cursor ->
             while (cursor.moveToNext()) {
-                val current = writableDatabase.rawQuery("SELECT 1 FROM dog_profile_versions WHERE id=? AND superseded_at_utc IS NULL",arrayOf(cursor.getString(0))).use { it.moveToFirst() }
+                val current = db.rawQuery("SELECT 1 FROM dog_profile_versions WHERE id=? AND superseded_at_utc IS NULL",arrayOf(cursor.getString(0))).use { it.moveToFirst() }
                 if ((!current && retired("profile", cursor.getString(0))) || retired("dog", cursor.getString(1))) profiles += cursor.getString(0)
             }
         }
-        profiles.forEach { writableDatabase.delete("dog_profile_versions", "id=?", arrayOf(it)) }
+        profiles.forEach { db.delete("dog_profile_versions", "id=?", arrayOf(it)) }
         val dogs = mutableListOf<String>()
-        writableDatabase.rawQuery("SELECT id FROM dogs WHERE id NOT IN (SELECT dog_id FROM recordings) AND id NOT IN (SELECT dog_id FROM dog_profile_versions)", null).use { cursor ->
+        db.rawQuery("SELECT id FROM dogs WHERE id NOT IN (SELECT dog_id FROM recordings) AND id NOT IN (SELECT dog_id FROM dog_profile_versions)", null).use { cursor ->
             while (cursor.moveToNext()) if (retired("dog", cursor.getString(0))) dogs += cursor.getString(0)
         }
-        dogs.forEach { writableDatabase.delete("dogs", "id=?", arrayOf(it)) }
+        dogs.forEach { db.delete("dogs", "id=?", arrayOf(it)) }
         // Keep exact accepted negative knowledge while active capture or profile
         // references defer retirement. A later stop/recovery needs no new approval.
         val deferred = mutableSetOf<Pair<String,String>>()
         listOf("recording" to "recordings", "dog" to "dogs", "profile" to "dog_profile_versions", "artifact" to "artifacts").forEach { (kind, table) ->
-            writableDatabase.rawQuery("SELECT id FROM $table", null).use { cursor ->
+            db.rawQuery("SELECT id FROM $table", null).use { cursor ->
                 while (cursor.moveToNext()) marker(kind,cursor.getString(0)).takeIf { it in accepted }?.let(deferred::add)
             }
         }
-        writableDatabase.delete("deferred_retirements", null, null)
-        deferred.forEach { (kind, hash) -> writableDatabase.insertOrThrow("deferred_retirements", null, ContentValues().apply {
+        db.delete("deferred_retirements", null, null)
+        deferred.forEach { (kind, hash) -> db.insertOrThrow("deferred_retirements", null, ContentValues().apply {
             put("kind",kind);put("id_sha256",hash);put("received_at_utc",java.time.Instant.now().toString())
         }) }
-        writableDatabase.setTransactionSuccessful()
-    } finally { writableDatabase.endTransaction() }
+        db.setTransactionSuccessful()
+    } finally { db.endTransaction() }
     retryRetirementCleanup(deleteEntry)
     return ids.size
 }
