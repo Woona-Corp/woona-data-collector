@@ -28,6 +28,7 @@ android {
         }
     }
 
+
     defaultConfig {
         applicationId = "com.woona.drivetest"
         minSdk = 31
@@ -114,4 +115,24 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 
+}
+
+// A plain `connectedAndroidTest` uninstalls the existing package before it
+// installs the debug build. Pointed at the field package this removes the
+// owner's installed app and its local data (happened on 2026-11-04). Physical
+// phone runs must target the separately installed QA package instead.
+tasks.matching { it.name.startsWith("connected") }.configureEach {
+    doFirst {
+        if (android.defaultConfig.applicationId == "com.woona.drivetest" &&
+            !project.hasProperty("woonaQaPackage")
+        ) {
+            throw GradleException(
+                "Refusing to run ${name} against the field package com.woona.drivetest. " +
+                    "Gradle uninstalls the target package first, which deletes its local data. " +
+                    "Install and drive a QA package with a different applicationId " +
+                    "(for example with an init script setting defaultConfig.applicationId), " +
+                    "or pass -PwoonaQaPackage=true when the device is a disposable emulator.",
+            )
+        }
+    }
 }
