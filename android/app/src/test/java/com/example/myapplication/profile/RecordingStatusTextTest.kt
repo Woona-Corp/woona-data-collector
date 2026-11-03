@@ -18,6 +18,16 @@ class RecordingStatusTextTest {
         assertTrue(recordingUploadErrorText("integrity_check_busy", ru).contains("Локальные файлы сохранены"))
     }
 
+    @Test fun metadataConflictIsLocalizedInBothShellLanguages() {
+        // The worker stores a language-neutral fallback, so the card must render
+        // the localized explanation for the current shell language.
+        val enText = recordingUploadErrorText("metadata_conflict", en)
+        val ruText = recordingUploadErrorText("metadata_conflict", ru)
+        assertTrue(enText.contains("differ from the server version"))
+        assertFalse("English shell must not show Russian text", enText.any { it in 'А'..'я' })
+        assertTrue(ruText.contains("отличаются от серверной версии"))
+    }
+
     @Test fun quotaAndReservedSpaceGiveDifferentActionsAndPreserveRawDetails() {
         val quota = recordingUploadErrorText("HTTP 413 storage_quota_exceeded requestId=fixture-id", en)
         assertTrue(quota.contains("storage limit")); assertTrue(quota.contains("automatic retries"))

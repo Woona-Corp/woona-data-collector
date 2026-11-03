@@ -68,7 +68,7 @@ class QuestionnaireCompactUiTest {
                 assertEquals(5, savedRevision)
             }
         } finally {
-            compose.activity.requestedOrientation = orientation
+            compose.activity.restoreTestOrientation(orientation)
             if (wasPortrait) compose.waitUntil(10_000) {
                 val view = compose.activity.findViewById<View>(android.R.id.content)
                 view.height > view.width
@@ -124,7 +124,7 @@ class QuestionnaireCompactUiTest {
         } finally {
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
-            compose.activity.requestedOrientation = orientation
+            compose.activity.restoreTestOrientation(orientation)
             if (wasPortrait) compose.waitUntil(10_000) {
                 val view = compose.activity.findViewById<View>(android.R.id.content)
                 view.height > view.width
@@ -165,7 +165,7 @@ class QuestionnaireCompactUiTest {
         } finally {
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
-            compose.activity.requestedOrientation = orientation
+            compose.activity.restoreTestOrientation(orientation)
             if (wasLandscape) compose.waitUntil(10_000) {
                 val view = compose.activity.findViewById<View>(android.R.id.content)
                 view.width > view.height

@@ -7,7 +7,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
@@ -15,6 +14,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.Row
@@ -1160,7 +1161,7 @@ private fun OverviewTab(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun BleTransportProfileCard(
     selectedProfile: BleTransportProfile,
@@ -1183,9 +1184,13 @@ private fun BleTransportProfileCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = supportingTextColor(),
             )
-            Row(
+            // A one-line marquee hid the start of a long localized label, and an
+            // equal-weight row broke words mid-syllable on a narrow phone. Each
+            // option keeps its natural width and wraps at word boundaries instead.
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 BleTransportProfile.entries.forEach { profile ->
                     FilterChip(
@@ -1194,11 +1199,11 @@ private fun BleTransportProfileCard(
                         label = {
                             Text(
                                 text = appStringResource(profile.titleRes),
-                                maxLines = 1,
-                                modifier = Modifier.basicMarquee(),
+                                maxLines = 2,
+                                softWrap = true,
+                                style = MaterialTheme.typography.labelMedium,
                             )
                         },
-                        modifier = Modifier.weight(1f),
                     )
                 }
             }

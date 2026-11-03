@@ -239,7 +239,7 @@ class AppShellInsetsTest {
             composeRule.onNodeWithText("No data for the selected sensor/channel").performScrollTo().assertIsDisplayed()
         } finally {
             // A test-requested orientation can otherwise leak into later ActivityScenarios.
-            composeRule.activity.requestedOrientation = originalOrientation
+            composeRule.activity.restoreTestOrientation(originalOrientation)
             if (wasPortrait) composeRule.waitUntil(timeoutMillis = 10_000) {
                 val content = composeRule.activity.findViewById<View>(android.R.id.content)
                 content.height > content.width
