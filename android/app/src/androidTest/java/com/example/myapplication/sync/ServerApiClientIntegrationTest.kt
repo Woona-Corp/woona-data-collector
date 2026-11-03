@@ -287,7 +287,9 @@ class ServerApiClientIntegrationTest {
             database.readableDatabase.rawQuery("SELECT last_error_code,last_error_message FROM server_sync_state WHERE recording_id=?", arrayOf(recording.id)).use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals("metadata_conflict", cursor.getString(0))
-                assertTrue(cursor.getString(1).contains("Локальные файлы сохранены"))
+                // The stored fallback is language-neutral; the card localizes it
+                // for the current shell language.
+                assertTrue(cursor.getString(1).contains("Local files are preserved"))
             }
             assertArrayEquals(localBytes, packets.readBytes())
             assertEquals(9, database.recording(recording.id)?.artifacts?.size)
