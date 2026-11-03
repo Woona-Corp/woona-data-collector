@@ -18,6 +18,7 @@ import com.example.myapplication.ble.BleSessionState
 import com.example.myapplication.ble.BleTransportProfile
 import com.example.myapplication.ble.PolarSessionManager
 import com.example.myapplication.data.WoonaDatabase
+import com.example.myapplication.data.Recording
 import com.example.myapplication.feature.device.DeviceFeatureController
 import com.example.myapplication.feature.device.DebugPacketReplayController
 import com.example.myapplication.feature.device.DeviceUiStateHolder
@@ -46,6 +47,7 @@ import com.example.myapplication.protocol.WoonaV2LiveSession
 import com.example.myapplication.video.AndroidVideoRecorder
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.Executors
 
 fun createDeviceFeatureController(
     context: Context,
@@ -65,6 +67,7 @@ fun createDeviceFeatureController(
     appTextResolver: AppTextResolver = AppTextResolver(context.applicationContext) {
         AppLanguage.defaultFrom()
     },
+    polarFileStoreFactory: () -> PolarCsvFileStore = { PolarCsvFileStore() },
 ): DeviceFeatureController {
     val uiStateHolder = DeviceUiStateHolder()
     val mainHandler = Handler(Looper.getMainLooper())
@@ -100,10 +103,13 @@ fun createDeviceFeatureController(
                     )
                 },
                 onError = { message, throwable ->
+                    val owner = deviceFeatureController?.captureIdentity()
                     updateBatcher.clearPending()
                     mainHandler.post {
-                        deviceFeatureController?.onSessionError(message, throwable) ?: uiStateHolder.showError(message)
-                        bleSessionController?.close()
+                        if (deviceFeatureController?.captureIdentity() == owner) {
+                            deviceFeatureController?.onSessionError(message, throwable) ?: uiStateHolder.showError(message)
+                            bleSessionController?.close()
+                        }
                     }
                     Log.e("BLE_PROCESSOR", message, throwable)
                 },
@@ -135,10 +141,13 @@ fun createDeviceFeatureController(
 
             PacketSubmitResult.OVERFLOW -> {
                 val message = appTextResolver.getString(R.string.packet_queue_overflow_stopped)
+                val owner = deviceFeatureController?.captureIdentity()
                 packetCaptureController.stopCapture()
                 mainHandler.post {
-                    deviceFeatureController?.onSessionError(message) ?: uiStateHolder.showError(message)
-                    bleSessionController?.close()
+                    if (deviceFeatureController?.captureIdentity() == owner) {
+                        deviceFeatureController?.onSessionError(message) ?: uiStateHolder.showError(message)
+                        bleSessionController?.close()
+                    }
                 }
                 Log.e("BLE_QUEUE", message)
                 submitResult
@@ -191,9 +200,15 @@ fun createDeviceFeatureController(
             v2ReceivedPending = 0; v2GapsPending = 0; v2DroppedPending = 0
         }
     }
+    fun captureOnMain(action: () -> Unit) {
+        val owner = deviceFeatureController?.captureIdentity()
+        mainHandler.post {
+            if (deviceFeatureController?.captureIdentity() == owner) action()
+        }
+    }
     fun transportOnMain(action: () -> Unit) {
         val generation = deviceFeatureController?.connectionUiGeneration()
-        mainHandler.post {
+        captureOnMain {
             if (deviceFeatureController?.connectionUiGeneration() == generation) action()
         }
     }
@@ -346,17 +361,13 @@ fun createDeviceFeatureController(
             deviceFeatureController?.onReplayStarted()
         },
         onReplayCompleted = {
-            mainHandler.post {
-                deviceFeatureController?.onReplayCompleted()
-            }
+            captureOnMain { deviceFeatureController?.onReplayCompleted() }
         },
         onReplayStopped = {
-            mainHandler.post {
-                deviceFeatureController?.onReplayStopped()
-            }
+            captureOnMain { deviceFeatureController?.onReplayStopped() }
         },
         onError = { message, throwable ->
-            mainHandler.post {
+            captureOnMain {
                 deviceFeatureController?.onReplayError(message, throwable) ?: uiStateHolder.showError(message)
             }
             Log.e("BLE_REPLAY", message, throwable)
@@ -368,23 +379,36 @@ fun createDeviceFeatureController(
         },
     )
 
-    val polarFileStore = PolarCsvFileStore()
+    val polarFileStore = polarFileStoreFactory()
+
+    // Declared before construction so status/error callbacks can verify that
+    // their generation is still current when the main-thread action runs.
+    var polarSessionManagerOrNull: PolarSessionManager? = null
     val polarSessionManager = PolarSessionManager(
         context = context,
         onDeviceFound = { device -> mainHandler.post { uiStateHolder.addFoundPolarDevice(device) } },
-        onStatus = { status ->
-            mainHandler.post {
-                deviceFeatureController?.onPolarStatusChanged(status) ?: uiStateHolder.updatePolarStatus(status)
+        onStatus = { status, statusGeneration ->
+            captureOnMain {
+                // The generation is re-checked when the queued action runs: a
+                // reconnect between post and apply must discard the old event.
+                if (polarSessionManagerOrNull?.isGenerationCurrent(statusGeneration) == true) {
+                    deviceFeatureController?.onPolarStatusChanged(status) ?: uiStateHolder.updatePolarStatus(status)
+                }
             }
         },
-        onHeartRate = { frame, now -> deviceFeatureController?.onPolarHeartRate(frame, now) },
-        onEcg = { frame, now -> deviceFeatureController?.onPolarEcg(frame, now) },
-        onAcceleration = { frame, now -> deviceFeatureController?.onPolarAcceleration(frame, now) },
-        onError = { message, throwable ->
-            mainHandler.post { deviceFeatureController?.showErrorOnMainThread(message, throwable) ?: uiStateHolder.showError(message) }
+        onHeartRate = { frame, now, recordingId -> deviceFeatureController?.onPolarHeartRate(frame, now, recordingId) },
+        onEcg = { frame, now, recordingId -> deviceFeatureController?.onPolarEcg(frame, now, recordingId) },
+        onAcceleration = { frame, now, recordingId -> deviceFeatureController?.onPolarAcceleration(frame, now, recordingId) },
+        onError = { message, throwable, errorGeneration ->
+            captureOnMain {
+                if (polarSessionManagerOrNull?.isGenerationCurrent(errorGeneration) == true) {
+                    deviceFeatureController?.showErrorOnMainThread(message, throwable) ?: uiStateHolder.showError(message)
+                }
+            }
             Log.e("POLAR_SESSION", message, throwable)
         },
     )
+    polarSessionManagerOrNull = polarSessionManager
 
     deviceFeatureController = DeviceFeatureController(
         bleSessionController = requireNotNull(bleSessionController),
@@ -413,6 +437,7 @@ fun createDeviceFeatureController(
         schedule = { runnable, delayMillis -> mainHandler.postDelayed(runnable, delayMillis) },
         cancel = mainHandler::removeCallbacks,
         onConnectionAlarm = { quality -> playConnectionAlarm(context, mainHandler, quality) },
+        onRecoveryRetryNeeded = { CaptureServiceBridge.onStopFailed?.invoke() },
         onCaptureLifecycleChanged = onCaptureLifecycleChanged,
     )
 
@@ -489,33 +514,36 @@ object DeviceFeatureModuleEntryPoint {
 /** Retains the capture owner when an Activity is recreated while recording. */
 object DeviceFeatureControllerHolder {
     private var controller: DeviceFeatureController? = null
+    private val stopExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "capture-stop") }
 
     @Synchronized
     fun hasActiveCapture(): Boolean = controller?.isCaptureActive() == true
 
-    fun requestStop() {
-        val activeController = synchronized(this) { controller }
-        Handler(Looper.getMainLooper()).post {
-            activeController?.onDisconnectRequested()
+    fun requestStop(candidate: DeviceFeatureController? = null) {
+        val activeController = synchronized(this) { controller?.takeIf { candidate == null || it === candidate } }
+        activeController?.requestDisconnect(stopExecutor)?.whenComplete { _, failure ->
+            if (failure != null) CaptureServiceBridge.onStopFailed?.invoke()
         }
     }
 
     @Synchronized
     fun obtain(
         onRecordingChanged: () -> Unit,
+        onRecordingFinalizing: ((Recording) -> Unit)? = null,
+        onRecordingFinalized: ((Recording) -> Unit)? = null,
+        onCaptureLifecycleChanged: ((Boolean) -> Unit)? = null,
         create: () -> DeviceFeatureController,
     ): DeviceFeatureController {
         val existing = controller
-        if (existing != null && existing.shouldRetainConnection()) {
-            existing.setOnRecordingChanged(onRecordingChanged)
-            return existing
+        val selected = if (existing != null && existing.shouldRetainConnection()) existing else {
+            existing?.close()
+            create().also { controller = it }
         }
-
-        existing?.close()
-        return create().also {
-            it.setOnRecordingChanged(onRecordingChanged)
-            controller = it
-        }
+        selected.setOnRecordingChanged(onRecordingChanged)
+        onRecordingFinalizing?.let(selected::setOnRecordingFinalizing)
+        onRecordingFinalized?.let(selected::setOnRecordingFinalized)
+        onCaptureLifecycleChanged?.let(selected::setOnCaptureLifecycleChanged)
+        return selected
     }
 
     @Synchronized

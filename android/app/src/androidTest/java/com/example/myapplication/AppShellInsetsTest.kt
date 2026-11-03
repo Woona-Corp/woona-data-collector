@@ -212,31 +212,39 @@ class AppShellInsetsTest {
 
     @Test
     fun chartControls_areReachableInLandscape() {
-        composeRule.activity.requestedOrientation =
-            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        composeRule.waitUntil(timeoutMillis = 10_000) {
-            val content = composeRule.activity.findViewById<View>(android.R.id.content)
-            content.width > content.height
-        }
-        setShellContent(
-            uiState = DeviceUiState(
-                showCaptureUi = true,
-                chart = ChartUiState(
-                    canPanLeft = true,
-                    canPanRight = true,
-                    canZoomIn = true,
-                    canZoomOut = true,
+        val originalOrientation = composeRule.activity.requestedOrientation
+        val originalContent = composeRule.activity.findViewById<View>(android.R.id.content)
+        val wasPortrait = originalContent.height > originalContent.width
+        try {
+            composeRule.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            composeRule.waitUntil(timeoutMillis = 10_000) {
+                val content = composeRule.activity.findViewById<View>(android.R.id.content)
+                content.width > content.height
+            }
+            setShellContent(
+                uiState = DeviceUiState(
+                    showCaptureUi = true,
+                    chart = ChartUiState(
+                        canPanLeft = true,
+                        canPanRight = true,
+                        canZoomIn = true,
+                        canZoomOut = true,
+                    ),
                 ),
-            ),
-        )
+            )
 
-        composeRule.onNode(hasTestTag("tab.session")).performClick()
-        composeRule.onNode(hasTestTag("session.charts")).performClick()
-        composeRule.onNodeWithText("Y Reset").performScrollTo().assertIsDisplayed()
-        composeRule
-            .onNodeWithText("No data for the selected sensor/channel")
-            .performScrollTo()
-            .assertIsDisplayed()
+            composeRule.onNode(hasTestTag("tab.session")).performClick()
+            composeRule.onNode(hasTestTag("session.charts")).performClick()
+            composeRule.onNodeWithText("Y Reset").performScrollTo().assertIsDisplayed()
+            composeRule.onNodeWithText("No data for the selected sensor/channel").performScrollTo().assertIsDisplayed()
+        } finally {
+            // A test-requested orientation can otherwise leak into later ActivityScenarios.
+            composeRule.activity.requestedOrientation = originalOrientation
+            if (wasPortrait) composeRule.waitUntil(timeoutMillis = 10_000) {
+                val content = composeRule.activity.findViewById<View>(android.R.id.content)
+                content.height > content.width
+            }
+        }
     }
 
     private fun setShellContent(

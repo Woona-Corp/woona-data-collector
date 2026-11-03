@@ -4,6 +4,9 @@
     <string name="capture_notification_title">Идёт BLE-запись</string>
     <string name="capture_notification_text">Запись датчика продолжается в фоне.</string>
     <string name="capture_notification_stop">Остановить запись</string>
+    <string name="capture_notification_failure_title">Не удалось остановить запись</string>
+    <string name="capture_notification_failure_text">Не закрывайте Woona, проверьте свободное место и повторите остановку.</string>
+    <string name="capture_notification_retry">Повторить остановку</string>
 
     <string name="nav_overview">Обзор</string>
     <string name="nav_charts">Графики</string>
@@ -137,6 +140,7 @@
     <string name="transport_profile_selected_next_connection">Выбран профиль BLE-транспорта: %1$s. Изменения применятся при следующем подключении.</string>
 
     <string name="packet_queue_overflow_stopped">Очередь пакетов переполнена. Захват остановлен.</string>
+    <string name="polar_reconnect_before_recording">Polar не готов к этой записи. Перед следующей записью переподключите Polar.</string>
     <string name="failed_persist_raw_fragment">Не удалось сохранить сырой BLE-фрагмент</string>
     <string name="failed_reset_capture_session">Не удалось сбросить сессию захвата</string>
     <string name="failed_flush_buffered_output">Не удалось сбросить буферизированный вывод</string>

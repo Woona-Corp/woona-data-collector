@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -1009,8 +1011,10 @@ private fun QuestionnaireDialog(
         Surface(
             modifier = Modifier
                 .fillMaxSize()
-                .safeDrawingPadding(),
+                .safeDrawingPadding()
+                .imePadding(),
         ) {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val view = LocalView.current
             val focusManager = LocalFocusManager.current
             val keyboard = LocalSoftwareKeyboardController.current
@@ -1021,6 +1025,13 @@ private fun QuestionnaireDialog(
                 )
                 onDispose {}
             }
+            val scrollState = rememberScrollState()
+            // On short windows (including IME-resized dialogs) reserve enough
+            // space for the form instead of allowing the header to consume it.
+            val compactHeader = maxHeight < 240.dp
+            LaunchedEffect(conflict, operationError, externalError) {
+                if (conflict != null || operationError != null || externalError != null) scrollState.scrollTo(0)
+            }
             Column {
                 Column(
                     modifier = Modifier
@@ -1028,26 +1039,28 @@ private fun QuestionnaireDialog(
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text(questionnaireText(title, language), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Text(questionnaireText(subtitle, language), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        tr(
-                            language,
-                            "Answered: ${progress.first} of ${progress.second}",
-                            "Заполнено: ${progress.first} из ${progress.second}",
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    if (errorCount > 0) {
+                    if (!compactHeader) {
+                        Text(questionnaireText(title, language), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                        Text(questionnaireText(subtitle, language), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
                             tr(
                                 language,
-                                "$errorCount fields need attention",
-                                "Проверьте поля: $errorCount",
+                                "Answered: ${progress.first} of ${progress.second}",
+                                "Заполнено: ${progress.first} из ${progress.second}",
                             ),
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = MaterialTheme.typography.bodySmall,
                         )
+                        if (errorCount > 0) {
+                            Text(
+                                tr(
+                                    language,
+                                    "$errorCount fields need attention",
+                                    "Проверьте поля: $errorCount",
+                                ),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (canDismiss) {
@@ -1074,42 +1087,45 @@ private fun QuestionnaireDialog(
                         }
                     }
                     if (isSaving) Text(tr(language, "Saving and checking the result…", "Сохраняем и проверяем результат…"), modifier = Modifier.testTag("questionnaire.saving"))
-                    conflict?.let { latest ->
-                        Text(tr(language, "HTTP 409: server revision ${latest.revision}. Your draft remains in this window. Review the server answers before choosing a version. Original capture files are preserved.",
-                            "HTTP 409: на сервере версия ${latest.revision}. Ваш черновик остаётся в этом окне. Проверьте ответы сервера перед выбором версии. Исходные файлы записи сохраняются."), color = MaterialTheme.colorScheme.error)
-                        androidx.compose.foundation.text.selection.SelectionContainer {
-                            Text(latest.questionnaire.toJson(), modifier = Modifier.heightIn(max = 120.dp).verticalScroll(rememberScrollState()).testTag("questionnaire.serverAnswers"))
-                        }
-                        TextButton(onClick = { onReviewedRevision(latest.revision); conflict = null
-                            operationError = tr(language, "Your edits are retained. Press Save to replace the reviewed server answers.", "Ваши правки оставлены. Нажмите Сохранить, чтобы заменить проверенные ответы сервера.")
-                        }) { Text(tr(language, "Keep my edits for revision ${latest.revision}", "Оставить мои правки для версии ${latest.revision}")) }
-                        onUseServerAnswers?.let { use -> TextButton(onClick = { use(latest.questionnaire); onReviewedRevision(latest.revision); conflict = null; operationError = null }) {
-                            Text(tr(language, "Load server answers and retain my draft", "Загрузить ответы сервера и сохранить мой черновик"))
-                        } }
-                    }
-                    onRestoreDraft?.let { restore -> TextButton(onClick = restore, enabled = !isSaving) { Text(tr(language, "Restore my edits", "Вернуть мои правки")) } }
-                    (operationError ?: externalError)?.let { error ->
-                        androidx.compose.foundation.text.selection.SelectionContainer {
-                            Text(error, color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.testTag("questionnaire.saveError"))
-                        }
-                    }
                 }
                 Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    item {
+                    Column(modifier = Modifier.fillMaxSize().verticalScroll(scrollState).testTag("questionnaire.scroll")) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            conflict?.let { latest ->
+                                Text(tr(language, "HTTP 409: server revision ${latest.revision}. Your draft remains in this window. Review the server answers before choosing a version. Original capture files are preserved.",
+                                    "HTTP 409: на сервере версия ${latest.revision}. Ваш черновик остаётся в этом окне. Проверьте ответы сервера перед выбором версии. Исходные файлы записи сохраняются."), color = MaterialTheme.colorScheme.error)
+                                androidx.compose.foundation.text.selection.SelectionContainer {
+                                    Text(latest.questionnaire.toJson(), modifier = Modifier.heightIn(max = 120.dp).verticalScroll(rememberScrollState()).testTag("questionnaire.serverAnswers"))
+                                }
+                                TextButton(onClick = { onReviewedRevision(latest.revision); conflict = null
+                                    operationError = tr(language, "Your edits are retained. Press Save to replace the reviewed server answers.", "Ваши правки оставлены. Нажмите Сохранить, чтобы заменить проверенные ответы сервера.")
+                                }) { Text(tr(language, "Keep my edits for revision ${latest.revision}", "Оставить мои правки для версии ${latest.revision}")) }
+                                onUseServerAnswers?.let { use -> TextButton(onClick = { use(latest.questionnaire); onReviewedRevision(latest.revision); conflict = null; operationError = null }) {
+                                    Text(tr(language, "Load server answers and retain my draft", "Загрузить ответы сервера и сохранить мой черновик"))
+                                } }
+                            }
+                            onRestoreDraft?.let { restore -> TextButton(onClick = restore, enabled = !isSaving) { Text(tr(language, "Restore my edits", "Вернуть мои правки")) } }
+                            (operationError ?: externalError)?.let { error ->
+                                androidx.compose.foundation.text.selection.SelectionContainer {
+                                    Text(error, color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.testTag("questionnaire.saveError"))
+                                }
+                            }
+                        }
                         CompositionLocalProvider(LocalFirstErrorKey provides firstErrorKey, LocalQuestionnaireLanguage provides language) {
-                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { content() }
+                            Column(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                            ) { content() }
                         }
                     }
+                    if (isSaving) Box(Modifier.fillMaxSize().clearAndSetSemantics { }.clickable(
+                        interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}))
                 }
-                if (isSaving) Box(Modifier.fillMaxSize().clearAndSetSemantics { }.clickable(
-                    interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}))
-                }
+            }
             }
         }
     }

@@ -23,7 +23,6 @@ import android.view.Surface
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 
 data class AndroidVideoStartInfo(
     val mediaRecorderStartedMonotonicNs: Long,
@@ -44,7 +43,12 @@ data class AndroidVideoStopInfo(
     val stoppedMonotonicNs: Long,
     val durationNs: Long?,
     val firstVideoSamplePtsUs: Long,
+    val startInfo: AndroidVideoStartInfo? = null,
 )
+
+/** Stop has not been observed to finish; retry stop before starting another recording. */
+class VideoStopPendingException(message: String, cause: Throwable? = null) :
+    IllegalStateException(message, cause)
 
 class AndroidVideoRecorder(
     context: Context,
@@ -82,15 +86,25 @@ class AndroidVideoRecorder(
     private var recorder: MediaRecorder? = null
     private var outputFile: File? = null
     private var firstFrameMonotonicNs: Long? = null
+    @Volatile private var firstFrameInfo: AndroidVideoStartInfo? = null
+    private class StopOperation {
+        val latch = CountDownLatch(1)
+        var result: AndroidVideoStopInfo? = null
+        var failure: Throwable? = null
+    }
+    // Guarded by lock; the operation remains available until a caller observes completion.
+    private var pendingStop: StopOperation? = null
     @Volatile
     private var recorderStarted = false
     private var mediaRecorderStartedMonotonicNs: Long? = null
+    @Volatile
     private var startGeneration = 0L
     private var sessionGeneration = 0L
     private var cameraOpening = false
     private var cameraGeneration = 0L
     private var onStarted: ((AndroidVideoStartInfo) -> Unit)? = null
     private var onError: ((String, Throwable?) -> Unit)? = null
+    private var lastFailure: Pair<String, Throwable?>? = null
 
     fun start(
         file: File,
@@ -98,24 +112,29 @@ class AndroidVideoRecorder(
         onError: (String, Throwable?) -> Unit,
     ): Boolean {
         synchronized(lock) {
-            if (active) return false
+            if (active || pendingStop != null) return false
             active = true
             stopRequested = false
             outputFile = file
             firstFrameMonotonicNs = null
+            firstFrameInfo = null
             recorderStarted = false
             mediaRecorderStartedMonotonicNs = null
+            lastFailure = null
             startGeneration++
             this.onStarted = onStarted
             this.onError = onError
         }
         file.parentFile?.mkdirs()
         if (file.exists() && file.length() > 0L) {
-            synchronized(lock) { active = false }
-            onError?.invoke("Video file already exists; start a new recording", null)
+            synchronized(lock) {
+                active = false
+                lastFailure = "Video file already exists; start a new recording" to null
+            }
+            onError.invoke("Video file already exists; start a new recording", null)
             return false
         }
-        cameraHandler.post {
+        if (!cameraHandler.post {
             val openedCamera = camera
             if (openedCamera == null) {
                 openCamera()
@@ -124,6 +143,13 @@ class AndroidVideoRecorder(
                 session = null
                 configureRecordingSession(openedCamera, selectCameraId())
             }
+        }) {
+            synchronized(lock) {
+                active = false
+                lastFailure = "Unable to schedule camera start" to null
+            }
+            onError.invoke("Unable to schedule camera start", null)
+            return false
         }
         val generation = synchronized(lock) { startGeneration }
         cameraHandler.postDelayed(
@@ -159,19 +185,60 @@ class AndroidVideoRecorder(
     }
 
     fun stop(timeoutMillis: Long = 4_000L): AndroidVideoStopInfo? {
-        if (!active) return null
-        stopRequested = true
-        val result = AtomicReference<AndroidVideoStopInfo?>()
-        val latch = CountDownLatch(1)
-        cameraHandler.post {
-            result.set(stopOnCameraThread())
-            latch.countDown()
+        val operation = synchronized(lock) {
+            pendingStop ?: run {
+                if (!active) return null
+                stopRequested = true
+                val created = StopOperation()
+                pendingStop = created
+                // Post while holding the lock so no other caller can observe an unposted operation.
+                val posted = try {
+                    cameraHandler.post {
+                        try {
+                            created.result = stopOnCameraThread()
+                        } catch (failure: Throwable) {
+                            created.failure = failure
+                        } finally {
+                            created.latch.countDown()
+                        }
+                    }
+                } catch (failure: RuntimeException) {
+                    pendingStop = null
+                    stopRequested = false
+                    throw VideoStopPendingException("Unable to post camera stop; retry stop", failure)
+                }
+                if (!posted) {
+                    pendingStop = null
+                    stopRequested = false
+                    throw VideoStopPendingException("Unable to post camera stop; retry stop")
+                }
+                created
+            }
         }
-        latch.await(timeoutMillis, TimeUnit.MILLISECONDS)
-        return result.get()
+        val completed = try {
+            operation.latch.await(timeoutMillis, TimeUnit.MILLISECONDS)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw VideoStopPendingException("Interrupted while waiting for camera stop; retry stop", interrupted)
+        }
+        if (!completed) throw VideoStopPendingException("Camera stop is still pending; retry stop")
+        // An unexpected stop exception leaves camera/file state unknown. Keep
+        // the failed operation latched rather than allowing a later call to
+        // interpret inactive as a successful stop.
+        operation.failure?.let { throw IllegalStateException("Camera stop failed unexpectedly", it) }
+        synchronized(lock) {
+            if (pendingStop === operation) pendingStop = null
+        }
+        return operation.result
     }
 
     fun isActive(): Boolean = active
+
+    /** The current recording's asynchronous camera failure, retained until the next start. */
+    fun currentFailure(): Pair<String, Throwable?>? = synchronized(lock) { lastFailure }
+
+    /** True until a stop result (including null) has been observed by stop(). */
+    fun hasPendingStop(): Boolean = synchronized(lock) { pendingStop != null }
 
     @SuppressLint("MissingPermission")
     private fun openCamera() {
@@ -188,7 +255,6 @@ class AndroidVideoRecorder(
                         cameraOpening = false
                         if (stopRequested) {
                             device.close()
-                            stopOnCameraThread()
                             return
                         }
                         camera = device
@@ -268,6 +334,7 @@ class AndroidVideoRecorder(
         startRecorder: Boolean = true,
     ) {
         val generation = ++sessionGeneration
+        val recordingGeneration = synchronized(lock) { startGeneration }
         try {
             val characteristics = cameraManager.getCameraCharacteristics(cameraId)
             val size = selectVideoSize(characteristics)
@@ -302,7 +369,7 @@ class AndroidVideoRecorder(
                             return
                         }
                         if (stopRequested) {
-                            stopOnCameraThread()
+                            captureSession.close()
                             return
                         }
                         session = captureSession
@@ -316,7 +383,7 @@ class AndroidVideoRecorder(
                             captureSession.setRepeatingRequest(
                                 request,
                                 if (startRecorder) {
-                                    firstFrameCallback(cameraId, characteristics, size, frameRate, rotation)
+                                    firstFrameCallback(cameraId, characteristics, size, frameRate, rotation, recordingGeneration)
                                 } else {
                                     null
                                 },
@@ -351,6 +418,7 @@ class AndroidVideoRecorder(
         size: Size,
         frameRate: Range<Int>,
         rotation: Int,
+        recordingGeneration: Long,
     ) = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureStarted(
             session: CameraCaptureSession,
@@ -358,7 +426,8 @@ class AndroidVideoRecorder(
             timestamp: Long,
             frameNumber: Long,
         ) {
-            if (!recorderStarted || firstFrameMonotonicNs != null) return
+            if (synchronized(lock) { startGeneration != recordingGeneration || !active } ||
+                !recorderStarted || firstFrameMonotonicNs != null) return
             val timestampSource = characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
             val isRealtime = timestampSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
             val callbackMonotonicNs = monotonicNanos()
@@ -378,7 +447,13 @@ class AndroidVideoRecorder(
                 frameRate = frameRate.upper,
                 rotationDegrees = rotation,
             )
-            mainHandler.post { onStarted?.invoke(info) }
+            firstFrameInfo = info
+            val callback = synchronized(lock) {
+                if (startGeneration == recordingGeneration) onStarted else null
+            }
+            mainHandler.post {
+                if (startGeneration == recordingGeneration) callback?.invoke(info)
+            }
         }
     }
 
@@ -408,17 +483,19 @@ class AndroidVideoRecorder(
             stoppedMonotonicNs = stoppedAt,
             durationNs = startedAt?.let { (stoppedAt - it).coerceAtLeast(0L) },
             firstVideoSamplePtsUs = requireNotNull(firstVideoSamplePtsUs),
+            startInfo = firstFrameInfo,
         ) else null
     }
 
     private fun fail(message: String, throwable: Throwable?) {
-        val failedGeneration = startGeneration
-        val errorCallback = onError
-        releaseSession()
-        synchronized(lock) {
+        val (failedGeneration, errorCallback) = synchronized(lock) {
+            val callback = startGeneration to onError
+            if (active) lastFailure = message to throwable
+            releaseSession()
             active = false
             stopRequested = false
             recorderStarted = false
+            callback
         }
         mainHandler.post { if (startGeneration == failedGeneration) errorCallback?.invoke(message, throwable) }
     }

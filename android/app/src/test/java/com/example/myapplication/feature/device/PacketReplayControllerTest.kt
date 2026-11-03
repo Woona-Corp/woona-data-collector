@@ -16,6 +16,57 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class PacketReplayControllerTest {
     @Test
+    fun stoppedReplayReportsWorkerUntilInFlightSubmissionExits() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val controller = createController(submitFragment = {
+            entered.countDown()
+            // Simulate a source/submit already in progress that does not stop
+            // immediately when its thread is interrupted.
+            var done = false
+            while (!done) {
+                try { done = release.await(5, TimeUnit.SECONDS) }
+                catch (_: InterruptedException) { }
+            }
+            PacketSubmitResult.OVERFLOW
+        })
+        try {
+            controller.startReplay(validPacket())
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            controller.stop()
+            assertTrue("A stopped worker can still be inside submit", controller.hasPendingWork())
+            release.countDown()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (controller.hasPendingWork() && System.nanoTime() < deadline) Thread.yield()
+            assertFalse("Worker should be retired after it exits", controller.hasPendingWork())
+        } finally { release.countDown(); controller.close() }
+    }
+
+    @Test
+    fun stoppedReplayWaitsForLifecycleCallbackEvenAfterWorkerExits() {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val worker = java.util.concurrent.atomic.AtomicReference<Thread>()
+        val controller = createController(
+            onReplayStarted = { started.countDown(); release.await(5, TimeUnit.SECONDS) },
+            callbackDispatcher = { callback ->
+                Thread(callback, "replay-lifecycle-test").apply { isDaemon = true; start() }
+                true
+            },
+        )
+        try {
+            controller.startReplay { worker.set(Thread.currentThread()); validPacket().inputStream() }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            controller.stop()
+            requireNotNull(worker.get()).join(2_000)
+            assertFalse("Replay worker should have exited", worker.get().isAlive)
+            assertTrue("An already-running lifecycle callback must remain in the barrier", controller.hasPendingWork())
+            release.countDown()
+            eventually { !controller.hasPendingWork() }
+        } finally { release.countDown(); controller.close() }
+    }
+
+    @Test
     fun startReplay_invalidFileFailsDuringPreparationWithoutSubmitting() {
         val errorLatch = CountDownLatch(1)
         val stoppedLatch = CountDownLatch(1)

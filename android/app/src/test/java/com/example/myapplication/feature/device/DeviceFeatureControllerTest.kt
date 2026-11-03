@@ -29,7 +29,7 @@ class DeviceFeatureControllerTest {
         controller.onPause()
         assertEquals(0, ble.disconnectCalls)
         assertTrue(controller.shouldRetainConnection())
-        controller.onDisconnectRequested() // Explicit confirmed user action still works.
+        controller.onDisconnectRequested().get(5, java.util.concurrent.TimeUnit.SECONDS) // Explicit confirmed user action still works.
         assertEquals(1, ble.disconnectCalls)
         assertFalse(controller.shouldRetainConnection())
     }
@@ -55,7 +55,7 @@ class DeviceFeatureControllerTest {
         assertEquals(0, ble.disconnectCalls)
         assertTrue(controller.isV2PreviewConnection())
         assertFalse(controller.isV2PreviewForeground())
-        controller.onDisconnectRequested()
+        controller.onDisconnectRequested().get(5, java.util.concurrent.TimeUnit.SECONDS)
         assertEquals(1, ble.disconnectCalls)
         assertFalse(controller.isV2PreviewConnection())
         assertFalse(capture.finishCaptureCalled)
@@ -513,7 +513,7 @@ class DeviceFeatureControllerTest {
         controller.onConnectRequested("AA:BB")
         now = 2_000L
         controller.onCaptureReady()
-        controller.onDisconnectRequested()
+        controller.onDisconnectRequested().get(5, java.util.concurrent.TimeUnit.SECONDS)
         now = 9_000L
         val intent = controller.createCsvShareIntent(ContextWrapper(null))
 
@@ -700,7 +700,7 @@ class DeviceFeatureControllerTest {
             fileShareIntentFactory = FakeFileShareIntentFactory(),
         )
 
-        controller.onDisconnectRequested()
+        controller.onDisconnectRequested().get(5, java.util.concurrent.TimeUnit.SECONDS)
 
         assertTrue(controller.canSharePacketFile())
         assertTrue(controller.canShareCsvFile())
@@ -722,23 +722,11 @@ class DeviceFeatureControllerTest {
             packetCaptureController = capture,
         )
 
-        controller.onDisconnectRequested()
+        controller.onDisconnectRequested().get(5, java.util.concurrent.TimeUnit.SECONDS)
 
         assertTrue(capture.stopCaptureCalled)
         assertFalse(capture.flushCalled)
         assertEquals(1, ble.disconnectCalls)
-    }
-
-    @Test
-    fun finishCaptureForExport_drainsCaptureWithoutResettingSession() {
-        val capture = FakePacketCaptureController()
-        val controller = createController(packetCaptureController = capture)
-
-        assertTrue(controller.finishCaptureForExport())
-
-        assertTrue(capture.finishCaptureCalled)
-        assertEquals(2_000L, capture.finishCaptureTimeoutMillis)
-        assertTrue(capture.flushCalled)
     }
 
     @Test
@@ -799,7 +787,7 @@ class DeviceFeatureControllerTest {
         val packetSnapshot = requireNotNull(shareFactory.sharedFile)
         assertTrue(packetSnapshot.exists())
 
-        controller.onDisconnectRequested()
+        controller.onDisconnectRequested().get(5, java.util.concurrent.TimeUnit.SECONDS)
 
         assertTrue(!packetSnapshot.exists())
 

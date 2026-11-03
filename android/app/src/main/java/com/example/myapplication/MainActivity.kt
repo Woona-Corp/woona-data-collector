@@ -1,6 +1,7 @@
 package com.example.myapplication
 
 import android.Manifest
+import android.database.sqlite.SQLiteDatabaseLockedException
 import android.os.Bundle
 import android.os.CancellationSignal
 import android.util.Log
@@ -28,6 +29,8 @@ import com.example.myapplication.data.profileSyncRecord
 import com.example.myapplication.data.normalizeAccountId
 import com.example.myapplication.data.acceptServerRecording
 import com.example.myapplication.data.SessionQuestionnaire
+import com.example.myapplication.data.ActivityDatabase
+import com.example.myapplication.data.PendingHeartPrompts
 import com.example.myapplication.data.WoonaDatabase
 import com.example.myapplication.data.artifactDownloadTarget
 import com.example.myapplication.data.markArtifactDownloaded
@@ -61,6 +64,7 @@ import com.example.myapplication.sync.ServerSettingsDialog
 import com.example.myapplication.sync.ServerSettingsStore
 import com.example.myapplication.sync.ServerApiClient
 import com.example.myapplication.sync.ServerSyncScheduler
+import com.example.myapplication.sync.LocalRetirementCleanupWorker
 import com.example.myapplication.sync.ServerSyncStatus
 import com.example.myapplication.sync.ServerSyncUiState
 import com.example.myapplication.ui.theme.AppThemeEntryPoint
@@ -88,7 +92,8 @@ class MainActivity : ComponentActivity() {
     private val appThemePreferences by lazy { AppThemePreferences(applicationContext) }
     private val transportPreferences by lazy { BleTransportProfilePreferences(applicationContext) }
     private val serverSettingsStore by lazy { ServerSettingsStore(applicationContext) }
-    private val woonaDatabase by lazy { WoonaDatabase(applicationContext) }
+    private val woonaDatabase by lazy { ActivityDatabase.get(applicationContext) }
+    private val pendingHeartPrompts by lazy { PendingHeartPrompts(applicationContext) }
     private val profilePreferences by lazy {
         getSharedPreferences(PROFILE_PREFERENCES_NAME, MODE_PRIVATE)
     }
@@ -119,7 +124,7 @@ class MainActivity : ComponentActivity() {
     private val historyGeneration = java.util.concurrent.atomic.AtomicLong()
     private data class PendingRecordingChange(val id: String, val accountId: String?, val generation: Long)
     private data class HistoryLoadResult(val rows: List<Recording>, val total: Int,
-        val cursor: com.example.myapplication.data.RecordingHistoryCursor?, val changedRecording: Recording?)
+        val cursor: com.example.myapplication.data.RecordingHistoryCursor?, val changedRecording: Recording?, val pendingHeart: Recording?)
     private var recordingChangeGeneration = 0L
     private var pendingRecordingChange: PendingRecordingChange? = null
     private var localHistorySummary by mutableStateOf("")
@@ -154,7 +159,6 @@ class MainActivity : ComponentActivity() {
     private var pendingReplayQuestionnaire: SessionQuestionnaire? = null
     private var sessionPreparationError by mutableStateOf<String?>(null)
     private var isChartFullscreenActive = false
-    private var isStopSessionInProgress = false
     private var isCameraPermissionRequestInProgress = false
     private var pendingForegroundCaptureStart = false
     private var startCaptureAfterCameraPermission = false
@@ -213,19 +217,20 @@ class MainActivity : ComponentActivity() {
         // so a stale questionnaire draft cannot produce a 422 upload.
         val questionnaire = (pendingReplayQuestionnaire ?: return@registerForActivityResult)
             .copy(videoRequested = false)
-        val recording = runCatching {
-            woonaDatabase.beginRecording(
-                profileId = profileId,
-                source = RecordingSource.REPLAY,
-                questionnaire = questionnaire,
-            )
+        runCatching {
+            deviceFeatureController.createRecordingSession {
+                woonaDatabase.beginRecording(
+                    profileId = profileId,
+                    source = RecordingSource.REPLAY,
+                    questionnaire = questionnaire,
+                )
+            }
         }.getOrElse {
             Log.e(TAG, "Failed to prepare replay recording", it)
             sessionPreparationError = (if (selectedLanguage == AppLanguage.RUSSIAN) "Не удалось сохранить анкету и создать воспроизведение. Черновик остаётся открытым; повторите выбор файла." else "Failed to save the questionnaire and create replay. Your draft remains open; select the file again.") + "\n" + it.toString()
             isSessionQuestionnaireVisible = true
             return@registerForActivityResult
         }
-        deviceFeatureController.beginRecordingSession(recording)
         deviceFeatureController.startReplay { cancellationToken ->
             val cancellationSignal = CancellationSignal()
             cancellationToken.invokeOnCancellation(cancellationSignal::cancel)
@@ -244,28 +249,47 @@ class MainActivity : ComponentActivity() {
     }
 
     private val deviceFeatureController: DeviceFeatureController by lazy {
+        val app = applicationContext
+        val owner = java.lang.ref.WeakReference(this)
+        val controllerLanguage = AppLanguagePreferences(app)
         DeviceFeatureControllerHolder.obtain(
-            onRecordingChanged = ::handleRecordingChanged,
+            onRecordingChanged = { owner.get()?.handleRecordingChanged() },
+            onRecordingFinalizing = { recording ->
+                // Persist the intent first. If the process dies before the DB
+                // commit, startup recovery marks the recording interrupted and
+                // can still find this pending prompt. Never finalize if the
+                // durable intent could not be written.
+                if (recording.questionnaire?.sessionKind == "heart" && recording.questionnaire.heartQuestionnaire == null &&
+                    !PendingHeartPrompts(app).add(recording.id)) {
+                    throw java.io.IOException("Could not persist the pending heart questionnaire prompt")
+                }
+            },
+            onRecordingFinalized = { LocalRetirementCleanupWorker.enqueue(app) },
+            onCaptureLifecycleChanged = { active ->
+                if (active) {
+                    val activity = owner.get()
+                    if (activity != null && !activity.isDestroyed) {
+                        CaptureForegroundService.start(activity, activity.deviceFeatureController.isVideoRequested(), activity.deviceFeatureController.captureIdentity())
+                    } else {
+                        // No visible Activity means camera promotion is not allowed.
+                        CaptureForegroundService.start(app)
+                    }
+                } else {
+                    CaptureForegroundService.stop(app)
+                }
+            },
         ) {
             DeviceFeatureModuleEntryPoint.create(
-                context = applicationContext,
+                context = app,
                 filesDir = filesDir,
                 fileProviderAuthority = "$packageName.provider",
                 serviceUuid = serviceUuid,
                 characteristicUuid = characteristicUuid,
                 descriptorUuid = descriptorUuid,
                 initialTransportProfile = transportPreferences.selectedTransportProfile(),
-                appTextResolver = appTextResolver,
+                appTextResolver = AppTextResolver(app) { controllerLanguage.selectedLanguage() },
                 woonaDatabase = woonaDatabase,
                 snapshotDirectory = File(cacheDir, "woona_export_snapshots"),
-                onRecordingChanged = ::handleRecordingChanged,
-                onCaptureLifecycleChanged = { active ->
-                    if (active) {
-                        CaptureForegroundService.start(this@MainActivity, deviceFeatureController.isVideoRequested(), deviceFeatureController.captureIdentity())
-                    } else {
-                        CaptureForegroundService.stop(applicationContext)
-                    }
-                },
             )
         }
     }
@@ -584,7 +608,18 @@ class MainActivity : ComponentActivity() {
                             HeartQuestionnaireDialog(
                                 language = selectedLanguage,
                                 initial = editingRecording?.questionnaire?.heartQuestionnaire ?: woonaDatabase.heartQuestionnaireDraft(id),
-                                onDismiss = { heartQuestionnaireRecordingId = null; editingRecording = null },
+                                onDismiss = {
+                                    if (pendingHeartPrompts.remove(id)) {
+                                        if (pendingRecordingChange?.id == id) pendingRecordingChange = null
+                                        heartQuestionnaireRecordingId = null; editingRecording = null
+                                        loadRecordingHistory()
+                                    } else {
+                                        Log.e(TAG, "Could not acknowledge heart questionnaire dismissal")
+                                        android.widget.Toast.makeText(this@MainActivity, if (selectedLanguage == AppLanguage.RUSSIAN)
+                                            "Не удалось сохранить закрытие анкеты. Повторите попытку."
+                                            else "Could not save the questionnaire dismissal. Please retry.", android.widget.Toast.LENGTH_LONG).show()
+                                    }
+                                },
                                 onSave = {},
                                 onSaveAtRevision = { heart, revision ->
                                     val displayed = requireNotNull(editingRecording ?: woonaDatabase.recording(id)) { "Исходная запись больше недоступна / Original recording is unavailable" }
@@ -597,7 +632,7 @@ class MainActivity : ComponentActivity() {
                     editingRecording?.takeIf { it.questionnaire?.sessionKind != "heart" }?.let { recording ->
                         androidx.compose.runtime.key("session", recording.id) {
                             SessionQuestionnaireDialog(language = selectedLanguage, initial = recording.questionnaire,
-                                onDismiss = { editingRecording = null },
+                                onDismiss = { editingRecording = null; loadRecordingHistory() },
                                 onSave = {}, onSaveAtRevision = { answers, revision -> saveEditedQuestionnaire(recording, answers, revision) })
                         }
                     }
@@ -673,7 +708,10 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.IO) {
                     serverOperationLock.withLock {
                         if (!CaptureServiceBridge.isRunning && !DeviceFeatureControllerHolder.hasActiveCapture()) {
-                            WoonaDatabase(applicationContext).use { it.interruptUnfinished(); it.applyServerDeletions(emptyList()) }
+                            WoonaDatabase(applicationContext).use {
+                                pendingHeartPrompts.recoverInterrupted(it)
+                                it.applyServerDeletions(emptyList())
+                            }
                         }
                     }
                 }
@@ -685,6 +723,9 @@ class MainActivity : ComponentActivity() {
                     deviceFeatureController.onResume()
                     ensureCaptureService()
                 }
+                // A stop can finish after the old Activity saved its state but
+                // before this Activity attached its controller listener.
+                loadRecordingHistory()
                 refreshServerState()
                 observeServerWork()
                 ServerSyncScheduler.refreshPendingNetworkPolicy(applicationContext) { failure ->
@@ -774,7 +815,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (startupReady) { deviceFeatureController.onResume(); refreshServerState(); ensureCaptureService() }
+        if (startupReady) {
+            deviceFeatureController.onResume()
+            loadRecordingHistory()
+            refreshServerState()
+            ensureCaptureService()
+        }
     }
 
     override fun onStop() {
@@ -789,7 +835,6 @@ class MainActivity : ComponentActivity() {
         if (startupReady && !deviceFeatureController.shouldRetainConnection()) {
             DeviceFeatureControllerHolder.releaseIfInactive(deviceFeatureController)
             CaptureServiceBridge.onStopRequested = null
-            woonaDatabase.close()
         }
         backgroundExecutor.shutdownNow()
         super.onDestroy()
@@ -846,21 +891,15 @@ class MainActivity : ComponentActivity() {
 
     private fun stopSession() {
         pendingForegroundCaptureStart = false
-        if (isStopSessionInProgress) return
-        isStopSessionInProgress = true
-        lifecycleScope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    deviceFeatureController.onDisconnectRequested()
-                    serverOperationLock.withLock { woonaDatabase.applyServerDeletions(emptyList()) }
-                }
-                ServerSyncScheduler.enqueuePending(applicationContext)
-                refreshProfilesAndRecordings()
-                refreshServerState()
-            } finally {
-                isStopSessionInProgress = false
+        val controller = deviceFeatureController
+        if (controller.isCaptureActive()) {
+            controller.captureIdentity()?.let {
+                pendingRecordingChange = PendingRecordingChange(it, serverSettingsStore.get().accountId, ++recordingChangeGeneration)
             }
         }
+        // The retained capture owner reserves and runs the stop independently of
+        // this Activity; duplicate UI/notification requests share the same stop.
+        DeviceFeatureControllerHolder.requestStop(controller)
     }
 
     private fun onPreviewSurfaceChanged(surface: Surface?) {
@@ -887,12 +926,13 @@ class MainActivity : ComponentActivity() {
         check(startupReady && !accountBusy) { "Дождитесь восстановления локальных данных и операции аккаунта / Wait for local recovery and account operation" }
         check(!deviceFeatureController.isV2PreviewConnection()) { getString(R.string.v2_ordinary_recording_unavailable) }
         val profileId = requireNotNull(selectedProfileId) { "Выберите карточку животного / Select an animal profile" }
-        val recording = woonaDatabase.beginRecording(
-            profileId = profileId,
-            source = RecordingSource.LIVE,
-            questionnaire = questionnaire,
-        )
-        deviceFeatureController.beginRecordingSession(recording)
+        deviceFeatureController.createRecordingSession {
+            woonaDatabase.beginRecording(
+                profileId = profileId,
+                source = RecordingSource.LIVE,
+                questionnaire = questionnaire,
+            )
+        }
         deviceFeatureController.onConnectRequested(address)
         if (
             questionnaire.videoRequested &&
@@ -908,7 +948,6 @@ class MainActivity : ComponentActivity() {
     private fun selectProfile(profileId: String) {
         if (accountBusy || isServerRestoreInProgress || deviceFeatureController.isCaptureActive()) return
         if (dogProfiles.none { it.id == profileId }) return
-        pendingRecordingChange = null
         selectedProfileId = profileId
         profilePreferences.edit().putString(LAST_PROFILE_ID_KEY, profileId).apply()
         showingAllRecordings = false
@@ -962,6 +1001,7 @@ class MainActivity : ComponentActivity() {
         historyProfileId = profileId
         val generation = historyGeneration.incrementAndGet()
         val recordingChange = pendingRecordingChange
+        val pendingHeartIds = pendingHeartPrompts.ids()
         val previous = if (append) recentRecordings else emptyList()
         val after = if (append) historyCursor else null
         val knownTotal = if (append) recordingsTotal else null
@@ -980,28 +1020,38 @@ class MainActivity : ComponentActivity() {
                 val changed = recordingChange?.let { request ->
                     loaded.firstOrNull { it.id == request.id } ?: woonaDatabase.recording(request.id)
                 }
-                HistoryLoadResult(loaded.toList(), total ?: 0, cursor, changed)
+                val pendingHeart = pendingHeartIds.asSequence().mapNotNull { id ->
+                    loaded.firstOrNull { it.id == id } ?: woonaDatabase.recording(id)
+                }.firstOrNull { recording ->
+                    recording.profileId == profileId && recording.status.value in setOf("completed", "failed", "interrupted") &&
+                        recording.questionnaire?.sessionKind == "heart" && recording.questionnaire.heartQuestionnaire == null
+                }
+                HistoryLoadResult(loaded.toList(), total ?: 0, cursor, changed, pendingHeart)
             }
             runOnUiThread {
                 if (isDestroyed || generation != historyGeneration.get() || selectedProfileId != profileId) return@runOnUiThread
                 recordingsLoading = false
-                result.onSuccess { (rows, total, cursor, changedRecording) ->
+                result.onSuccess { (rows, total, cursor, changedRecording, pendingHeart) ->
                     recentRecordings = (previous + rows).distinctBy { it.id }
                     recordingsTotal = maxOf(total, recentRecordings.size)
                     historyCursor = cursor
                     historyRequestedCount = recentRecordings.size
-                    if (recordingChange != null && pendingRecordingChange == recordingChange) {
+                    val terminalChange = recordingChange != null && pendingRecordingChange == recordingChange &&
+                        changedRecording?.status?.value in setOf("completed", "failed", "interrupted")
+                    if (terminalChange && (changedRecording?.questionnaire?.sessionKind != "heart" ||
+                            changedRecording.questionnaire.heartQuestionnaire != null)) {
                         pendingRecordingChange = null
-                        if (recordingChange.accountId == serverSettingsStore.get().accountId &&
-                            changedRecording?.profileId == profileId &&
-                            changedRecording.status.value in setOf("completed", "failed", "interrupted") &&
-                            changedRecording.questionnaire?.sessionKind == "heart" &&
-                            changedRecording.questionnaire.heartQuestionnaire == null &&
-                            heartQuestionnaireRecordingId == null && (!deviceFeatureController.isCaptureActive() ||
-                                deviceFeatureController.captureIdentity() == changedRecording.id)) {
-                            editingRecording = changedRecording
-                            heartQuestionnaireRecordingId = changedRecording.id
-                        }
+                    }
+                    val changedHeart = changedRecording?.takeIf {
+                        terminalChange && recordingChange?.accountId == serverSettingsStore.get().accountId &&
+                            it.profileId == profileId && it.questionnaire?.sessionKind == "heart" && it.questionnaire.heartQuestionnaire == null
+                    }
+                    val prompt = changedHeart ?: pendingHeart?.takeIf { it.id in pendingHeartPrompts.ids() }
+                    if (prompt != null && heartQuestionnaireRecordingId == null && editingRecording == null &&
+                        (!deviceFeatureController.isCaptureActive() || deviceFeatureController.captureIdentity() == prompt.id)) {
+                        editingRecording = prompt
+                        heartQuestionnaireRecordingId = prompt.id
+                        if (pendingRecordingChange?.id == prompt.id) pendingRecordingChange = null
                     }
                 }.onFailure { error ->
                     if (error !is java.util.concurrent.CancellationException) recordingsError = error.toString()
@@ -1019,9 +1069,13 @@ class MainActivity : ComponentActivity() {
                 PendingRecordingChange(it, serverSettingsStore.get().accountId, ++recordingChangeGeneration)
             }
             if (!startupReady) return@runOnUiThread
-            refreshProfilesAndRecordings()
-            ServerSyncScheduler.enqueuePending(applicationContext)
-            refreshServerState()
+            // History reads are already dispatched off the UI thread. Avoid
+            // opening SQLite synchronously here while post-stop cleanup runs.
+            loadRecordingHistory()
+            backgroundExecutor.execute {
+                try { ServerSyncScheduler.enqueuePending(applicationContext) }
+                catch (_: SQLiteDatabaseLockedException) { LocalRetirementCleanupWorker.enqueue(applicationContext) }
+            }
         }
     }
 
@@ -1035,6 +1089,11 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshServerState() {
         if (!startupReady) return
+        try { refreshServerStateUnlocked() }
+        catch (_: SQLiteDatabaseLockedException) { Log.w(TAG, "Server status refresh deferred while local database is locked") }
+    }
+
+    private fun refreshServerStateUnlocked() {
         val settings = serverSettingsStore.get()
         if (reportConfiguration != null && reportConfiguration != settings) {
             serverRecordingReports = emptyMap()
@@ -1276,6 +1335,7 @@ class MainActivity : ComponentActivity() {
                     woonaDatabase.saveSessionQuestionnaire(displayed.id, questionnaire)
                 }
             } }
+            if (heartOnly && !pendingHeartPrompts.remove(displayed.id)) Log.e(TAG, "Could not acknowledge saved heart questionnaire")
             editingRecording = null; heartQuestionnaireRecordingId = null
             handleRecordingChanged(displayed.id)
         } finally { accountBusy = false; refreshServerState() }
@@ -1405,7 +1465,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun observeServerWork() {
-        WorkManager.getInstance(applicationContext)
+        val manager = WorkManager.getInstance(applicationContext)
+        manager.getWorkInfosForUniqueWorkLiveData(LocalRetirementCleanupWorker.WORK_NAME).observe(this) { infos ->
+            if (startupReady && infos.none { !it.state.isFinished } && infos.any { it.state == androidx.work.WorkInfo.State.SUCCEEDED }) {
+                try { refreshProfilesAndRecordings(); refreshServerState() }
+                catch (_: SQLiteDatabaseLockedException) { Log.w(TAG, "Local cleanup status refresh deferred") }
+            }
+        }
+        manager
             .getWorkInfosByTagLiveData(ServerSyncScheduler.WORK_TAG)
             .observe(this) { infos ->
                 val maintenance = infos.filter { ServerSyncScheduler.MAINTENANCE_TAG in it.tags }
@@ -1414,8 +1481,12 @@ class MainActivity : ComponentActivity() {
                     .maxByOrNull { it.outputData.getString("retirement_completed_at").orEmpty() }?.outputData?.getString("retirement_error")
                 workersRunning = infos.count { ServerSyncScheduler.MAINTENANCE_TAG !in it.tags && it.state == androidx.work.WorkInfo.State.RUNNING }
                 workersQueued = infos.count { ServerSyncScheduler.MAINTENANCE_TAG !in it.tags && it.state in setOf(androidx.work.WorkInfo.State.ENQUEUED, androidx.work.WorkInfo.State.BLOCKED) }
-                refreshServerState()
-                refreshProfilesAndRecordings()
+                try {
+                    refreshServerState()
+                    refreshProfilesAndRecordings()
+                } catch (_: SQLiteDatabaseLockedException) {
+                    Log.w(TAG, "Work status refresh deferred while local database is locked")
+                }
             }
     }
 

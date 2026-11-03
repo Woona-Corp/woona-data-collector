@@ -36,12 +36,19 @@ import com.example.myapplication.storage.FileShareIntentFactory
 import com.example.myapplication.storage.SessionArchiveExporter
 import com.example.myapplication.storage.SessionArchiveMetadata
 import com.example.myapplication.storage.PolarCsvFileStore
+import com.example.myapplication.storage.PolarPersistenceException
 import com.example.myapplication.video.AndroidVideoRecorder
 import com.example.myapplication.video.AndroidVideoStartInfo
+import com.example.myapplication.video.AndroidVideoStopInfo
+import com.example.myapplication.video.VideoStopPendingException
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.time.Instant
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class DeviceFeatureController(
@@ -65,35 +72,70 @@ class DeviceFeatureController(
     private val schedule: (Runnable, Long) -> Unit = { _, _ -> },
     private val cancel: (Runnable) -> Unit = {},
     private val onConnectionAlarm: (ConnectionQuality) -> Unit = {},
-    private val onCaptureLifecycleChanged: (Boolean) -> Unit = {},
+    private val onRecoveryRetryNeeded: () -> Unit = {},
+    onCaptureLifecycleChanged: (Boolean) -> Unit = {},
 ) : AutoCloseable {
     @Volatile
     private var recordingChangedListener: () -> Unit = onRecordingChanged
+    @Volatile
+    private var recordingFinalizedListener: (Recording) -> Unit = {}
+    @Volatile
+    private var recordingFinalizingListener: (Recording) -> Unit = {}
+    @Volatile
+    private var captureLifecycleListener: (Boolean) -> Unit = onCaptureLifecycleChanged
     private val exportLock = Any()
     private var pendingTransportDiagnostics = mutableListOf<String>()
     private var awaitingCaptureReady = false
     private var exportSnapshot: SessionExportSnapshot? = null
     private var exportSessionStartMillis: Long? = null
     private var exportEpoch = 0L
-    private var currentRecordingId: String? = null
+    @Volatile private var currentRecordingId: String? = null
     private var currentRecording: Recording? = null
     private var currentRecordingDirectory: File? = null
     private var captureSyncMetadata: CaptureSyncMetadata? = null
     private var synchronizedCaptureStarted = false
+    // Remains set after a failed finalization until a new recording is admitted.
+    private var captureStopRequested = false
+    private var terminalIntent: RecordingStatus? = null
+    private data class PendingCaptureFailure(val code: String, val message: String)
+    private var pendingCaptureFailure: PendingCaptureFailure? = null
+    private var pendingPacketFailure: String? = null
+    private var pendingPolarFailure: String? = null
+    private var pendingOverflowFailure: String? = null
+    private var pendingPolarCallbacks = 0
+    private val polarFailureReported = AtomicBoolean(false)
     private var firstSensorFragmentRecorded = false
     private val connectionQualityTracker = ConnectionQualityTracker()
     private var linkMonitorRunning = false
     private var weakSinceMillis: Long? = null
     private var lastAlarmQuality: ConnectionQuality? = null
-    private var manualDisconnectPending = false
+    @Volatile private var manualDisconnectPending = false
+    private val disconnectInProgress = AtomicBoolean(false)
     @Volatile private var v2PreviewConnection = false
     @Volatile private var v2PreviewForeground = true
     private val connectionUiGeneration = AtomicLong()
-    private var pendingFinalizationStatus: RecordingStatus? = null
+    private data class FinalizationRequest(
+        val recordingId: String,
+        var status: RecordingStatus,
+        val outcome: CompletableFuture<Unit>,
+        var running: Boolean = false,
+        var statusSealed: Boolean = false,
+    )
+    private var finalizationRequest: FinalizationRequest? = null
+    private var disconnectOutcome: CompletableFuture<Unit>? = null
+    private var closeRequested = false
+    private var resourcesClosed = false
+    @Volatile private var teardownPending = false
+    @Volatile private var captureRequiresRestart = false
+    private data class PendingVideoStop(val result: AndroidVideoStopInfo?, val stoppedAt: Long)
+    // Serializes stop callers without holding the controller monitor while the
+    // camera handler is blocked or MediaRecorder is stopping.
+    private val videoStopLock = Any()
+    private var pendingVideoStop: PendingVideoStop? = null
+    private var videoCallbackGeneration = 0L
     private val finalizationRetryRunnable = Runnable {
-        val status = pendingFinalizationStatus
-        pendingFinalizationStatus = null
-        if (status != null) finalizeRecording(status)
+        val request = synchronized(this) { finalizationRequest }
+        if (request != null) dispatchFinalization(request)
     }
     private val linkMonitorRunnable: Runnable = object : Runnable {
         override fun run() {
@@ -114,7 +156,7 @@ class DeviceFeatureController(
     fun isVideoRequested(): Boolean = currentRecording?.videoRequested == true
     fun isLiveCapture(): Boolean = currentRecording?.source == RecordingSource.LIVE && isCaptureActive()
 
-    fun isCaptureActive(): Boolean = !recordingFinalized || recordingFinalizing
+    fun isCaptureActive(): Boolean = !recordingFinalized || recordingFinalizing || disconnectInProgress.get() || teardownPending
     fun isV2PreviewConnection(): Boolean = v2PreviewConnection
     fun isV2PreviewForeground(): Boolean = v2PreviewConnection && v2PreviewForeground
     fun shouldRetainConnection(): Boolean = isCaptureActive() || v2PreviewConnection
@@ -123,6 +165,18 @@ class DeviceFeatureController(
 
     fun setOnRecordingChanged(listener: () -> Unit) {
         recordingChangedListener = listener
+    }
+
+    fun setOnRecordingFinalizing(listener: (Recording) -> Unit) {
+        recordingFinalizingListener = listener
+    }
+
+    fun setOnRecordingFinalized(listener: (Recording) -> Unit) {
+        recordingFinalizedListener = listener
+    }
+
+    fun setOnCaptureLifecycleChanged(listener: (Boolean) -> Unit) {
+        captureLifecycleListener = listener
     }
 
     fun onStartScanRequested(
@@ -211,15 +265,41 @@ class DeviceFeatureController(
         }
     }
 
+    /** Reserve the idle controller before creating a row, so a concurrent stop
+     * cannot leave a new PREPARING recording behind after rejecting the start. */
+    @Synchronized
+    fun createRecordingSession(create: () -> Recording): Recording {
+        check(!closeRequested && recordingFinalized && !recordingFinalizing && !disconnectInProgress.get() && !teardownPending) {
+            "Wait for the previous capture to finish before starting another recording"
+        }
+        check(!captureRequiresRestart) { "A capture storage failure requires closing and reopening Woona before starting another recording." }
+        val recording = create()
+        beginRecordingSession(recording)
+        return recording
+    }
+
     fun beginRecordingSession(recording: Recording) {
-        cancel(finalizationRetryRunnable)
-        pendingFinalizationStatus = null
-        finalizeRecording(RecordingStatus.INTERRUPTED)
+        // A stale start request must never stop whichever recording is active.
+        // Callers must explicitly finish the prior capture before admitting this one.
         val staleSnapshot = synchronized(this) {
+            check(!closeRequested) { "Capture controller is closing" }
+            check(recordingFinalized && !recordingFinalizing && !disconnectInProgress.get() && !teardownPending) { "Previous recording is still finalizing" }
+            check(!captureRequiresRestart) { "A capture storage failure requires closing and reopening Woona before recording again" }
+            check(pendingPolarCallbacks == 0) { "Polar callbacks are still draining" }
+            cancel(finalizationRetryRunnable)
+            pendingVideoStop = null
+            videoCallbackGeneration++
             currentRecordingId = recording.id
             currentRecording = recording
             recordingFinalized = false
             synchronizedCaptureStarted = false
+            captureStopRequested = false
+            terminalIntent = null
+            pendingCaptureFailure = null
+            pendingPacketFailure = null
+            pendingPolarFailure = null
+            pendingOverflowFailure = null
+            polarFailureReported.set(false)
             firstSensorFragmentRecorded = false
             packetCaptureController.stopCapture()
             currentRecordingDirectory =
@@ -236,7 +316,7 @@ class DeviceFeatureController(
             persistSyncMetadata()
             if (recording.source == RecordingSource.LIVE) {
                 uiStateHolder.prepareVideo()
-                onCaptureLifecycleChanged(true)
+                captureLifecycleListener(true)
             }
             synchronized(exportLock) {
                 val snapshot = invalidateExportSnapshotLocked()
@@ -248,29 +328,115 @@ class DeviceFeatureController(
         notifyRecordingChanged()
     }
 
-    fun onDisconnectRequested() {
-        connectionUiGeneration.incrementAndGet()
-        manualDisconnectPending = true
-        if (v2PreviewConnection) bleSessionController.stopV2Live()
-        v2PreviewConnection = false
-        stopLinkMonitor()
-        packetReplayController?.stop()
-        pendingTransportDiagnostics.clear()
-        awaitingCaptureReady = false
-        // Preview-only V2 is not a persisted session; do not mark it COMPLETED.
-        finalizeRecording(if (uiState.v2DiscoveryRequested) {
-            RecordingStatus.INTERRUPTED
-        } else {
-            RecordingStatus.COMPLETED
-        })
-        packetCaptureController.stopCapture()
-        val staleSnapshot = synchronized(exportLock) {
-            invalidateExportSnapshotLocked()
+    /** The same process-owned outcome is returned to every concurrent stop caller. */
+    fun requestDisconnect(executor: Executor): CompletableFuture<Unit> {
+        var pendingRequest: FinalizationRequest? = null
+        var created = false
+        val outcome = synchronized(this) {
+            disconnectOutcome?.takeUnless { it.isDone }?.also { pendingRequest = finalizationRequest } ?: CompletableFuture<Unit>().also {
+                created = true
+                disconnectOutcome = it
+                disconnectInProgress.set(true)
+                teardownPending = true
+                if (!recordingFinalized) captureStopRequested = true
+            }
         }
-        deleteSnapshotFiles(staleSnapshot)
-        uiStateHolder.stopCaptureSession()
-        bleSessionController.disconnect()
-        polarSessionManager?.disconnect()
+        if (!created) {
+            pendingRequest?.let {
+                cancel(finalizationRetryRunnable)
+                dispatchFinalization(it)
+            }
+            return outcome
+        }
+        try {
+            executor.execute { beginDisconnect(executor, outcome) }
+        } catch (error: RuntimeException) {
+            failDisconnect(outcome, error)
+        }
+        return outcome
+    }
+
+    fun onDisconnectRequested(): CompletableFuture<Unit> = requestDisconnect(Executor { it.run() })
+
+    private fun beginDisconnect(executor: Executor, outcome: CompletableFuture<Unit>) {
+        try {
+            connectionUiGeneration.incrementAndGet()
+            manualDisconnectPending = true
+            if (v2PreviewConnection) bleSessionController.stopV2Live()
+            v2PreviewConnection = false
+            stopLinkMonitor()
+            packetReplayController?.stop()
+            pendingTransportDiagnostics.clear()
+            awaitingCaptureReady = false
+            val status = if (uiState.v2DiscoveryRequested) RecordingStatus.INTERRUPTED else RecordingStatus.COMPLETED
+            finalizeRecording(status).whenComplete { _, failure ->
+                if (failure != null) {
+                    failDisconnect(outcome, failure)
+                } else {
+                    try { executor.execute { finishDisconnect(outcome) } }
+                    catch (error: RuntimeException) { failDisconnect(outcome, error) }
+                }
+            }
+        } catch (error: Exception) {
+            failDisconnect(outcome, error)
+        }
+    }
+
+    private fun finishDisconnect(outcome: CompletableFuture<Unit>) {
+        try {
+            // Never tear down a packet controller while a different caller is
+            // still draining it or after a failed finalization.
+            packetCaptureController.stopCapture()
+            val staleSnapshot = synchronized(exportLock) { invalidateExportSnapshotLocked() }
+            deleteSnapshotFiles(staleSnapshot)
+            bleSessionController.disconnect()
+            polarSessionManager?.disconnect()
+            // Keep the start gate and foreground service until the old UI
+            // transition has executed, otherwise it can reset a new session.
+            runOnUiThread {
+                try {
+                    // Sensor-only capture also uses RECORDING as its session
+                    // state, although no MediaRecorder exists to finish it.
+                    if (uiState.videoState in setOf(VideoCaptureState.STARTING, VideoCaptureState.RECORDING, VideoCaptureState.STOPPING)) {
+                        uiStateHolder.videoFinished()
+                    }
+                    uiStateHolder.stopCaptureSession()
+                    FINALIZATION_EXECUTOR.execute {
+                        try {
+                            captureLifecycleListener(false)
+                            val finishedRecording = synchronized(this) {
+                                // Retire this outcome before opening the start gate. A
+                                // stop for the next recording must never reuse it.
+                                if (disconnectOutcome === outcome) disconnectOutcome = null
+                                teardownPending = false
+                                disconnectInProgress.set(false)
+                                currentRecording?.takeIf { recordingFinalized && it.source == RecordingSource.LIVE }
+                            }
+                            finishedRecording?.let { recording ->
+                                try { recordingFinalizedListener(recording) }
+                                catch (error: Exception) { Log.e("WOONA_CAPTURE", "Post-capture scheduling failed; recording is preserved", error) }
+                            }
+                            outcome.complete(Unit)
+                            closeResourcesWhenInactive()
+                        } catch (error: Exception) { failDisconnect(outcome, error) }
+                    }
+                } catch (error: Exception) { failDisconnect(outcome, error) }
+            }
+        } catch (error: Exception) {
+            failDisconnect(outcome, error)
+        }
+    }
+
+    private fun failDisconnect(outcome: CompletableFuture<Unit>, error: Throwable) {
+        Log.e("WOONA_CAPTURE", "Capture stop or teardown failed; retry is required", error)
+        showErrorOnMainThread("Failed to stop capture; retry is required", error)
+        synchronized(this) {
+            if (disconnectOutcome === outcome) {
+                disconnectOutcome = null
+                disconnectInProgress.set(false)
+            }
+        }
+        outcome.completeExceptionally(error)
     }
 
     fun onPolarScanRequested() {
@@ -286,32 +452,83 @@ class DeviceFeatureController(
         polarSessionManager?.disconnect()
     }
 
+    @Synchronized
     fun onPolarStatusChanged(status: PolarStatus) {
         uiStateHolder.updatePolarStatus(status)
-        if (status.state == PolarConnectionState.READY && synchronizedCaptureStarted && !recordingFinalized) {
+        // The stop gate and Polar start must be checked under the same lock:
+        // READY can be posted by setRecordingActive(false) during finalization.
+        val recordingCanAcceptPolar = synchronizedCaptureStarted && !recordingFinalized &&
+            !captureStopRequested && !recordingFinalizing && !disconnectInProgress.get() && !teardownPending && !closeRequested
+        if (status.state == PolarConnectionState.READY && recordingCanAcceptPolar) {
             startPolarRecording()
         }
-        if (status.state in setOf(PolarConnectionState.LOST, PolarConnectionState.FAILED) &&
-            synchronizedCaptureStarted && !recordingFinalized
-        ) {
+        if (status.state in setOf(PolarConnectionState.LOST, PolarConnectionState.FAILED) && recordingCanAcceptPolar) {
             onConnectionAlarm(ConnectionQuality.LOST)
         }
     }
 
-    fun onPolarHeartRate(frame: PolarHeartRateFrame, nowMillis: Long) = polarFileStore?.append(frame, nowMillis)
+    fun onPolarHeartRate(frame: PolarHeartRateFrame, nowMillis: Long, expectedRecordingId: String? = captureIdentity()) =
+        appendPolar(expectedRecordingId) { it.append(frame, nowMillis) }
 
-    fun onPolarEcg(frame: PolarEcgFrame, nowMillis: Long) = polarFileStore?.append(frame, nowMillis)
+    fun onPolarEcg(frame: PolarEcgFrame, nowMillis: Long, expectedRecordingId: String? = captureIdentity()) =
+        appendPolar(expectedRecordingId) { it.append(frame, nowMillis) }
 
-    fun onPolarAcceleration(frame: PolarAccelerationFrame, nowMillis: Long) = polarFileStore?.append(frame, nowMillis)
+    fun onPolarAcceleration(frame: PolarAccelerationFrame, nowMillis: Long, expectedRecordingId: String? = captureIdentity()) =
+        appendPolar(expectedRecordingId) { it.append(frame, nowMillis) }
 
-    fun finishCaptureForExport(): Boolean {
-        stopVideo()
-        packetReplayController?.stop()
-        val finished = packetCaptureController.finishCapture(CAPTURE_FINISH_TIMEOUT_MILLIS)
-        if (!finished) {
-            Log.w("BLE_SHARE", "Timed out waiting for capture queue before export")
+    private fun appendPolar(expectedRecordingId: String?, action: (PolarCsvFileStore) -> Unit) {
+        // Admission is serialized with stop; the filesystem operation itself
+        // never holds the controller lock or blocks a stop request on the UI.
+        val admitted = synchronized(this) {
+            if (expectedRecordingId != null && expectedRecordingId == currentRecordingId &&
+                synchronizedCaptureStarted && !recordingFinalized && !captureStopRequested
+            ) {
+                val store = polarFileStore
+                val directory = currentRecordingDirectory
+                val recordingId = currentRecordingId
+                if (store != null && directory != null && recordingId != null) {
+                    pendingPolarCallbacks++
+                    Triple(store, directory, recordingId)
+                } else null
+            } else null
+        } ?: return
+        val (store, directory, recordingId) = admitted
+        try {
+            // An already-admitted old callback cannot append to the next
+            // recording if it was delayed until after the store changed session.
+            synchronized(store) { if (store.isSessionDirectory(directory)) action(store) }
+        } catch (error: Exception) { reportPolarFailure(error, recordingId) }
+        finally {
+            val waiting = synchronized(this) {
+                pendingPolarCallbacks--
+                finalizationRequest?.takeIf { pendingPolarCallbacks == 0 && !it.running }
+            }
+            if (waiting != null) {
+                cancel(finalizationRetryRunnable)
+                dispatchFinalization(waiting)
+            }
         }
-        return finished
+    }
+
+    private fun reportPolarFailure(error: Exception, recordingId: String?) {
+        val message = "Polar storage failed. Original files are retained, but buffered Polar samples may be missing; close and reopen Woona before recording again."
+        val admitted = synchronized(this) {
+            if (recordingId == null || currentRecordingId != recordingId || recordingFinalized ||
+                finalizationRequest?.statusSealed == true || !polarFailureReported.compareAndSet(false, true)
+            ) false else {
+                // Record the terminal intent before posting any UI work. Stop
+                // may commit while the main thread is blocked.
+                captureStopRequested = true
+                captureRequiresRestart = true
+                terminalIntent = RecordingStatus.FAILED
+                pendingPolarFailure = message
+                finalizationRequest?.let { it.status = RecordingStatus.FAILED }
+                true
+            }
+        }
+        if (!admitted) return
+        showErrorOnMainThread(message, error)
+        finalizeRecording(RecordingStatus.FAILED)
     }
 
     fun onSensorSelected(sensorType: Int) {
@@ -425,7 +642,7 @@ class DeviceFeatureController(
         }
         when (state) {
             BleSessionState.FAILED -> finalizeRecording(RecordingStatus.FAILED)
-            BleSessionState.DISCONNECTED -> finalizeRecording(RecordingStatus.INTERRUPTED)
+            BleSessionState.DISCONNECTED -> if (!manualDisconnectPending) finalizeRecording(RecordingStatus.INTERRUPTED)
             else -> Unit
         }
         uiStateHolder.onSessionStateChanged(state)
@@ -578,12 +795,21 @@ class DeviceFeatureController(
     }
 
     override fun close() {
+        synchronized(this) { closeRequested = true }
         connectionUiGeneration.incrementAndGet()
         manualDisconnectPending = true
         stopLinkMonitor()
         packetReplayController?.close()
-        finalizeRecording(RecordingStatus.INTERRUPTED)
-        if (isCaptureActive()) return
+        finalizeRecording(RecordingStatus.INTERRUPTED).whenComplete { _, failure ->
+            if (failure == null) closeResourcesWhenInactive()
+        }
+    }
+
+    private fun closeResourcesWhenInactive() {
+        synchronized(this) {
+            if (!closeRequested || resourcesClosed || isCaptureActive()) return
+            resourcesClosed = true
+        }
         val staleSnapshot = synchronized(exportLock) {
             val snapshot = invalidateExportSnapshotLocked()
             exportSessionStartMillis = null
@@ -592,7 +818,8 @@ class DeviceFeatureController(
         deleteSnapshotFiles(staleSnapshot)
         bleSessionController.close()
         polarSessionManager?.close()
-        polarFileStore?.close()
+        try { polarFileStore?.close() }
+        catch (error: PolarPersistenceException) { Log.e("WOONA_CAPTURE", "Polar file closure previously failed", error) }
         packetCaptureController.close()
         videoRecorder?.close()
     }
@@ -638,7 +865,8 @@ class DeviceFeatureController(
         val recording = currentRecording ?: return
         if (
             recordingFinalized ||
-            recordingFinalizing ||
+            recordingFinalizing || captureStopRequested ||
+            disconnectInProgress.get() || teardownPending || closeRequested ||
             synchronizedCaptureStarted ||
             uiState.videoState !in setOf(VideoCaptureState.READY, VideoCaptureState.FAILED)
         ) return
@@ -719,28 +947,46 @@ class DeviceFeatureController(
 
     fun onSessionError(message: String, throwable: Throwable? = null) {
         val details = if (throwable == null) message else "$message: $throwable"
+        if (recordingFinalized && !v2PreviewConnection && currentRecordingId != null) {
+            showErrorOnMainThread(details)
+            return
+        }
         if (v2PreviewConnection) {
             awaitingCaptureReady = false
             uiStateHolder.onV2DiscoveryFailed(details)
             return
         }
-        val disconnectedQuality = if (synchronizedCaptureStarted && !manualDisconnectPending) {
-            connectionQualityTracker.disconnect(monotonicMillis())
-        } else {
-            null
+        // Remember the failure before touching SQLite or diagnostics. A stop
+        // already in progress must see it even if persistence is locked.
+        val failureRecordingId = stageCaptureFailure(captureErrorCode(message), details)
+        try {
+            val disconnectedQuality = if (synchronizedCaptureStarted && !manualDisconnectPending) {
+                connectionQualityTracker.disconnect(monotonicMillis())
+            } else {
+                null
+            }
+            try { flushPendingTransportDiagnostics() }
+            catch (error: Exception) { Log.e("WOONA_CAPTURE", "Could not flush transport diagnostics", error) }
+            awaitingCaptureReady = false
+            uiStateHolder.showError(details)
+            if (disconnectedQuality != null) updateConnectionQuality(disconnectedQuality)
+        } finally {
+            failureRecordingId?.let { finalizeRecording(RecordingStatus.FAILED, it) }
         }
-        flushPendingTransportDiagnostics()
-        awaitingCaptureReady = false
-        uiStateHolder.showError(details)
-        currentRecordingId?.let { recordingId ->
-            woonaDatabase?.markCaptureError(
-                recordingId = recordingId,
-                code = captureErrorCode(message),
-                message = details,
-            )
+    }
+
+    private fun stageCaptureFailure(code: String, details: String): String? = synchronized(this) {
+        val recordingId = currentRecordingId
+        if (recordingId == null || recordingFinalized || v2PreviewConnection) return@synchronized null
+        // Keep the first generic cause; a storm of repeated callbacks must not
+        // starve the sealing loop. Specific packet/Polar errors take precedence.
+        if (!captureRequiresRestart && pendingCaptureFailure == null) {
+            pendingCaptureFailure = PendingCaptureFailure(code, details)
         }
-        finalizeRecording(RecordingStatus.FAILED)
-        if (disconnectedQuality != null) updateConnectionQuality(disconnectedQuality)
+        captureStopRequested = true
+        terminalIntent = RecordingStatus.FAILED
+        finalizationRequest?.let { if (!it.statusSealed) it.status = RecordingStatus.FAILED }
+        recordingId
     }
 
     fun startReplay(fileBytes: ByteArray) {
@@ -748,12 +994,17 @@ class DeviceFeatureController(
     }
 
     fun startReplay(source: ReplayInputSource) {
-        if (packetReplayController == null) {
-            uiStateHolder.showError(appTextResolver.getString(R.string.replay_unavailable))
-            return
+        synchronized(this) {
+            if (packetReplayController == null) {
+                uiStateHolder.showError(appTextResolver.getString(R.string.replay_unavailable))
+                return
+            }
+            if (woonaDatabase != null && (currentRecording?.source != RecordingSource.REPLAY ||
+                    recordingFinalized || captureStopRequested || recordingFinalizing || disconnectInProgress.get() || teardownPending || closeRequested)) {
+                return
+            }
+            packetReplayController.startReplay(source)
         }
-
-        packetReplayController.startReplay(source)
     }
 
     fun onReplayPreparing() {
@@ -931,7 +1182,13 @@ class DeviceFeatureController(
     }
 
     private fun buildAvailableExportFiles(snapshot: SessionExportSnapshot): List<File> {
-        polarFileStore?.flush()
+        try { polarFileStore?.flush() }
+        catch (error: PolarPersistenceException) {
+            // A failed, closed store has no buffered data left to flush. Keep
+            // its partial originals exportable with the FAILED session status.
+            if (!recordingFinalized) throw error
+            Log.w("WOONA_CAPTURE", "Exporting original Polar files after a recorded storage failure", error)
+        }
         val csvSnapshot = ensureCsvSnapshot(snapshot)
         return listOfNotNull(
             snapshot.packetSnapshot,
@@ -1030,47 +1287,200 @@ class DeviceFeatureController(
         return snapshot
     }
 
-    private fun finalizeRecording(status: RecordingStatus) {
-        val recordingId = synchronized(this) {
-            val id = currentRecordingId ?: return
-            if (recordingFinalized || recordingFinalizing) return
-            recordingFinalizing = true
-            id
+    /** All callers share one outcome; no caller waits for packet or SQLite IO on the UI thread. */
+    private fun finalizeRecording(status: RecordingStatus, expectedRecordingId: String? = null): CompletableFuture<Unit> {
+        val request = synchronized(this) {
+            val id = currentRecordingId ?: return CompletableFuture.completedFuture(Unit)
+            if (recordingFinalized || (expectedRecordingId != null && id != expectedRecordingId)) return CompletableFuture.completedFuture(Unit)
+            captureStopRequested = true
+            val previous = terminalIntent
+            if (previous == null || terminalPriority(status) > terminalPriority(previous)) terminalIntent = status
+            val intended = requireNotNull(terminalIntent)
+            finalizationRequest?.let { existing ->
+                if (!existing.statusSealed && terminalPriority(intended) > terminalPriority(existing.status)) existing.status = intended
+                return existing.outcome
+            }
+            FinalizationRequest(id, intended, CompletableFuture()).also {
+                finalizationRequest = it
+                recordingFinalizing = true
+            }
+        }
+        dispatchFinalization(request)
+        return request.outcome
+    }
+
+    private fun dispatchFinalization(request: FinalizationRequest) {
+        synchronized(this) {
+            if (finalizationRequest !== request || request.running) return
+            request.running = true
         }
         try {
+            FINALIZATION_EXECUTOR.execute { runFinalizationAttempt(request) }
+        } catch (error: RuntimeException) {
+            completeFinalization(request, error)
+        }
+    }
+
+    private fun runFinalizationAttempt(request: FinalizationRequest) {
+        try {
             stopLinkMonitor()
-            stopVideo()
-            polarFileStore?.close()
-            polarSessionManager?.setRecordingActive(false)
-            bleSessionController.setCaptureActive(false)
-            val captureDrained = packetCaptureController.finishCapture(CAPTURE_FINISH_TIMEOUT_MILLIS)
-            if (!captureDrained) {
-                packetCaptureController.recordDiagnosticEvent(
-                    type = PacketDiagnosticType.REJECTED,
-                    message = "Capture finalization timed out: drain_timeout",
-                )
-                Log.e("BLE_PROCESSOR", "Capture finalization timed out for recording $recordingId")
-                pendingFinalizationStatus = status
+            // stop() is nonblocking; in-flight replay workers and lifecycle
+            // callbacks must exit before this recording can commit or be replaced.
+            if (packetReplayController?.hasPendingWork() == true) {
+                synchronized(this) { request.running = false }
                 schedule(finalizationRetryRunnable, FINALIZATION_RETRY_DELAY_MILLIS)
                 return
             }
-            persistSyncMetadata()
-            try {
-                woonaDatabase?.finishRecording(recordingId, status)
-                synchronized(this) {
-                    recordingFinalized = true
-                    synchronizedCaptureStarted = false
-                }
-                pendingFinalizationStatus = null
-                onCaptureLifecycleChanged(false)
-            } catch (exception: Exception) {
-                Log.e("WOONA_DATABASE", "Failed to finalize recording $recordingId", exception)
-                showErrorOnMainThread("Failed to finalize recording", exception)
+            stopVideo()
+            val polarPending = synchronized(this) {
+                if (pendingPolarCallbacks > 0) { request.running = false; true } else false
             }
-            notifyRecordingChanged()
-        } finally {
+            if (polarPending) {
+                schedule(finalizationRetryRunnable, FINALIZATION_RETRY_DELAY_MILLIS)
+                return
+            }
+            try {
+                polarFileStore?.close()
+            } catch (error: PolarPersistenceException) {
+                val message = "Polar storage failed. Original files are retained, but buffered Polar samples may be missing; close and reopen Woona before recording again."
+                synchronized(this) {
+                    request.status = RecordingStatus.FAILED
+                    terminalIntent = RecordingStatus.FAILED
+                    pendingPolarFailure = message
+                    captureRequiresRestart = true
+                }
+                showErrorOnMainThread(message, error)
+            }
+            polarSessionManager?.setRecordingActive(false, request.recordingId)
+            bleSessionController.setCaptureActive(false)
+            val drained = try {
+                packetCaptureController.finishCapture(CAPTURE_FINISH_TIMEOUT_MILLIS)
+            } catch (failure: Exception) {
+                when (packetCaptureController.recoverPendingFragments(requireNotNull(currentRecordingDirectory))) {
+                    is PacketRecoveryResult.Recovered -> {
+                        val message = "Packet storage failed. Available pending fragments were saved separately; originals may be incomplete or overlap. Close and reopen Woona before recording again."
+                        synchronized(this) {
+                            request.status = RecordingStatus.FAILED
+                            terminalIntent = RecordingStatus.FAILED
+                            pendingPacketFailure = message
+                            captureRequiresRestart = true
+                        }
+                        showErrorOnMainThread(message)
+                        true
+                    }
+                    PacketRecoveryResult.Busy -> false
+                    PacketRecoveryResult.Failed -> {
+                        showErrorOnMainThread("Recovery could not be saved. Keep Woona open, check storage and retry.", failure)
+                        synchronized(this) { request.running = false }
+                        try { onRecoveryRetryNeeded() } catch (error: Exception) { Log.e("WOONA_CAPTURE", "Could not report recovery failure", error) }
+                        schedule(finalizationRetryRunnable, RECOVERY_RETRY_DELAY_MILLIS)
+                        return
+                    }
+                    else -> throw failure
+                }
+            }
+            if (!drained) {
+                Log.w("WOONA_CAPTURE", "Capture drain is still pending; retrying")
+                synchronized(this) { request.running = false }
+                schedule(finalizationRetryRunnable, FINALIZATION_RETRY_DELAY_MILLIS)
+                return
+            }
+            // Admission is closed by finishCapture. Inspect its durable-session
+            // counter here, not only a UI callback that may still be queued.
+            val dropped = packetCaptureController.droppedFragments()
+            if (dropped > 0) synchronized(this) {
+                request.status = RecordingStatus.FAILED
+                terminalIntent = RecordingStatus.FAILED
+                pendingOverflowFailure = "Capture queue overflow: $dropped fragment(s) were not recorded."
+            }
+            persistSyncMetadata(requirePersistence = true)
+            val recording = checkNotNull(currentRecording?.takeIf { it.id == request.recordingId })
+            recordingFinalizingListener(recording)
+            val status = sealFinalizationStatus(request)
+            woonaDatabase?.finishRecording(request.recordingId, status)
+            val disconnectAfterFinalization = synchronized(this) {
+                recordingFinalized = true
+                synchronizedCaptureStarted = false
+                if (recording.source == RecordingSource.LIVE) teardownPending = true
+                recording.source == RecordingSource.LIVE && !disconnectInProgress.get()
+            }
+            if (recording.source != RecordingSource.LIVE) {
+                try { recordingFinalizedListener(recording) }
+                catch (error: Exception) { Log.e("WOONA_CAPTURE", "Post-capture scheduling failed; recording is preserved", error) }
+            }
+            // The terminal transaction has already committed. A UI refresh
+            // listener must not turn that success into a false stop failure.
+            try { notifyRecordingChanged() }
+            catch (error: Exception) { Log.e("WOONA_CAPTURE", "Post-commit recording notification failed", error) }
+            completeFinalization(request, null)
+            if (disconnectAfterFinalization) requestDisconnect(Executor { it.run() })
+        } catch (error: VideoStopPendingException) {
+            Log.w("WOONA_CAPTURE", "Camera stop is still pending; retrying")
+            synchronized(this) { request.running = false; request.statusSealed = false }
+            try { schedule(finalizationRetryRunnable, FINALIZATION_RETRY_DELAY_MILLIS) }
+            catch (scheduleError: Exception) { completeFinalization(request, scheduleError) }
+        } catch (error: android.database.sqlite.SQLiteDatabaseLockedException) {
+            Log.w("WOONA_CAPTURE", "Finalization database is locked; retrying")
+            synchronized(this) { request.running = false; request.statusSealed = false }
+            try { schedule(finalizationRetryRunnable, FINALIZATION_RETRY_DELAY_MILLIS) }
+            catch (scheduleError: Exception) { completeFinalization(request, scheduleError) }
+        } catch (error: Exception) {
+            Log.e("WOONA_CAPTURE", "Capture finalization failed; recording remains open", error)
+            showErrorOnMainThread("Failed to finalize recording; recording remains open", error)
+            completeFinalization(request, error)
+        }
+    }
+
+    // The database has one error-code field. Packet storage takes precedence
+    // over Polar, then overflow, then generic failures; retain all known details.
+    // Must be called under the controller monitor.
+    private fun pendingFailureForFinalization(): PendingCaptureFailure? {
+        val packet = pendingPacketFailure
+        val polar = pendingPolarFailure
+        val overflow = pendingOverflowFailure
+        return when {
+            packet != null -> PendingCaptureFailure("packet_persistence_failed", listOfNotNull(packet, polar?.let { "Polar also failed: $it" }, overflow).joinToString(" "))
+            polar != null -> PendingCaptureFailure("polar_persistence_failed", listOfNotNull(polar, overflow).joinToString(" "))
+            overflow != null -> PendingCaptureFailure("queue_overflow", overflow)
+            else -> pendingCaptureFailure
+        }
+    }
+
+    private fun sealFinalizationStatus(request: FinalizationRequest): RecordingStatus {
+        while (true) {
+            val failure = synchronized(this) { pendingFailureForFinalization() }
+            failure?.let { woonaDatabase?.markCaptureError(request.recordingId, it.code, it.message) }
+            val status = synchronized(this) {
+                val currentFailure = pendingFailureForFinalization()
+                if (currentFailure != failure) null else {
+                    // An event before this boundary may promote the result.
+                    // If an earlier sealed commit failed, reapply its newer intent.
+                    terminalIntent?.let { intended ->
+                        if (terminalPriority(intended) > terminalPriority(request.status)) request.status = intended
+                    }
+                    request.statusSealed = true
+                    request.status
+                }
+            }
+            if (status != null) return status
+        }
+    }
+
+    private fun terminalPriority(status: RecordingStatus): Int = when (status) {
+        RecordingStatus.FAILED -> 3
+        RecordingStatus.INTERRUPTED -> 2
+        RecordingStatus.COMPLETED -> 1
+        else -> 0
+    }
+
+    private fun completeFinalization(request: FinalizationRequest, error: Throwable?) {
+        synchronized(this) {
+            if (finalizationRequest !== request) return
+            finalizationRequest = null
+            request.running = false
             recordingFinalizing = false
         }
+        if (error == null) request.outcome.complete(Unit) else request.outcome.completeExceptionally(error)
     }
 
     @Synchronized
@@ -1083,7 +1493,7 @@ class DeviceFeatureController(
             recording == null ||
             recording.source != RecordingSource.LIVE ||
             recordingFinalized ||
-            recordingFinalizing ||
+            recordingFinalizing || captureStopRequested || disconnectInProgress.get() || teardownPending || closeRequested ||
             metadata?.sensor == null ||
             uiState.videoState !in setOf(VideoCaptureState.READY, VideoCaptureState.FAILED)
         ) {
@@ -1099,56 +1509,84 @@ class DeviceFeatureController(
         )
         persistSyncMetadata()
         uiStateHolder.videoStarting()
+        val videoGeneration = ++videoCallbackGeneration
+        val recordingId = recording.id
         val started = recorder.start(
             file = File(requireNotNull(currentRecordingDirectory), "video.mp4"),
             onStarted = { info ->
                 runOnUiThread {
-                    handleVideoStarted(info)
+                    synchronized(this) {
+                        if (videoCallbackGeneration == videoGeneration && currentRecordingId == recordingId && !recordingFinalized) {
+                            handleVideoStarted(info)
+                        }
+                    }
                 }
             },
             onError = { message, throwable ->
                 Log.e("WOONA_VIDEO", message, throwable)
                 runOnUiThread {
-                    handleVideoFailure("$message${throwable?.let { ": $it" }.orEmpty()}")
+                    synchronized(this) {
+                        if (videoCallbackGeneration == videoGeneration && currentRecordingId == recordingId && !recordingFinalized) {
+                            try { handleVideoFailure("$message${throwable?.let { ": $it" }.orEmpty()}") }
+                            catch (error: Exception) { showErrorOnMainThread("Could not persist camera failure; stop will retry", error) }
+                        }
+                    }
                 }
             },
         )
         if (!started) handleVideoFailure()
     }
 
-    @Synchronized
-    fun stopVideo() {
-        val recorder = videoRecorder ?: return
-        if (!recorder.isActive()) return
-        runOnUiThread { uiStateHolder.videoStopping() }
-        val result = recorder.stop()
-        val metadata = captureSyncMetadata
-        val video = metadata?.video
-        if (metadata != null && video != null) {
-            val stoppedAt = result?.stoppedMonotonicNs ?: monotonicNanosProvider()
-            captureSyncMetadata = metadata.copy(
-                video = video.copy(
-                    stoppedAtUtc = instantForMonotonic(stoppedAt).toString(),
-                    stoppedMonotonicNs = stoppedAt,
-                    durationNs = result?.durationNs,
-                    firstVideoSamplePtsUs = result?.firstVideoSamplePtsUs,
-                ),
-            )
-            persistSyncMetadata()
-        }
-        currentSessionFile("video.mp4")
-            ?.takeIf { it.exists() && it.length() > 0L }
-            ?.let { file ->
-                currentRecordingId?.let { recordingId ->
-                    woonaDatabase?.registerArtifact(recordingId, ArtifactType.VIDEO, file)
+    private fun stopVideo() {
+        synchronized(videoStopLock) {
+            val recorder = videoRecorder ?: return
+            val stopped = synchronized(this) { pendingVideoStop } ?: run {
+                if (!recorder.isActive() && !recorder.hasPendingStop()) {
+                    recorder.currentFailure()?.let { (message, error) ->
+                        handleVideoFailure("$message${error?.let { ": $it" }.orEmpty()}", requirePersistence = true)
+                    }
+                    return
+                }
+                runOnUiThread { uiStateHolder.videoStopping() }
+                synchronized(this) { videoCallbackGeneration++ }
+                // This can wait for the camera handler. Other stop/error callers
+                // must still be able to acquire the controller monitor.
+                val result = recorder.stop()
+                PendingVideoStop(result, result?.stoppedMonotonicNs ?: monotonicNanosProvider()).also {
+                    synchronized(this) { pendingVideoStop = it }
                 }
             }
-        if (result == null) {
-            runOnUiThread { handleVideoFailure() }
-            return
+            val result = stopped.result
+            synchronized(this) {
+                result?.startInfo?.let(::applyVideoStartMetadata)
+                val metadata = captureSyncMetadata
+                val video = metadata?.video
+                if (metadata != null && video != null) {
+                    captureSyncMetadata = metadata.copy(
+                        video = video.copy(
+                            stoppedAtUtc = instantForMonotonic(stopped.stoppedAt).toString(),
+                            stoppedMonotonicNs = stopped.stoppedAt,
+                            durationNs = result?.durationNs,
+                            firstVideoSamplePtsUs = result?.firstVideoSamplePtsUs,
+                        ),
+                    )
+                    persistSyncMetadata(requirePersistence = true)
+                }
+                // Remember the stop outcome across DB contention, including null.
+                // A retry must not interpret an inactive recorder as success.
+                if (result == null) handleVideoFailure(requirePersistence = true)
+                currentSessionFile("video.mp4")
+                    ?.takeIf { it.exists() && it.length() > 0L }
+                    ?.let { file ->
+                        currentRecordingId?.let { recordingId ->
+                            woonaDatabase?.registerArtifact(recordingId, ArtifactType.VIDEO, file)
+                        }
+                    }
+                pendingVideoStop = null
+            }
+            if (result != null) runOnUiThread { uiStateHolder.videoFinished() }
+            notifyRecordingChanged()
         }
-        runOnUiThread { uiStateHolder.videoFinished() }
-        notifyRecordingChanged()
     }
 
     @Synchronized
@@ -1159,9 +1597,8 @@ class DeviceFeatureController(
         if (code == "camera_foreground_unavailable") {
             handleVideoFailure(details)
         } else {
-            currentRecordingId?.let { woonaDatabase?.markCaptureError(it, code, details) }
-            finalizeRecording(RecordingStatus.FAILED)
-            bleSessionController.disconnect()
+            stageCaptureFailure(code, details)?.let { finalizeRecording(RecordingStatus.FAILED, it) }
+            requestDisconnect(Executor { it.run() })
         }
         showErrorOnMainThread(details)
     }
@@ -1172,13 +1609,17 @@ class DeviceFeatureController(
 
     @Synchronized
     private fun handleVideoStarted(info: AndroidVideoStartInfo) {
-        if (recordingFinalized) {
-            stopVideo()
-            return
-        }
-        val metadata = captureSyncMetadata ?: return
-        val sensor = metadata.sensor ?: return
-        val video = metadata.video ?: return
+        if (recordingFinalized) return
+        val offsetNs = applyVideoStartMetadata(info) ?: return
+        persistSyncMetadata()
+        uiStateHolder.videoStarted(offsetNs / 1_000_000.0)
+        notifyRecordingChanged()
+    }
+
+    private fun applyVideoStartMetadata(info: AndroidVideoStartInfo): Long? {
+        val metadata = captureSyncMetadata ?: return null
+        val sensor = metadata.sensor ?: return null
+        val video = metadata.video ?: return null
         val offsetNs = monotonicOffsetNs(sensor, info.firstFrameMonotonicNs)
         captureSyncMetadata = metadata.copy(
             video = video.copy(
@@ -1199,21 +1640,19 @@ class DeviceFeatureController(
                 rotationDegrees = info.rotationDegrees,
             ),
         )
-        persistSyncMetadata()
-        uiStateHolder.videoStarted(offsetNs / 1_000_000.0)
-        notifyRecordingChanged()
+        return offsetNs
     }
 
     @Synchronized
-    private fun handleVideoFailure(message: String = appTextResolver.getString(R.string.video_recording_failed)) {
+    private fun handleVideoFailure(message: String = appTextResolver.getString(R.string.video_recording_failed), requirePersistence: Boolean = false) {
         if (recordingFinalized) return
         if (synchronizedCaptureStarted) {
             currentRecordingId?.let { woonaDatabase?.markCaptureError(it, "camera_failed", message) }
-            uiStateHolder.videoDegraded(message)
+            runOnUiThread { uiStateHolder.videoDegraded(message) }
         } else {
-            uiStateHolder.videoFailed(message)
+            runOnUiThread { uiStateHolder.videoFailed(message) }
         }
-        persistSyncMetadata()
+        persistSyncMetadata(requirePersistence)
         notifyRecordingChanged()
     }
 
@@ -1236,7 +1675,7 @@ class DeviceFeatureController(
         return absoluteInstantForMonotonic(sensor, monotonicNs)
     }
 
-    private fun persistSyncMetadata() {
+    private fun persistSyncMetadata(requirePersistence: Boolean = false) {
         val recordingId = currentRecordingId ?: return
         val metadata = captureSyncMetadata ?: return
         try {
@@ -1244,6 +1683,7 @@ class DeviceFeatureController(
         } catch (exception: Exception) {
             Log.e("WOONA_DATABASE", "Failed to write synchronization metadata", exception)
             showErrorOnMainThread("Failed to write synchronization metadata", exception)
+            if (requirePersistence) throw exception
         }
     }
 
@@ -1302,7 +1742,13 @@ class DeviceFeatureController(
 
     private fun startPolarRecording() {
         if (uiState.polarStatus.state != PolarConnectionState.READY) return
-        if (polarFileStore?.start() == true) polarSessionManager?.setRecordingActive(true)
+        try {
+            if (polarFileStore?.start() == true && polarSessionManager?.setRecordingActive(true, currentRecordingId) == false) {
+                showErrorOnMainThread(appTextResolver.getString(R.string.polar_reconnect_before_recording))
+            }
+        } catch (error: Exception) {
+            reportPolarFailure(error, currentRecordingId)
+        }
     }
 
     private fun stopLinkMonitor() {
@@ -1344,8 +1790,12 @@ class DeviceFeatureController(
 
     companion object {
         const val PERMISSION_REQUIRED_MESSAGE = "Permissions are required!"
+        private val FINALIZATION_EXECUTOR = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "capture-finalization").apply { isDaemon = true }
+        }
         private const val CAPTURE_FINISH_TIMEOUT_MILLIS = 2_000L
         private const val FINALIZATION_RETRY_DELAY_MILLIS = 1_000L
+        private const val RECOVERY_RETRY_DELAY_MILLIS = 30_000L
         private const val LINK_MONITOR_INTERVAL_MILLIS = 1_000L
         private const val WEAK_ALARM_DELAY_MILLIS = 5_000L
     }

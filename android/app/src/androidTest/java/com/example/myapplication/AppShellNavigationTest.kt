@@ -27,6 +27,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.SemanticsNodeInteraction
@@ -106,7 +107,7 @@ class AppShellNavigationTest {
         ))
 
         navTab("Settings").performClick()
-        composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
+        scrollToServerSettings()
         composeRule.onNodeWithText(message).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Retry uploads").performScrollTo().assertIsEnabled()
     }
@@ -143,6 +144,7 @@ class AppShellNavigationTest {
         navTab("Session").performClick()
         navTab("Session").assertIsSelected()
         composeRule.onNode(hasTestTag("session.summary")).performClick()
+        composeRule.onNode(hasScrollAction()).performScrollToNode(hasText("Connection"))
         composeRule.onNodeWithText("Connection").assertIsDisplayed()
     }
 
@@ -294,9 +296,9 @@ class AppShellNavigationTest {
         setShellContent()
         navTab("Settings").performClick()
 
-        composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
-        composeRule.onNodeWithText("Server storage").assertIsDisplayed()
-        composeRule.onNodeWithText("Connect").assertIsEnabled()
+        scrollToServerSettings()
+        composeRule.onNodeWithText("Server storage").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Connect").performScrollTo().assertIsEnabled()
     }
 
     @Test
@@ -328,7 +330,7 @@ class AppShellNavigationTest {
         setShellContent(serverSyncState = ServerSyncUiState(
             status = ServerSyncStatus.READY, pending = 1, mutationsAllowed = false, connectionEditorAllowed = false, mutationBlockReason = "capture"))
         navTab("Settings").performClick()
-        composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
+        scrollToServerSettings()
         composeRule.onNodeWithText("Check connection").performScrollTo().assertIsEnabled()
         composeRule.onNodeWithText("Reconnect").performScrollTo().assertIsNotEnabled()
         composeRule.onNodeWithText("Retry uploads").performScrollTo().assertIsNotEnabled()
@@ -342,7 +344,7 @@ class AppShellNavigationTest {
             mutationsAllowed = false, connectionEditorAllowed = true, networkPolicyAllowed = false,
             mutationBlockReason = "upload"))
         navTab("Settings").performClick()
-        composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
+        scrollToServerSettings()
         composeRule.onNodeWithText("Check connection").performScrollTo().assertIsEnabled()
         composeRule.onNodeWithText("Reconnect").performScrollTo().assertIsEnabled()
         composeRule.onNodeWithText("Retry uploads").performScrollTo().assertIsNotEnabled()
@@ -354,7 +356,7 @@ class AppShellNavigationTest {
         setShellContent(serverSyncState = ServerSyncUiState(status = ServerSyncStatus.WAITING,
             uploading = 1, workersRunning = 0, mutationsAllowed = false, networkPolicyAllowed = true))
         navTab("Settings").performClick()
-        composeRule.onNode(hasScrollAction()).performScrollToIndex(3)
+        scrollToServerSettings()
         composeRule.onNodeWithText("Wi-Fi only").performScrollTo()
         composeRule.onNode(isToggleable() and hasAnySibling(hasText("Wi-Fi only")), useUnmergedTree = true).assertIsEnabled()
     }
@@ -468,9 +470,9 @@ class AppShellNavigationTest {
         composeRule.onNodeWithText("Validate and save").performClick()
         composeRule.onNodeWithText("HTTP 409:", substring = true).assertIsDisplayed()
         composeRule.onNodeWithText("Validate and save").assertIsNotEnabled()
-        composeRule.onNodeWithText("Load server answers and retain my draft").performClick()
+        composeRule.onNodeWithText("Load server answers and retain my draft").performScrollTo().performClick()
         composeRule.onNodeWithText("Server version").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Restore my edits").performClick()
+        composeRule.onNodeWithText("Restore my edits").performScrollTo().performClick()
         composeRule.onNodeWithText("My draft").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Validate and save").performClick()
         composeRule.runOnIdle { assertEquals("My draft", saved?.sessionLabel); assertEquals(5, savedRevision) }
@@ -589,6 +591,10 @@ class AppShellNavigationTest {
             }
         }
         if (openSession) navTab("Session").performClick()
+    }
+
+    private fun scrollToServerSettings() {
+        composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("server.sync.settings"))
     }
 
     private fun checkbox(label: String) = composeRule.onNode(

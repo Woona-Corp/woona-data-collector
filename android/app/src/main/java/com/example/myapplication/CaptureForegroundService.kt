@@ -25,6 +25,14 @@ class CaptureForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        CaptureServiceBridge.onStopFailed = {
+            android.os.Handler(mainLooper).post {
+                if (CaptureServiceBridge.isRunning) {
+                    try { promote(buildNotification(stopFailed = true), foregroundTypes) }
+                    catch (error: RuntimeException) { android.util.Log.w("WOONA_CAPTURE", "Could not update capture notification", error) }
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -81,12 +89,13 @@ class CaptureForegroundService : Service() {
     override fun onDestroy() {
         CaptureServiceBridge.isRunning = false
         CaptureServiceBridge.cameraForegroundEnabled = false
+        CaptureServiceBridge.onStopFailed = null
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(stopFailed: Boolean = false): Notification {
         val openIntent = PendingIntent.getActivity(
             this,
             REQUEST_OPEN,
@@ -103,12 +112,13 @@ class CaptureForegroundService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle(getString(R.string.capture_notification_title))
-            .setContentText(getString(R.string.capture_notification_text))
+            .setContentTitle(getString(if (stopFailed) R.string.capture_notification_failure_title else R.string.capture_notification_title))
+            .setContentText(getString(if (stopFailed) R.string.capture_notification_failure_text else R.string.capture_notification_text))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(getString(if (stopFailed) R.string.capture_notification_failure_text else R.string.capture_notification_text)))
             .setContentIntent(openIntent)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .addAction(R.drawable.ic_launcher_foreground, getString(R.string.capture_notification_stop), stopIntent)
+            .addAction(R.drawable.ic_launcher_foreground, getString(if (stopFailed) R.string.capture_notification_retry else R.string.capture_notification_stop), stopIntent)
             .build()
     }
 
@@ -183,6 +193,9 @@ object CaptureServiceBridge {
 
     @Volatile
     var onStopRequested: (() -> Unit)? = null
+
+    @Volatile
+    var onStopFailed: (() -> Unit)? = null
 }
 
 internal fun captureForegroundTypes(videoRequested: Boolean, cameraGranted: Boolean, foregroundLaunch: Boolean): Int =

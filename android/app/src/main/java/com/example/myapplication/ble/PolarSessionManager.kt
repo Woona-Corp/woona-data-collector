@@ -45,14 +45,21 @@ data class PolarStatus(
     val message: String? = null,
 )
 
+/**
+ * One GATT connection at a time. Every callback, setup transition and GATT
+ * operation initiation happens under [stateLock] together with the ownership
+ * and generation check, so a callback from a replaced connection can neither
+ * mutate the new connection's setup nor publish its status. External callbacks
+ * are always delivered after the lock is released.
+ */
 class PolarSessionManager(
     context: Context,
     private val onDeviceFound: (BleDevice) -> Unit,
-    private val onStatus: (PolarStatus) -> Unit,
-    private val onHeartRate: (PolarHeartRateFrame, Long) -> Unit,
-    private val onEcg: (PolarEcgFrame, Long) -> Unit,
-    private val onAcceleration: (PolarAccelerationFrame, Long) -> Unit,
-    private val onError: (String, Throwable?) -> Unit,
+    private val onStatus: (PolarStatus, Long) -> Unit,
+    private val onHeartRate: (PolarHeartRateFrame, Long, String?) -> Unit,
+    private val onEcg: (PolarEcgFrame, Long, String?) -> Unit,
+    private val onAcceleration: (PolarAccelerationFrame, Long, String?) -> Unit,
+    private val onError: (String, Throwable?, Long) -> Unit,
 ) : AutoCloseable {
     private val appContext = context.applicationContext
     private val handler = Handler(Looper.getMainLooper())
@@ -61,9 +68,23 @@ class PolarSessionManager(
     }
     private val foundAddresses = linkedSetOf<String>()
     private val stopScanRunnable = Runnable { stopScanning() }
-    private var gatt: BluetoothGatt? = null
-    private var setupStep = SetupStep.NONE
+    private val stateLock = Any()
+    private val captureGate = PolarCaptureGate<BluetoothGatt>()
+
+    // Guarded by stateLock. Bumped whenever the owner is replaced or cleared.
+    @Volatile
+    private var generation = 0L
+    private var setupStep = PolarSetupStep.NONE
     private var status = PolarStatus()
+
+    /** A status or error may only be applied while this generation is current. */
+    fun isGenerationCurrent(candidate: Long): Boolean = generation == candidate
+
+    private sealed class PolarEvent {
+        class Status(val generation: Long, val status: PolarStatus) : PolarEvent()
+        class Error(val generation: Long, val message: String, val throwable: Throwable?) : PolarEvent()
+        class Close(val gatt: BluetoothGatt) : PolarEvent()
+    }
 
     private val scanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
@@ -82,56 +103,59 @@ class PolarSessionManager(
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt, result: Int, newState: Int) {
-            if (this@PolarSessionManager.gatt !== gatt) {
-                runCatching { gatt.close() }
-                return
-            }
-            when {
-                result != BluetoothGatt.GATT_SUCCESS -> fail("Polar GATT error: $result", closeGatt = gatt)
-                newState == BluetoothProfile.STATE_CONNECTED -> {
-                    if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
-                        fail("Bluetooth permission is required", closeGatt = gatt)
-                        return
+            val events = synchronized(stateLock) {
+                if (captureGate.owner() !== gatt) {
+                    return@synchronized listOf(PolarEvent.Close(gatt))
+                }
+                when {
+                    result != BluetoothGatt.GATT_SUCCESS -> failureLocked("Polar GATT error: $result", null, gatt)
+                    newState == BluetoothProfile.STATE_CONNECTED -> {
+                        if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+                            failureLocked("Bluetooth permission is required", null, gatt)
+                        } else {
+                            gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                            if (!gatt.discoverServices()) {
+                                failureLocked("Polar service discovery did not start", null, gatt)
+                            } else {
+                                emptyList()
+                            }
+                        }
                     }
-                    gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                    if (!gatt.discoverServices()) fail("Polar service discovery did not start", closeGatt = gatt)
-                }
-                newState == BluetoothProfile.STATE_DISCONNECTED -> {
-                    clearGatt(gatt)
-                    updateStatus(PolarConnectionState.LOST, message = "Polar disconnected")
+                    newState == BluetoothProfile.STATE_DISCONNECTED -> disconnectedLocked(gatt)
+                    else -> emptyList()
                 }
             }
+            emit(events)
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, result: Int) {
-            if (result != BluetoothGatt.GATT_SUCCESS || characteristic(gatt, HR_SERVICE, HR_CHARACTERISTIC) == null ||
-                characteristic(gatt, PMD_SERVICE, PMD_DATA) == null ||
-                characteristic(gatt, PMD_SERVICE, PMD_CONTROL) == null
-            ) {
-                fail("Polar HR/PMD services are unavailable", closeGatt = gatt)
-                return
+            val events = synchronized(stateLock) {
+                if (captureGate.owner() !== gatt) return@synchronized emptyList()
+                if (result != BluetoothGatt.GATT_SUCCESS ||
+                    characteristic(gatt, PolarUuids.HR_SERVICE, PolarUuids.HR_CHARACTERISTIC) == null ||
+                    characteristic(gatt, PolarUuids.PMD_SERVICE, PolarUuids.PMD_DATA) == null ||
+                    characteristic(gatt, PolarUuids.PMD_SERVICE, PolarUuids.PMD_CONTROL) == null
+                ) {
+                    failureLocked("Polar HR/PMD services are unavailable", null, gatt)
+                } else {
+                    applySetupLocked(PolarSetup.start, gatt)
+                }
             }
-            setupStep = SetupStep.HR_NOTIFY
-            enableNotifications(gatt, HR_SERVICE, HR_CHARACTERISTIC)
+            emit(events)
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, result: Int) {
-            if (result != BluetoothGatt.GATT_SUCCESS) {
-                fail("Polar notification setup failed: $result", closeGatt = gatt)
-                return
-            }
-            when (setupStep) {
-                SetupStep.HR_NOTIFY -> {
-                    setupStep = SetupStep.PMD_DATA_NOTIFY
-                    enableNotifications(gatt, PMD_SERVICE, PMD_DATA)
+            val characteristicUuid = runCatching { descriptor.characteristic.uuid }.getOrNull()
+            val events = synchronized(stateLock) {
+                if (captureGate.owner() !== gatt) return@synchronized emptyList()
+                if (result != BluetoothGatt.GATT_SUCCESS) {
+                    failureLocked("Polar notification setup failed: $result", null, gatt)
+                } else {
+                    val transition = characteristicUuid?.let { PolarSetup.onDescriptorWritten(setupStep, it) }
+                    if (transition == null) emptyList() else applySetupLocked(transition, gatt)
                 }
-                SetupStep.PMD_DATA_NOTIFY -> {
-                    setupStep = SetupStep.PMD_CONTROL_NOTIFY
-                    enableNotifications(gatt, PMD_SERVICE, PMD_CONTROL)
-                }
-                SetupStep.PMD_CONTROL_NOTIFY -> readBatteryOrStartEcg(gatt)
-                else -> Unit
             }
+            emit(events)
         }
 
         @Suppress("DEPRECATION")
@@ -149,33 +173,23 @@ class PolarSessionManager(
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, result: Int) {
-            if (result != BluetoothGatt.GATT_SUCCESS) {
-                fail("Polar PMD command failed: $result", closeGatt = gatt)
-                return
-            }
-            when (setupStep) {
-                SetupStep.START_ECG -> {
-                    setupStep = SetupStep.START_ACC
-                    handler.postDelayed(
-                        {
-                            if (this@PolarSessionManager.gatt === gatt && setupStep == SetupStep.START_ACC) {
-                                writeControl(gatt, START_ACC)
-                            }
-                        },
-                        600L,
-                    )
+            val value = characteristic.value
+            val events = synchronized(stateLock) {
+                if (captureGate.owner() !== gatt) return@synchronized emptyList()
+                if (result != BluetoothGatt.GATT_SUCCESS) {
+                    failureLocked("Polar PMD command failed: $result", null, gatt)
+                } else {
+                    val transition = PolarSetup.onControlWritten(setupStep, characteristic.uuid, value)
+                    if (transition == null) emptyList() else applySetupLocked(transition, gatt)
                 }
-                SetupStep.START_ACC -> {
-                    setupStep = SetupStep.NONE
-                    updateStatus(PolarConnectionState.READY, message = null)
-                }
-                else -> Unit
             }
+            emit(events)
         }
 
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            handleNotification(characteristic.uuid, characteristic.value)
+            val snapshot = captureGate.snapshot(gatt) ?: return
+            handleNotification(characteristic.uuid, characteristic.value, snapshot)
         }
 
         override fun onCharacteristicChanged(
@@ -183,7 +197,8 @@ class PolarSessionManager(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray,
         ) {
-            handleNotification(characteristic.uuid, value)
+            val snapshot = captureGate.snapshot(gatt) ?: return
+            handleNotification(characteristic.uuid, value, snapshot)
         }
     }
 
@@ -195,8 +210,11 @@ class PolarSessionManager(
         }
         stopScanning()
         foundAddresses.clear()
-        status = PolarStatus(state = PolarConnectionState.SCANNING)
-        onStatus(status)
+        val events = synchronized(stateLock) {
+            status = PolarStatus(state = PolarConnectionState.SCANNING)
+            listOf(PolarEvent.Status(generation, status))
+        }
+        emit(events)
         bluetoothAdapter.bluetoothLeScanner?.startScan(scanCallback) ?: fail("Bluetooth scanner is unavailable")
         handler.postDelayed(stopScanRunnable, SCAN_TIMEOUT_MILLIS)
     }
@@ -207,7 +225,15 @@ class PolarSessionManager(
         if (hasPermission(Manifest.permission.BLUETOOTH_SCAN)) {
             runCatching { bluetoothAdapter.bluetoothLeScanner?.stopScan(scanCallback) }
         }
-        if (status.state == PolarConnectionState.SCANNING) updateStatus(PolarConnectionState.IDLE, message = null)
+        val events = synchronized(stateLock) {
+            if (status.state != PolarConnectionState.SCANNING) {
+                emptyList()
+            } else {
+                status = status.copy(state = PolarConnectionState.IDLE, message = null)
+                listOf(PolarEvent.Status(generation, status))
+            }
+        }
+        emit(events)
     }
 
     @SuppressLint("MissingPermission")
@@ -217,45 +243,144 @@ class PolarSessionManager(
             return
         }
         stopScanning()
-        disconnect()
-        status = PolarStatus(state = PolarConnectionState.CONNECTING, deviceName = name ?: "Polar H10")
-        onStatus(status)
-        runCatching {
-            gatt = bluetoothAdapter.getRemoteDevice(address)
-                .connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        }.onFailure { fail("Unable to connect Polar", it) }
+        val events = synchronized(stateLock) {
+            val previous = captureGate.owner()
+            val nextGeneration = ++generation
+            captureGate.replaceOwner(null, nextGeneration)
+            setupStep = PolarSetupStep.NONE
+            val events = mutableListOf<PolarEvent>()
+            if (previous != null) events += PolarEvent.Close(previous)
+            status = PolarStatus(state = PolarConnectionState.CONNECTING, deviceName = name ?: "Polar H10")
+            events += PolarEvent.Status(nextGeneration, status)
+            runCatching {
+                bluetoothAdapter.getRemoteDevice(address)
+                    .connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            }.onSuccess { connected ->
+                // Installed under the same lock that owns every callback check,
+                // so a connecting callback cannot observe a half-published owner.
+                captureGate.replaceOwner(connected, nextGeneration)
+            }.onFailure { error ->
+                events += failureLocked("Unable to connect Polar", error, null)
+            }
+            events
+        }
+        emit(events)
     }
 
-    fun setRecordingActive(active: Boolean) {
-        if (active && status.state == PolarConnectionState.READY) {
-            updateStatus(PolarConnectionState.RECORDING, message = null)
-        } else if (!active && status.state == PolarConnectionState.RECORDING) {
-            updateStatus(PolarConnectionState.READY, message = null)
+    fun setRecordingActive(active: Boolean, recordingId: String?): Boolean {
+        if (recordingId == null) return false
+        var events: List<PolarEvent> = emptyList()
+        val result = synchronized(stateLock) {
+            if (active) {
+                if (status.state != PolarConnectionState.READY || !captureGate.beginRecording(recordingId)) {
+                    false
+                } else {
+                    status = status.copy(state = PolarConnectionState.RECORDING, message = null)
+                    events = listOf(PolarEvent.Status(generation, status))
+                    true
+                }
+            } else {
+                if (!captureGate.endRecording(recordingId)) {
+                    false
+                } else {
+                    if (status.state == PolarConnectionState.RECORDING) {
+                        status = status.copy(state = PolarConnectionState.READY, message = null)
+                        events = listOf(PolarEvent.Status(generation, status))
+                    }
+                    true
+                }
+            }
         }
+        emit(events)
+        return result
     }
 
     @SuppressLint("MissingPermission")
     fun disconnect() {
         stopScanning()
-        val current = gatt
-        gatt = null
-        if (current != null) runCatching { current.disconnect(); current.close() }
-        setupStep = SetupStep.NONE
-        status = PolarStatus()
-        onStatus(status)
+        val events = synchronized(stateLock) {
+            val current = captureGate.owner()
+            val nextGeneration = ++generation
+            captureGate.replaceOwner(null, nextGeneration)
+            setupStep = PolarSetupStep.NONE
+            val events = mutableListOf<PolarEvent>()
+            if (current != null) events += PolarEvent.Close(current)
+            status = PolarStatus()
+            events += PolarEvent.Status(nextGeneration, status)
+            events
+        }
+        emit(events)
     }
 
     override fun close() = disconnect()
 
     @SuppressLint("MissingPermission")
-    private fun enableNotifications(gatt: BluetoothGatt, serviceUuid: UUID, characteristicUuid: UUID) {
+    private fun emit(events: List<PolarEvent>) {
+        for (event in events) {
+            when (event) {
+                is PolarEvent.Status -> onStatus(event.status, event.generation)
+                is PolarEvent.Error -> onError(event.message, event.throwable, event.generation)
+                is PolarEvent.Close -> {
+                    runCatching { event.gatt.disconnect() }
+                    runCatching { event.gatt.close() }
+                }
+            }
+        }
+    }
+
+    /** Must be called under [stateLock]. */
+    private fun applySetupLocked(transition: PolarSetup.Transition, gatt: BluetoothGatt): List<PolarEvent> {
+        setupStep = transition.step
+        if (transition.ready) {
+            status = status.copy(state = PolarConnectionState.READY, message = null)
+            return listOf(PolarEvent.Status(generation, status))
+        }
+        val operation = transition.operation ?: return emptyList()
+        if (operation is PolarSetupOperation.WriteControl && operation.delayMillis > 0L) {
+            val expectedGeneration = generation
+            val expectedStep = transition.step
+            handler.postDelayed(
+                {
+                    val events = synchronized(stateLock) {
+                        if (captureGate.owner() !== gatt || generation != expectedGeneration || setupStep != expectedStep) {
+                            emptyList()
+                        } else {
+                            performLocked(operation, gatt)
+                        }
+                    }
+                    emit(events)
+                },
+                operation.delayMillis,
+            )
+            return emptyList()
+        }
+        return performLocked(operation, gatt)
+    }
+
+    /** Must be called under [stateLock]; the GATT call itself must not emit. */
+    @SuppressLint("MissingPermission")
+    private fun performLocked(operation: PolarSetupOperation, gatt: BluetoothGatt): List<PolarEvent> = when (operation) {
+        is PolarSetupOperation.EnableNotifications -> enableNotificationsLocked(gatt, operation.service, operation.characteristic)
+        is PolarSetupOperation.ReadBattery -> {
+            val battery = characteristic(gatt, operation.service, operation.characteristic)
+            if (battery == null || !gatt.readCharacteristic(battery)) {
+                val transition = PolarSetup.onBatteryRead(setupStep, operation.characteristic)
+                if (transition == null) emptyList() else applySetupLocked(transition, gatt)
+            } else {
+                emptyList()
+            }
+        }
+        is PolarSetupOperation.WriteControl -> writeControlLocked(gatt, operation.value)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun enableNotificationsLocked(gatt: BluetoothGatt, serviceUuid: UUID, characteristicUuid: UUID): List<PolarEvent> {
         val characteristic = characteristic(gatt, serviceUuid, characteristicUuid)
-            ?: return fail("Polar characteristic is unavailable", closeGatt = gatt)
-        val descriptor = characteristic.getDescriptor(CLIENT_CONFIG)
-            ?: return fail("Polar notification descriptor is unavailable", closeGatt = gatt)
+            ?: return failureLocked("Polar characteristic is unavailable", null, gatt)
+        val descriptor = characteristic.getDescriptor(PolarUuids.CLIENT_CONFIG)
+            ?: return failureLocked("Polar notification descriptor is unavailable", null, gatt)
         if (!gatt.setCharacteristicNotification(characteristic, true)) {
-            fail("Polar notification callback could not be enabled", closeGatt = gatt)
-            return
+            return failureLocked("Polar notification callback could not be enabled", null, gatt)
         }
         @Suppress("DEPRECATION")
         descriptor.value = if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) {
@@ -264,94 +389,128 @@ class PolarSessionManager(
             BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
         }
         @Suppress("DEPRECATION")
-        if (!gatt.writeDescriptor(descriptor)) fail("Polar notification setup did not start", closeGatt = gatt)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun readBatteryOrStartEcg(gatt: BluetoothGatt) {
-        val battery = characteristic(gatt, BATTERY_SERVICE, BATTERY_CHARACTERISTIC)
-        setupStep = SetupStep.BATTERY_READ
-        if (battery == null || !gatt.readCharacteristic(battery)) startEcg(gatt)
+        return if (!gatt.writeDescriptor(descriptor)) {
+            failureLocked("Polar notification setup did not start", null, gatt)
+        } else {
+            emptyList()
+        }
     }
 
     private fun handleBatteryRead(gatt: BluetoothGatt, uuid: UUID, value: ByteArray, result: Int) {
-        if (setupStep != SetupStep.BATTERY_READ || uuid != BATTERY_CHARACTERISTIC) return
-        if (result == BluetoothGatt.GATT_SUCCESS && value.isNotEmpty()) {
-            status = status.copy(batteryPercent = value[0].toInt() and 0xFF)
-            onStatus(status)
+        val events = synchronized(stateLock) {
+            if (captureGate.owner() !== gatt) return@synchronized emptyList()
+            val transition = PolarSetup.onBatteryRead(setupStep, uuid) ?: return@synchronized emptyList()
+            val events = mutableListOf<PolarEvent>()
+            if (result == BluetoothGatt.GATT_SUCCESS && value.isNotEmpty()) {
+                status = status.copy(batteryPercent = value[0].toInt() and 0xFF)
+                events += PolarEvent.Status(generation, status)
+            }
+            events += applySetupLocked(transition, gatt)
+            events
         }
-        startEcg(gatt)
-    }
-
-    private fun startEcg(gatt: BluetoothGatt) {
-        setupStep = SetupStep.START_ECG
-        writeControl(gatt, START_ECG)
+        emit(events)
     }
 
     @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
-    private fun writeControl(gatt: BluetoothGatt, value: ByteArray) {
-        val control = characteristic(gatt, PMD_SERVICE, PMD_CONTROL)
-            ?: return fail("Polar PMD control is unavailable", closeGatt = gatt)
+    private fun writeControlLocked(gatt: BluetoothGatt, value: ByteArray): List<PolarEvent> {
+        val control = characteristic(gatt, PolarUuids.PMD_SERVICE, PolarUuids.PMD_CONTROL)
+            ?: return failureLocked("Polar PMD control is unavailable", null, gatt)
         control.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         control.value = value
-        if (!gatt.writeCharacteristic(control)) fail("Polar PMD command did not start", closeGatt = gatt)
+        return if (!gatt.writeCharacteristic(control)) {
+            failureLocked("Polar PMD command did not start", null, gatt)
+        } else {
+            emptyList()
+        }
     }
 
-    private fun handleNotification(uuid: UUID, value: ByteArray) {
+    /** Must be called under [stateLock]. */
+    private fun disconnectedLocked(gatt: BluetoothGatt): List<PolarEvent> {
+        val nextGeneration = ++generation
+        captureGate.replaceOwner(null, nextGeneration)
+        setupStep = PolarSetupStep.NONE
+        status = status.copy(state = PolarConnectionState.LOST, message = "Polar disconnected")
+        return listOf(PolarEvent.Close(gatt), PolarEvent.Status(nextGeneration, status))
+    }
+
+    /** Must be called under [stateLock]. */
+    private fun failureLocked(
+        message: String,
+        throwable: Throwable?,
+        closeGatt: BluetoothGatt?,
+    ): List<PolarEvent> {
+        val events = mutableListOf<PolarEvent>()
+        if (closeGatt != null) {
+            // A stale failure for a replaced GATT must change nothing at all.
+            if (captureGate.owner() !== closeGatt) return emptyList()
+            captureGate.replaceOwner(null, ++generation)
+            setupStep = PolarSetupStep.NONE
+            events += PolarEvent.Close(closeGatt)
+        }
+        status = status.copy(state = PolarConnectionState.FAILED, message = message)
+        events += PolarEvent.Status(generation, status)
+        events += PolarEvent.Error(generation, message, throwable)
+        return events
+    }
+
+    private fun fail(message: String, throwable: Throwable? = null) {
+        val events = synchronized(stateLock) { failureLocked(message, throwable, null) }
+        emit(events)
+    }
+
+    private fun handleNotification(
+        uuid: UUID,
+        value: ByteArray,
+        snapshot: PolarCaptureSnapshot<BluetoothGatt>,
+    ) {
         when (uuid) {
-            HR_CHARACTERISTIC -> recordHeartRate(value)
-            PMD_DATA -> when (value.firstOrNull()?.toInt()) {
-                0 -> recordEcg(value)
-                2 -> recordAcc(value)
+            PolarUuids.HR_CHARACTERISTIC -> recordHeartRate(value, snapshot)
+            PolarUuids.PMD_DATA -> when (value.firstOrNull()?.toInt()) {
+                0 -> recordEcg(value, snapshot)
+                2 -> recordAcc(value, snapshot)
             }
         }
     }
 
-    private fun recordHeartRate(value: ByteArray) {
+    private fun recordHeartRate(value: ByteArray, snapshot: PolarCaptureSnapshot<BluetoothGatt>) {
         val frame = parsePolarHeartRate(value) ?: return
         val now = System.currentTimeMillis()
-        onHeartRate(frame, now)
-        status = status.copy(heartRateBpm = frame.beatsPerMinute, lastDataAtMillis = now)
-        onStatus(status)
+        // The frame keeps the recording it was delivered for, even if that
+        // recording was finalized meanwhile.
+        onHeartRate(frame, now, snapshot.recordingId)
+        publishSampleStatus(snapshot.generation) {
+            it.copy(heartRateBpm = frame.beatsPerMinute, lastDataAtMillis = now)
+        }
     }
 
-    private fun recordEcg(value: ByteArray) {
+    private fun recordEcg(value: ByteArray, snapshot: PolarCaptureSnapshot<BluetoothGatt>) {
         val frame = parsePolarEcg(value) ?: return
         val now = System.currentTimeMillis()
-        onEcg(frame, now)
-        status = status.copy(ecgFrames = status.ecgFrames + 1, lastDataAtMillis = now)
-        onStatus(status)
+        onEcg(frame, now, snapshot.recordingId)
+        publishSampleStatus(snapshot.generation) {
+            it.copy(ecgFrames = it.ecgFrames + 1, lastDataAtMillis = now)
+        }
     }
 
-    private fun recordAcc(value: ByteArray) {
+    private fun recordAcc(value: ByteArray, snapshot: PolarCaptureSnapshot<BluetoothGatt>) {
         val frame = parsePolarAcceleration(value) ?: return
         val now = System.currentTimeMillis()
-        onAcceleration(frame, now)
-        status = status.copy(accFrames = status.accFrames + 1, lastDataAtMillis = now)
-        onStatus(status)
+        onAcceleration(frame, now, snapshot.recordingId)
+        publishSampleStatus(snapshot.generation) {
+            it.copy(accFrames = it.accFrames + 1, lastDataAtMillis = now)
+        }
     }
 
-    private fun updateStatus(
-        state: PolarConnectionState,
-        deviceName: String? = status.deviceName,
-        message: String? = status.message,
-    ) {
-        status = status.copy(state = state, deviceName = deviceName, message = message)
-        onStatus(status)
-    }
-
-    private fun fail(message: String, throwable: Throwable? = null, closeGatt: BluetoothGatt? = null) {
-        closeGatt?.let(::clearGatt)
-        updateStatus(PolarConnectionState.FAILED, message = message)
-        onError(message, throwable)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun clearGatt(target: BluetoothGatt) {
-        if (gatt === target) gatt = null
-        runCatching { target.close() }
-        setupStep = SetupStep.NONE
+    private fun publishSampleStatus(sampleGeneration: Long, update: (PolarStatus) -> PolarStatus) {
+        val events = synchronized(stateLock) {
+            // A sample from a connection that has been replaced or cleared must
+            // not modify the current connection's counters or last-data time.
+            if (generation != sampleGeneration) return@synchronized emptyList()
+            status = update(status)
+            listOf(PolarEvent.Status(sampleGeneration, status))
+        }
+        emit(events)
     }
 
     private fun characteristic(gatt: BluetoothGatt, service: UUID, characteristic: UUID): BluetoothGattCharacteristic? =
@@ -360,27 +519,7 @@ class PolarSessionManager(
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(appContext, permission) == PackageManager.PERMISSION_GRANTED
 
-    private enum class SetupStep {
-        NONE,
-        HR_NOTIFY,
-        PMD_DATA_NOTIFY,
-        PMD_CONTROL_NOTIFY,
-        BATTERY_READ,
-        START_ECG,
-        START_ACC,
-    }
-
     companion object {
         private const val SCAN_TIMEOUT_MILLIS = 10_000L
-        private val CLIENT_CONFIG = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-        private val PMD_SERVICE = UUID.fromString("fb005c80-02e7-f387-1cad-8acd2d8df0c8")
-        private val PMD_CONTROL = UUID.fromString("fb005c81-02e7-f387-1cad-8acd2d8df0c8")
-        private val PMD_DATA = UUID.fromString("fb005c82-02e7-f387-1cad-8acd2d8df0c8")
-        private val HR_SERVICE = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
-        private val HR_CHARACTERISTIC = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")
-        private val BATTERY_SERVICE = UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb")
-        private val BATTERY_CHARACTERISTIC = UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb")
-        private val START_ECG = byteArrayOf(2, 0, 0, 1, 0x82.toByte(), 0, 1, 1, 0x0e, 0)
-        private val START_ACC = byteArrayOf(2, 2, 0, 1, 0xc8.toByte(), 0, 1, 1, 0x10, 0, 2, 1, 8, 0)
     }
 }

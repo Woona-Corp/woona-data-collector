@@ -137,6 +137,9 @@ class BatchingPacketCaptureController(
     private val delegate: PacketCaptureController,
     private val batcher: PacketProcessingUpdateBatcher,
 ) : PacketCaptureController {
+    override fun recoverPendingFragments(directory: File): PacketRecoveryResult =
+        delegate.recoverPendingFragments(directory)
+
     override fun submit(packetFragment: ByteArray): PacketSubmitResult = delegate.submit(packetFragment)
 
     override fun submit(
@@ -153,6 +156,8 @@ class BatchingPacketCaptureController(
         delegate.stopCapture()
         batcher.clearPending()
     }
+
+    override fun droppedFragments(): Long = delegate.droppedFragments()
 
     override fun finishCapture(timeoutMillis: Long): Boolean {
         val finished = delegate.finishCapture(timeoutMillis)

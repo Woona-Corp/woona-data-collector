@@ -122,6 +122,46 @@ class ServerApiClientIntegrationTest {
     }
 
     @Test
+    fun failedCaptureRecoveryArtifactUploadsAndDownloadsWithoutChangingOriginals() {
+        val arguments = InstrumentationRegistry.getArguments()
+        val url = arguments.getString("serverBaseUrl")
+        assumeTrue("Local API was not supplied", url != null)
+        val account = "recovery-${UUID.randomUUID()}"
+        val client = ServerApiClient(ServerSettings(requireNotNull(url), arguments.getString("serverToken") ?: "change-me-local-token", "qa", false, account))
+        client.applyAccount(account)
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val root = File(context.cacheDir, "recovery-api-${UUID.randomUUID()}")
+        val db = WoonaDatabase(context, root)
+        try {
+            val profile = db.saveProfile(completeDog().copy(numberOrName = "Synthetic recovery"), accountId = account)
+            client.uploadProfile(requireNotNull(db.profileSyncRecord(profile.profileVersionId)))
+            val recording = db.beginRecording(profile.id, RecordingSource.LIVE, completeSession().copy(videoRequested = false))
+            val directory = db.recordingDirectory(recording.relativeDirectory)
+            val original = File(directory, "raw_fragments.binlog").apply { writeBytes(byteArrayOf(9, 8, 7)) }
+            val recoveryBytes = byteArrayOf(87, 80, 82, 69, 67, 79, 86, 0, 0, 0, 0, 1)
+            val recovery = File(directory, "packet-recovery-${UUID.randomUUID()}.bin").apply { writeBytes(recoveryBytes) }
+            db.writeSyncMetadata(recording.id, CaptureSyncMetadata(recordingId = recording.id, profileId = profile.id,
+                source = "live", timezone = recording.timezone, selectedSessionStartUtc = recording.startedAtUtc))
+            db.markCaptureError(recording.id, "packet_persistence_failed", "Synthetic failure")
+            db.finishRecording(recording.id, RecordingStatus.FAILED)
+            db.hashPendingArtifacts()
+            val local = requireNotNull(db.recordingSyncRecord(recording.id))
+            val receipt = client.uploadRecording(local, { id -> db.resolveRelativePath(local.artifacts.single { it.id == id }.relativePath) }, { _, _, _ -> })
+            val remote = client.fetchRecording(recording.id)
+            assertEquals("failed", remote.captureStatus)
+            assertEquals("packet_persistence_failed", remote.captureErrorCode)
+            assertEquals(receipt.receiptSha256, remote.receiptSha256)
+            val artifact = remote.artifacts.single { it.fileName == recovery.name }
+            assertEquals("imported_source", artifact.type)
+            val downloaded = File(root, "verified-recovery.bin")
+            client.downloadArtifact(artifact.id, artifact.sizeBytes, artifact.sha256, downloaded)
+            assertArrayEquals(recoveryBytes, downloaded.readBytes())
+            assertArrayEquals(recoveryBytes, recovery.readBytes())
+            assertArrayEquals(byteArrayOf(9, 8, 7), original.readBytes())
+        } finally { db.close(); root.deleteRecursively() }
+    }
+
+    @Test
     fun realWorkManager_invalidTokenIsVisibleAndManualRetrySucceeds() {
         val arguments = InstrumentationRegistry.getArguments()
         val baseUrl = arguments.getString("serverBaseUrl")

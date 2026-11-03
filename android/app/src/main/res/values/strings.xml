@@ -4,6 +4,9 @@
     <string name="capture_notification_title">BLE capture in progress</string>
     <string name="capture_notification_text">The sensor recording continues while the app is in the background.</string>
     <string name="capture_notification_stop">Stop recording</string>
+    <string name="capture_notification_failure_title">Recording could not be stopped</string>
+    <string name="capture_notification_failure_text">Keep Woona open, check storage and retry stopping.</string>
+    <string name="capture_notification_retry">Retry stop</string>
 
     <string name="nav_overview">Overview</string>
     <string name="nav_charts">Charts</string>
@@ -137,6 +140,7 @@
     <string name="transport_profile_selected_next_connection">BLE transport profile selected: %1$s. Changes apply on the next connection.</string>
 
     <string name="packet_queue_overflow_stopped">Packet queue overflow. Capture stopped.</string>
+    <string name="polar_reconnect_before_recording">Polar is not ready for this recording. Reconnect Polar before recording again.</string>
     <string name="failed_persist_raw_fragment">Failed to persist raw BLE fragment</string>
     <string name="failed_reset_capture_session">Failed to reset capture session</string>
     <string name="failed_flush_buffered_output">Failed to flush buffered output</string>

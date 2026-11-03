@@ -26,6 +26,58 @@ import java.util.zip.ZipFile
 @RunWith(AndroidJUnit4::class)
 class DeviceFeatureSmokeTest {
     @Test
+    fun replayStopWaitsForInFlightWorkerBeforeAllowingNextRecording() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(context.cacheDir, "replay-drain-${UUID.randomUUID()}").apply { mkdirs() }
+        val db = com.example.myapplication.data.WoonaDatabase(context, root)
+        val packet = File(root, "synthetic.bin").apply { writeBytes(validPacket()) }
+        val pending = java.util.concurrent.atomic.AtomicBoolean(true)
+        val retryScheduled = java.util.concurrent.CountDownLatch(1)
+        val replay = object : com.example.myapplication.feature.device.PacketReplayController {
+            override fun startReplay(source: com.example.myapplication.feature.device.ReplayInputSource) = Unit
+            override fun stop() = Unit
+            override fun close() = Unit
+            override fun hasPendingWork() = pending.get()
+        }
+        val listener = object : BleSessionListener {
+            override fun onDeviceFound(device: BleDevice) = Unit
+            override fun onPacketReceived(packetFragment: ByteArray) = Unit
+            override fun onDiagnosticMessage(message: String) = Unit
+            override fun onCaptureReady() = Unit
+            override fun onStateChanged(state: BleSessionState) = Unit
+            override fun onError(message: String, throwable: Throwable?) = Unit
+        }
+        val controller = com.example.myapplication.feature.device.DeviceFeatureController(
+            FakeBleSessionController(listener), FakePacketCaptureController(packet), FakeFileShareIntentFactory(),
+            packetReplayController = replay, woonaDatabase = db,
+            schedule = { _, _ -> retryScheduled.countDown() },
+        )
+        try {
+            val profile = db.saveProfile(com.example.myapplication.data.DogQuestionnaire(
+                schemaVersion = 2, animalId = "replay-drain", numberOrName = "Synthetic replay"))
+            val recording = db.beginRecording(profile.id, com.example.myapplication.data.RecordingSource.REPLAY, null)
+            controller.beginRecordingSession(recording)
+            val stop = controller.onDisconnectRequested()
+            assertTrue("Finalization did not wait for replay worker", retryScheduled.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            org.junit.Assert.assertFalse(stop.isDone)
+            assertEquals(com.example.myapplication.data.RecordingStatus.PREPARING, db.recording(recording.id)?.status)
+            try {
+                controller.beginRecordingSession(recording.copy(id = UUID.randomUUID().toString()))
+                org.junit.Assert.fail("A new recording must not begin while replay can still submit")
+            } catch (_: IllegalStateException) { }
+            pending.set(false)
+            assertTrue(controller.onDisconnectRequested() === stop)
+            stop.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals(com.example.myapplication.data.RecordingStatus.COMPLETED, db.recording(recording.id)?.status)
+        } finally {
+            pending.set(false)
+            controller.close()
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun postedPreviewEventsCannotChangeANewerConnection() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -37,6 +89,7 @@ class DeviceFeatureSmokeTest {
             bleSessionControllerFactory = { listener -> FakeBleSessionController(listener).also { ble = it } },
             fileShareIntentFactory = FakeFileShareIntentFactory())
         try {
+            lateinit var stop: java.util.concurrent.CompletableFuture<Unit>
             instrumentation.runOnMainSync {
                 controller.onV2PreviewConnectRequested("OLD")
                 Thread {
@@ -44,7 +97,10 @@ class DeviceFeatureSmokeTest {
                     ble.listener.onStateChanged(BleSessionState.CONNECTED)
                     ble.listener.onError("Old connection failed", null)
                 }.apply { start(); join(2_000); assertTrue(!isAlive) }
-                controller.onDisconnectRequested()
+                stop = controller.onDisconnectRequested()
+            }
+            stop.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            instrumentation.runOnMainSync {
                 ble.beforeConnectionStarting = {
                     // Simulate the old binder callback owning the GATT lock
                     // while the UI is asking for a new preview connection.
@@ -91,7 +147,7 @@ class DeviceFeatureSmokeTest {
             org.junit.Assert.assertFalse(controller.canSharePacketFile())
             org.junit.Assert.assertFalse(controller.canShareAllFiles())
             org.junit.Assert.assertNull(controller.createPacketShareIntent(context))
-            controller.onDisconnectRequested()
+            controller.onDisconnectRequested().get(10, java.util.concurrent.TimeUnit.SECONDS)
             assertEquals(1, database.recentRecordings(profile.id).size)
             assertEquals(previous, database.recording(old.id))
             assertArrayEquals(bytes, packet.readBytes())
@@ -105,6 +161,8 @@ class DeviceFeatureSmokeTest {
             assertTrue(controller.isCaptureActive())
             val oldCaptureIdentity = controller.captureIdentity()
             controller.onCaptureServiceFailure("capture_foreground_start_denied", "Synthetic OS refusal", SecurityException("denied"))
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            while (controller.isCaptureActive() && System.nanoTime() < deadline) Thread.sleep(20)
             assertEquals(com.example.myapplication.data.RecordingStatus.FAILED, database.recording(active.id)?.status)
             assertEquals("capture_foreground_start_denied", database.recording(active.id)?.captureErrorCode)
             assertArrayEquals(bytes, packet.readBytes())
@@ -114,6 +172,7 @@ class DeviceFeatureSmokeTest {
             assertTrue(controller.isCaptureActive())
             assertEquals(com.example.myapplication.data.RecordingStatus.PREPARING, database.recording(next.id)?.status)
             org.junit.Assert.assertNull(database.recording(next.id)?.captureErrorCode)
+            controller.onDisconnectRequested().get(10, java.util.concurrent.TimeUnit.SECONDS)
         } finally { controller.close(); database.close(); root.deleteRecursively() }
     }
 
@@ -329,7 +388,7 @@ class DeviceFeatureSmokeTest {
         bleSessionController.listener.onCaptureReady()
         instrumentation.waitForIdleSync()
 
-        controller.onDisconnectRequested()
+        controller.onDisconnectRequested().get(10, java.util.concurrent.TimeUnit.SECONDS)
         instrumentation.waitForIdleSync()
 
         assertTrue(controller.canSharePacketFile())

@@ -2,7 +2,6 @@ package com.example.myapplication
 
 import android.graphics.Bitmap
 import android.content.res.Configuration
-import android.os.ParcelFileDescriptor
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -122,11 +121,6 @@ class VisualCaptureScreenTest {
                 output,
             ))
         }
-        ParcelFileDescriptor.AutoCloseInputStream(
-            InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
-                "cp ${screenshot.absolutePath} /sdcard/Download/$fileName",
-            ),
-        ).use { it.readBytes() }
     }
 
     private companion object {

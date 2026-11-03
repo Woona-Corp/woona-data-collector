@@ -71,7 +71,8 @@ class MainActivityRecreationTest {
                     androidx.compose.ui.semantics.Role.Tab,
                 ),
             ).performClick()
-            composeRule.onNodeWithText("New connection").performClick()
+            composeRule.onNode(hasScrollAction()).performScrollToNode(hasText("New connection"))
+            composeRule.onNodeWithText("New connection").assertIsDisplayed().performClick()
             composeRule
                 .onNodeWithText("Replay local file (debug)")
                 .performScrollTo()
