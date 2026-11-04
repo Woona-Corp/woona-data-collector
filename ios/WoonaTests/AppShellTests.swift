@@ -971,7 +971,7 @@ final class AppShellTests: XCTestCase {
         viewModel.selectedLanguage = .russian
 
         XCTAssertEqual(viewModel.selectedTransportProfile, .iosManaged)
-        XCTAssertEqual(viewModel.currentTransportProfileTitle, "iOS managed")
+        XCTAssertEqual(viewModel.currentTransportProfileTitle, "Управляется iOS")
         XCTAssertEqual(viewModel.selectedThemeMode, .dark)
         XCTAssertEqual(viewModel.selectedLanguage, .russian)
     }

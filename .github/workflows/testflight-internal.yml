@@ -8,8 +8,9 @@ on:
         required: true
         type: string
       build:
-        description: Exact uploaded build number
-        required: true
+        description: Exact uploaded build number; leave empty to derive it from the successful testflight.yml run at this commit
+        required: false
+        default: ''
         type: string
       assign_internal:
         description: Assign only to explicitly listed existing internal groups
@@ -22,6 +23,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: testflight-internal-status
@@ -35,13 +37,40 @@ jobs:
       - uses: actions/checkout@v7
       - name: Verify internal-only helper safety tests
         run: python3 -m unittest discover -s ios/tools -p 'test_testflight_internal.py' -v
+      - name: Derive exact uploaded build from the distribution run
+        id: derive_build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          CHECK_VERSION: ${{ inputs.version }}
+          EXPLICIT_BUILD: ${{ inputs.build }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$EXPLICIT_BUILD" ]]; then
+            echo "build=$EXPLICIT_BUILD" >> "$GITHUB_OUTPUT"
+            echo "Using explicitly provided build $EXPLICIT_BUILD"
+            exit 0
+          fi
+          # testflight.yml uploads with the build number
+          # 10000 + run number * 100 + attempt at the exact release tag ios-v<version>.
+          line=$(gh api "repos/$REPOSITORY/actions/runs?head_sha=$COMMIT_SHA&status=success&per_page=100" \
+            --jq '[.workflow_runs[] | select(.path == ".github/workflows/testflight.yml" and .event == "push" and .head_branch == ("ios-v'"$CHECK_VERSION"'"))] | first | if . == null then "" else "\\(.run_number) \\(.run_attempt)" end')
+          if [[ -z "$line" ]]; then
+            echo "::error::No successful testflight.yml distribution run found for commit $COMMIT_SHA and tag ios-v$CHECK_VERSION; dispatch from the release commit or pass the exact build as the build input." >&2
+            exit 1
+          fi
+          read -r run_number run_attempt <<<"$line"
+          build=$((10000 + run_number * 100 + run_attempt))
+          echo "Derived build $build from distribution run $run_number attempt $run_attempt of $COMMIT_SHA"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
       - name: Inspect exact build and optionally assign existing internal groups
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
           CHECK_VERSION: ${{ inputs.version }}
-          CHECK_BUILD: ${{ inputs.build }}
+          CHECK_BUILD: ${{ steps.derive_build.outputs.build }}
           ASSIGN_INTERNAL: ${{ inputs.assign_internal }}
           INTERNAL_GROUP_IDS: ${{ inputs.internal_group_ids }}
         run: python3 ios/tools/testflight_internal.py

@@ -7,7 +7,6 @@ import java.io.IOException
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -47,10 +46,9 @@ class SessionArchiveExporter(
                 archiveTimestampFormatter(sessionStartMillis ?: createdAtMillis),
             ).joinToString("_"),
         )
-        val tempFile = File(targetDirectory, "${archiveFile.name}.tmp")
-        if (tempFile.exists()) {
-            tempFile.delete()
-        }
+        // A collision must never destroy a file the exporter does not own, so the
+        // temporary name is made unique instead of deleting an existing file.
+        val tempFile = uniqueTempFile(archiveFile)
 
         return try {
             ZipOutputStream(
@@ -77,8 +75,9 @@ class SessionArchiveExporter(
             }
             archiveFile
         } catch (exception: Exception) {
+            // Only the temporary file the exporter created may be removed; the
+            // uniquely chosen archiveFile is never deleted, even on rename failure.
             tempFile.delete()
-            archiveFile.delete()
             throw exception
         }
     }
@@ -90,8 +89,10 @@ class SessionArchiveExporter(
         createdAtMillis: Long,
         metadata: SessionArchiveMetadata?,
     ) {
+        // Declare the exact ZIP member name so every manifest name resolves to a
+        // real entry regardless of case or characters replaced by sanitization.
         val fileEntries = files.joinToString(separator = ",\n") { file ->
-            "    {\"name\":\"${jsonEscape(file.name)}\",\"size\":${file.length()}}"
+            "    {\"name\":\"${jsonEscape(sanitizeZipEntryName(file.name))}\",\"size\":${file.length()}}"
         }
         val manifest = buildString {
             append("{\n")
@@ -160,12 +161,23 @@ class SessionArchiveExporter(
         return candidate
     }
 
+    private fun uniqueTempFile(archiveFile: File): File {
+        var candidate = File(archiveFile.parentFile, "${archiveFile.name}.tmp")
+        var suffix = 2
+        while (candidate.exists()) {
+            candidate = File(archiveFile.parentFile, "${archiveFile.nameWithoutExtension}-$suffix.zip.tmp")
+            suffix++
+        }
+        return candidate
+    }
+
+    // Entry names keep the original file case; the manifest declares the same
+    // sanitized name so it always resolves to the actual ZIP member.
     private fun sanitizeZipEntryName(name: String): String {
-        val sanitized = name
+        return name
             .replace('\\', '_')
             .replace('/', '_')
             .ifBlank { "session_file" }
-        return sanitized.lowercase(Locale.US)
     }
 
     private fun jsonEscape(value: String): String {

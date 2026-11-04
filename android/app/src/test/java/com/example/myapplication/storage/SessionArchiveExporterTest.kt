@@ -112,4 +112,60 @@ class SessionArchiveExporterTest {
             tempDirectory.delete()
         }
     }
+
+    @Test
+    fun exportPreservesFileCaseInManifestAndZip() {
+        val tempDirectory = File(
+            System.getProperty("java.io.tmpdir"),
+            "session-archive-case-${System.nanoTime()}",
+        ).apply { mkdirs() }
+        val sourceFile = File(tempDirectory, "ECG.CSV").apply { writeText("case") }
+        val exporter = SessionArchiveExporter(archiveTimestampFormatter = { "case" })
+
+        try {
+            val archive = exporter.export(
+                files = listOf(sourceFile),
+                targetDirectory = tempDirectory,
+                sessionStartMillis = 1_000L,
+                createdAtMillis = 2_000L,
+            )
+
+            ZipFile(archive).use { zip ->
+                assertTrue(zip.getEntry("ECG.CSV") != null)
+                val manifest = zip.getInputStream(zip.getEntry("manifest.json")).bufferedReader().readText()
+                assertTrue(manifest.contains("\"name\":\"ECG.CSV\""))
+            }
+        } finally {
+            tempDirectory.listFiles().orEmpty().forEach(File::delete)
+            tempDirectory.delete()
+        }
+    }
+
+    @Test
+    fun exportDoesNotDeleteExistingTemporaryOutput() {
+        val tempDirectory = File(
+            System.getProperty("java.io.tmpdir"),
+            "session-archive-collision-${System.nanoTime()}",
+        ).apply { mkdirs() }
+        val sourceFile = File(tempDirectory, "packets.bin").apply { writeBytes(byteArrayOf(1)) }
+        val foreignFile = File(tempDirectory, "woona_test.zip.tmp").apply { writeText("keep-me") }
+        val exporter = SessionArchiveExporter(archiveTimestampFormatter = { "test" })
+
+        try {
+            val archive = exporter.export(
+                files = listOf(sourceFile),
+                targetDirectory = tempDirectory,
+                sessionStartMillis = 1_000L,
+                createdAtMillis = 2_000L,
+            )
+
+            assertTrue(File(tempDirectory, "woona_test.zip").exists())
+            assertTrue("Existing temporary output must not be deleted", foreignFile.exists())
+            assertTrue("Existing temporary output must stay untouched", foreignFile.readText() == "keep-me")
+            assertFalse(File(tempDirectory, "woona_test-2.zip.tmp").exists())
+        } finally {
+            tempDirectory.listFiles().orEmpty().forEach(File::delete)
+            tempDirectory.delete()
+        }
+    }
 }

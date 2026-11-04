@@ -462,7 +462,12 @@ final class AppViewModel: ObservableObject {
     }
 
     var currentTransportProfileTitle: String {
-        selectedTransportProfile.title
+        // The BLE module owns transport logic, not UI language, so the title is
+        // localized here where the selected UI language is known.
+        switch selectedTransportProfile {
+        case .iosManaged:
+            selectedLanguage == .russian ? "Управляется iOS" : selectedTransportProfile.title
+        }
     }
 
     func saveDogProfile(_ questionnaire: DogQuestionnaire, replacing profile: DogProfile? = nil) throws {
