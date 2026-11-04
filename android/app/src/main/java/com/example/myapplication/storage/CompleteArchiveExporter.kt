@@ -10,7 +10,9 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 /** Exports only app-owned data roots. Never pass preferences, credentials or a whole sandbox. */
-class CompleteArchiveExporter {
+class CompleteArchiveExporter(
+    private val availableSpace: (File) -> Long = { it.usableSpace },
+) {
     data class Root(val prefix: String, val directory: File, val include: (String) -> Boolean = { true })
     data class Entry(val path: String, val sourcePath: String, val sizeBytes: Long, val sha256: String)
     data class Progress(val completedBytes: Long, val totalBytes: Long, val completedFiles: Int, val totalFiles: Int)
@@ -40,7 +42,8 @@ class CompleteArchiveExporter {
         val total = sources.fold(0L) { size, item -> Math.addExact(size, item.size) }
         // Stored video barely compresses. Reserve room for a complete streaming ZIP and its directory.
         val required = Math.addExact(total, Math.addExact(16L * 1024 * 1024, sources.size * 1024L))
-        if (target.parentFile!!.usableSpace < required) throw IOException("Not enough free space: archive needs approximately $required bytes; ${target.parentFile!!.usableSpace} bytes available. Original data is unchanged.")
+        val available = availableSpace(target.parentFile!!)
+        if (available < required) throw IOException("Not enough free space: archive needs approximately $required bytes; $available bytes available. Original data is unchanged.")
         val entries = ArrayList<Entry>()
         var completed = 0L
         try {

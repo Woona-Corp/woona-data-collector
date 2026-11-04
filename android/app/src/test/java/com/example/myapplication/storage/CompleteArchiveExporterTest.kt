@@ -34,16 +34,38 @@ class CompleteArchiveExporterTest {
             assertTrue(manifest.contains("Physically deleted"))
         }
     }
-    @Test fun insufficientSpaceFailsBeforeCopyingAndPreservesSparseSource() = fixture { base, root, snapshot ->
-        val source = File(root, "large-video.mp4")
-        val size = 2L * 1024 * 1024 * 1024 * 1024
-        java.io.RandomAccessFile(source, "rw").use { it.setLength(size) }
+    @Test fun insufficientSpaceFailsBeforeCopyingAndPreservesSource() = fixture { base, root, snapshot ->
+        val content = byteArrayOf(0, 1, -1)
+        val source = File(root, "video.mp4").apply { writeBytes(content) }
+        val required = source.length() + snapshot.length() + 16L * 1024 * 1024 + 2 * 1024L
+        var spaceChecks = 0
+        val exporter = CompleteArchiveExporter(availableSpace = { directory ->
+            assertEquals(base.canonicalFile, directory)
+            spaceChecks++
+            required - 1
+        })
         val failure = assertThrows(IOException::class.java) {
-            CompleteArchiveExporter().export(listOf(CompleteArchiveExporter.Root("data/Woona", root)), snapshot, File(base, "out.zip"), "{}")
+            exporter.export(listOf(CompleteArchiveExporter.Root("data/Woona", root)), snapshot, File(base, "out.zip"), "{}",
+                checkCancelled = { fail("Copying must not start when space is insufficient") },
+                onProgress = { fail("No progress should be reported before the space check passes") })
         }
         assertTrue(failure.message.orEmpty().contains("Not enough free space"))
-        assertEquals(size, source.length())
+        assertTrue(failure.message.orEmpty().contains("$required bytes"))
+        assertTrue(failure.message.orEmpty().contains("${required - 1} bytes available"))
+        assertEquals(1, spaceChecks)
+        assertArrayEquals(content, source.readBytes())
         assertFalse(File(base, "out.zip").exists())
+        assertFalse(File(base, "out.zip.part").exists())
+    }
+    @Test fun exactlyRequiredSpaceAllowsExport() = fixture { base, root, snapshot ->
+        val source = File(root, "video.mp4").apply { writeText("small video fixture") }
+        val required = source.length() + snapshot.length() + 16L * 1024 * 1024 + 2 * 1024L
+        val output = CompleteArchiveExporter(availableSpace = { required }).export(
+            listOf(CompleteArchiveExporter.Root("data/Woona", root)), snapshot, File(base, "out.zip"), "{}",
+        )
+        ZipFile(output).use { zip ->
+            assertEquals("small video fixture", zip.getInputStream(zip.getEntry("data/Woona/video.mp4")).reader().readText())
+        }
         assertFalse(File(base, "out.zip.part").exists())
     }
     @Test fun emptyInstallationStillExportsDatabaseAndManifest() = fixture { base, root, snapshot ->
