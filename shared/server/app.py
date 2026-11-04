@@ -901,11 +901,47 @@ def ensure_not_retired(connection: Connection, kind: str, identity: uuid.UUID) -
         raise HTTPException(410, detail={"code": "entity_retired", "kind": kind})
 
 
+DELETION_KINDS = ("dog", "profile", "recording", "artifact")
+DELETION_PAGE_MAX = 5000
+DELETION_PAGE_DEFAULT = 1000
+DELETION_CURSOR = re.compile(r"^(dog|profile|recording|artifact):([0-9a-f]{64})$")
+
+
+def deletion_page_arguments(limit: int, cursor: str | None) -> tuple[int, tuple[str, str] | None]:
+    """Validate a bounded page request; a marker list is never returned unbounded."""
+    if limit < 1 or limit > DELETION_PAGE_MAX:
+        raise HTTPException(422, detail={"code": "invalid_deletion_limit",
+                                        "minLimit": 1, "maxLimit": DELETION_PAGE_MAX})
+    if cursor is None:
+        return limit, None
+    matched = DELETION_CURSOR.fullmatch(cursor)
+    if matched is None:
+        raise HTTPException(422, detail={"code": "invalid_deletion_cursor"})
+    return limit, (matched.group(1), matched.group(2))
+
+
 @app.get("/v1/deletions")
-def get_deletions(device_id: Annotated[uuid.UUID, Depends(authenticated_device)]) -> dict:
+def get_deletions(
+    device_id: Annotated[uuid.UUID, Depends(authenticated_device)],
+    limit: int = DELETION_PAGE_DEFAULT,
+    cursor: str | None = None,
+) -> dict:
+    limit, after = deletion_page_arguments(limit, cursor)
+    # Retirement markers carry no account column (migration 0005), so this page
+    # is ordered and bounded rather than account-scoped. A device that stops
+    # following nextCursor would miss markers, therefore the page is larger than
+    # any current deployment and the clients loop until nextCursor is null.
+    query = "SELECT kind,id_sha256 FROM retired_entities"
+    parameters: dict[str, Any] = {"limit": limit + 1}
+    if after is not None:
+        query += " WHERE (kind,id_sha256) > (:after_kind,:after_hash)"
+        parameters.update(after_kind=after[0], after_hash=after[1])
+    query += " ORDER BY kind,id_sha256 LIMIT :limit"
     with engine.connect() as connection:
-        rows = connection.execute(text("SELECT kind,id_sha256 FROM retired_entities ORDER BY kind,id_sha256")).mappings()
-        return {"entities": [dict(row) for row in rows]}
+        rows = [dict(row) for row in connection.execute(text(query), parameters).mappings()]
+    page = rows[:limit]
+    next_cursor = f"{page[-1]['kind']}:{page[-1]['id_sha256']}" if len(rows) > limit and page else None
+    return {"entities": page, "limit": limit, "nextCursor": next_cursor}
 
 
 @app.put("/v1/dogs/{dog_id}/profile-versions/{profile_id}")
@@ -1509,7 +1545,46 @@ async def patch_artifact(
     )
 
 
+STORAGE_FAILURE_CODES = frozenset({"storage_full", "storage_unavailable", "storage_space_low"})
+
+
+def record_upload_failure(artifact_id: uuid.UUID, failure: HTTPException) -> None:
+    """Store a server-side storage cause so a stalled upload stays explainable.
+
+    Only server storage conditions are persisted. Offset mismatches, ownership
+    and size conflicts describe a request the client must correct, and inventing
+    a stored reason for them would misreport the server's own state.
+    """
+    detail = failure.detail if isinstance(failure.detail, dict) else {}
+    code = detail.get("code")
+    if failure.status_code not in {503, 507} or code not in STORAGE_FAILURE_CODES:
+        return
+    message = error_guidance(str(code), failure.status_code)["message"]
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("""
+                UPDATE artifacts SET error_code=:code,error_message=:message
+                WHERE id=:id AND storage_status='uploading'
+                """), {"code": code, "message": message, "id": artifact_id})
+    except Exception:  # Never replace the real upload failure with a logging one.
+        logger.exception("upload_failure_not_recorded artifactId=%s", artifact_id)
+
+
 def persist_artifact_chunk(
+    artifact_id: uuid.UUID,
+    device_id: uuid.UUID,
+    upload_offset: int,
+    body: bytearray,
+    request_id: str = "",
+) -> Response:
+    try:
+        return persist_artifact_chunk_locked(artifact_id, device_id, upload_offset, body, request_id)
+    except HTTPException as failure:
+        record_upload_failure(artifact_id, failure)
+        raise
+
+
+def persist_artifact_chunk_locked(
     artifact_id: uuid.UUID,
     device_id: uuid.UUID,
     upload_offset: int,
@@ -1564,7 +1639,7 @@ def persist_artifact_chunk(
                     """
                     UPDATE artifacts
                     SET stored_size_bytes=:offset,storage_status='uploading',
-                        upload_updated_at=now()
+                        upload_updated_at=now(),error_code=NULL,error_message=NULL
                     WHERE id=:id
                     """
                 ),

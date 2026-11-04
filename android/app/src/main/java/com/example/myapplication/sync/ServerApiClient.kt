@@ -40,7 +40,11 @@ class ServerHttpException(
     val status: Int,
     val responseBody: String,
     val responseHeaders: Map<String, List<String>>,
-) : IOException("Server returned HTTP $status: ${responseBody.take(500)}")
+    val requestId: String? = null,
+) : IOException(
+    "Server returned HTTP $status: ${responseBody.take(500)}" +
+        (requestId?.let { " (requestId=$it)" } ?: ""),
+)
 
 class ServerTransferException(val code: String, message: String, val retryable: Boolean = false) : IOException("$code: $message")
 
@@ -53,6 +57,38 @@ internal class TransferCursorGuard {
         if (!seen.add(parsed)) throw ServerTransferException("pagination_stalled", "Server repeated a restore cursor. Previously restored local data is preserved.")
         return parsed
     }
+}
+
+internal data class DeletionPage(val markers: List<Pair<String, String>>, val nextCursor: String?)
+
+/**
+ * The server bounds one retirement page, so following `nextCursor` is required:
+ * stopping after the first response would leave retired data on the device.
+ * Kept free of JSON/networking so the loop is unit-testable on the JVM.
+ */
+internal fun followDeletionPages(
+    maxPages: Int,
+    fetch: (String?) -> DeletionPage,
+): List<Pair<String, String>> {
+    val markers = mutableListOf<Pair<String, String>>()
+    val seenCursors = HashSet<String>()
+    var cursor: String? = null
+    repeat(maxPages) {
+        val page = fetch(cursor)
+        markers += page.markers
+        val next = page.nextCursor ?: return markers
+        if (!seenCursors.add(next)) {
+            throw ServerTransferException(
+                "pagination_stalled",
+                "The server repeated a retirement cursor. Previously restored local data is preserved.",
+            )
+        }
+        cursor = next
+    }
+    throw ServerTransferException(
+        "pagination_stalled",
+        "The server kept returning retirement pages. Previously restored local data is preserved.",
+    )
 }
 
 class ServerApiClient(
@@ -297,13 +333,18 @@ class ServerApiClient(
         } catch (error: Throwable) { abort(); throw error }
     }
 
-    fun fetchDeletions(): List<Pair<String, String>> {
-        val entities = jsonRequest("GET", "/v1/deletions", null).getJSONArray("entities")
-        return (0 until entities.length()).map { index ->
-            val item = entities.getJSONObject(index)
-            item.getString("kind") to item.getString("id_sha256")
+    fun fetchDeletions(): List<Pair<String, String>> =
+        followDeletionPages(DELETION_PAGE_LIMIT) { cursor ->
+            val path = "/v1/deletions?limit=$DELETION_PAGE_SIZE" + (cursor?.let { "&cursor=$it" } ?: "")
+            val response = jsonRequest("GET", path, null)
+            val entities = response.optJSONArray("entities") ?: JSONArray()
+            val markers = (0 until entities.length()).map { index ->
+                val item = entities.getJSONObject(index)
+                item.getString("kind") to item.getString("id_sha256")
+            }
+            val next = if (response.isNull("nextCursor")) null else response.optString("nextCursor").ifEmpty { null }
+            DeletionPage(markers, next)
         }
-    }
 
     fun fetchRecording(recordingId: String): RemoteRecording =
         parseRecording(jsonRequest("GET", "/v1/recordings/$recordingId", null))
@@ -424,6 +465,12 @@ class ServerApiClient(
         ServerTransferRegistry.ensureActive(settings.transferGeneration)
     }
 
+    private companion object {
+        // The server caps one page at 5000 markers; 200 pages is a bounded loop.
+        const val DELETION_PAGE_SIZE = 1000
+        const val DELETION_PAGE_LIMIT = 200
+    }
+
     private fun open(method: String, path: String, authenticated: Boolean = true): HttpURLConnection {
         ensureTransferActive()
         return connectionFactory(URL(settings.baseUrl + path)).apply {
@@ -433,6 +480,8 @@ class ServerApiClient(
             useCaches = false
             instanceFollowRedirects = false // Never forward device credentials to another host.
             setRequestProperty("Accept", "application/json")
+            // Correlates a failed transfer with the server's structured request log.
+            setRequestProperty("X-Request-ID", java.util.UUID.randomUUID().toString())
             if (authenticated) setRequestProperty("Authorization", "Bearer ${settings.token}")
             settings.accountId?.let { setRequestProperty("X-Woona-Account", it) }
             ServerTransferRegistry.register(this, settings.transferGeneration)
@@ -457,7 +506,10 @@ class ServerApiClient(
             if (Thread.currentThread().isInterrupted) throw failure
             "The error response body could not be read (${failure.javaClass.simpleName}); HTTP status $status was received."
         }
-        return ServerHttpException(status, body, connection.headerFields)
+        // The server echoes the request id it logged; keep it bounded because a
+        // proxy or an unrelated server can return arbitrary header bytes.
+        val requestId = connection.getHeaderField("X-Request-ID")?.trim()?.take(64)?.takeIf { it.isNotEmpty() }
+        return ServerHttpException(status, body, connection.headerFields, requestId)
     }
 
     private fun profilePayload(record: ProfileSyncRecord): JSONObject = JSONObject().apply {

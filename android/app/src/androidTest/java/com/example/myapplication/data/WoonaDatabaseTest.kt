@@ -9,6 +9,8 @@ import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -280,6 +282,27 @@ class WoonaDatabaseTest {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         if (root == File(context.filesDir, "Woona")) ActivityDatabase.resetForTesting()
         root.deleteRecursively()
+    }
+
+    @Test
+    fun syncGapSeparatesARemovedRecordingFromAMissingSyncRow() {
+        val profile = database.saveProfile(completeDogQuestionnaire("Gap dog"))
+        val session = database.beginRecording(profile.id, RecordingSource.LIVE, completeSessionQuestionnaire())
+        database.finishRecording(session.id, RecordingStatus.COMPLETED)
+        // begin/finish alone leave recording_sync absent: the row a write failure
+        // would leave behind, which must not be reported as "nothing to sync".
+        assertNull(database.recordingSyncRecord(session.id))
+        assertEquals(SYNC_GAP_SYNC_MISSING, database.recordingSyncGap(session.id))
+        val recording = requireNotNull(database.recording(session.id))
+        database.writeSyncMetadata(session.id, CaptureSyncMetadata(
+            recordingId = session.id,
+            profileId = profile.id,
+            source = recording.source.value,
+            timezone = recording.timezone,
+            selectedSessionStartUtc = requireNotNull(recording.startedAtUtc),
+        ))
+        assertNull(database.recordingSyncGap(session.id))
+        assertNotNull(database.recordingSyncRecord(session.id))
     }
 
     @Test

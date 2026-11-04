@@ -51,7 +51,28 @@ def quality_status(alignment) -> dict:
             'medicalQualityVerified': False}
 
 
-def artifact_status(row, storage_root: Path) -> dict:
+def stalled_reason(status: str, code: str | None, acknowledged: int, expected: int,
+                   last_progress, now) -> tuple[str | None, str | None]:
+    """Derive an explanation when no server-side cause was stored for a stall.
+
+    The wording reports only what the server can observe: silence and byte
+    counts. It never claims why the phone stopped (offline, backgrounded or
+    killed) because that is not visible here.
+    """
+    if status != "uploading" or code is not None or last_progress is None or now is None:
+        return code, None
+    if last_progress.tzinfo is None:
+        last_progress = last_progress.replace(tzinfo=timezone.utc)
+    if (now - last_progress).total_seconds() < STALE_AFTER_SECONDS:
+        return code, None
+    if acknowledged <= 0:
+        return ("upload_not_started",
+                f"The server has received none of this file's {expected} bytes and no progress was reported for over {STALE_AFTER_SECONDS // 60} minutes. The source device has to resume the transfer.")
+    return ("upload_interrupted",
+            f"The transfer stopped at {acknowledged} of {expected} bytes with no progress for over {STALE_AFTER_SECONDS // 60} minutes. Resume it on the source device from the acknowledged server offset; the accepted bytes are preserved.")
+
+
+def artifact_status(row, storage_root: Path, now=None) -> dict:
     """HEAD-compatible acknowledged offset, without hashing large files on every poll."""
     expected = row['expected_size_bytes']
     acknowledged = min(max(row['stored_size_bytes'], 0), expected)
@@ -59,6 +80,7 @@ def artifact_status(row, storage_root: Path) -> dict:
     code, message = row.get('error_code'), row.get('error_message')
     retryable, action = True, 'resume_upload'
     verified = False
+    derived = False
     if status == 'available':
         retryable, action = False, 'none'
         relative = row.get('server_relative_path')
@@ -97,12 +119,17 @@ def artifact_status(row, storage_root: Path) -> dict:
             action = 'restart_file_upload'
         elif acknowledged == expected and not code:
             action = 'verify_file'
+        code, derived_message = stalled_reason(status, code, acknowledged, expected,
+                                               row.get('upload_updated_at'), now)
+        if derived_message is not None:
+            derived, message = True, derived_message
     return {
         'id': str(row['id']), 'type': row['artifact_type'], 'fileName': row['file_name'],
         'storageStatus': status, 'sizeBytes': expected, 'uploadedBytes': acknowledged,
         'verified': verified, 'verifiedAtUtc': iso(row.get('verified_at')),
         'lastProgressAtUtc': iso(row.get('upload_updated_at')),
         'errorCode': code, 'errorMessage': message, 'retryable': retryable,
+        'errorDerived': derived,
         'nextAction': action, 'partOfCaptureReceipt': row['artifact_type'] not in REFERENCE_TYPES,
     }
 
@@ -114,7 +141,7 @@ def recording_status(recording, artifact_rows, storage_root: Path, *, now=None) 
     # displayed or required for progress. Keeping both views on the same rows
     # prevents an administrative retirement from looking like disk corruption.
     visible_rows = [row for row in artifact_rows if row.get('is_active', True)]
-    artifacts = [artifact_status(row, storage_root) for row in visible_rows]
+    artifacts = [artifact_status(row, storage_root, now) for row in visible_rows]
     capture_files = [item for item in artifacts if item['partOfCaptureReceipt']]
     total_bytes = sum(item['sizeBytes'] for item in capture_files)
     uploaded = sum(item['uploadedBytes'] for item in capture_files)

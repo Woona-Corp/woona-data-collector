@@ -35,7 +35,10 @@ import com.example.myapplication.data.markRecordingUploading
 import com.example.myapplication.data.pendingProfileVersionIds
 import com.example.myapplication.data.pendingRecordingIds
 import com.example.myapplication.data.profileSyncRecord
+import com.example.myapplication.data.SyncGapOutcome
+import com.example.myapplication.data.recordingSyncGap
 import com.example.myapplication.data.recordingSyncRecord
+import com.example.myapplication.data.syncGapOutcome
 import com.example.myapplication.data.readyForSync
 import com.example.myapplication.data.applyServerDeletions
 import com.example.myapplication.data.acceptServerProfile
@@ -152,7 +155,20 @@ class RecordingSyncWorker(
                 )
                 return Result.failure()
             }
-            var record = database.recordingSyncRecord(recordingId) ?: return Result.success()
+            var record = database.recordingSyncRecord(recordingId) ?: run {
+                // A missing row used to end this work as success, which hid the
+                // write failure that persistSyncMetadata already reported once.
+                if (syncGapOutcome(database.recordingSyncGap(recordingId)) == SyncGapOutcome.REMOVED_LOCALLY) {
+                    return Result.success()
+                }
+                database.markRecordingSyncError(
+                    recordingId,
+                    retryable = false,
+                    code = "sync_metadata_missing",
+                    message = "Local synchronization metadata for this recording is missing. Its files are preserved; reopen the session so the metadata is rewritten, then retry the upload.",
+                )
+                return Result.failure()
+            }
             val transferContext = currentCoroutineContext()
             val client = ServerApiClient(settings.copy(accountId = database.profile(record.dogId)?.accountId), checkCancelled = { transferContext.ensureActive() })
             val markers = client.fetchDeletions()

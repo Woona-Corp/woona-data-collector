@@ -38,6 +38,28 @@ prove a server failure: the source device can be offline. `retryable`,
 Per-file entries also include `storageStatus`, `sizeBytes`, `uploadedBytes`,
 `verified`, timestamps and error/action details.
 
+Per-file `errorCode` has two honest sources. A server storage failure while
+writing a chunk (`storage_full`, `storage_unavailable`, `storage_space_low`) is
+persisted on the artifact and cleared by the next committed chunk. Without such
+a stored cause, an `uploading` file with no progress for over 15 minutes reports
+a derived code - `upload_not_started` (no acknowledged bytes) or
+`upload_interrupted` (partial bytes) - together with `errorDerived: true`. The
+derived wording reports only observed silence and byte counts; it never claims
+that the phone was offline, backgrounded or killed. Client-side conflicts
+(offset, ownership, size) are deliberately not stored as server causes.
+
+## Retirement markers
+
+`GET /v1/deletions` returns a bounded, ordered page:
+`{entities: [{kind, id_sha256}], limit, nextCursor}`. `limit` defaults to 1000 and
+must be 1-5000 (`invalid_deletion_limit` otherwise); `cursor` is the previous
+page's `nextCursor` (`kind:id_sha256`) and is rejected with
+`invalid_deletion_cursor` when malformed. Clients must follow `nextCursor` until
+it is `null`; stopping after one page would miss retirement markers. Markers
+carry no account column, so this endpoint is bounded and ordered rather than
+account-scoped: a device can still confirm whether a given hashed identifier was
+retired. Account scoping requires a schema change and is not claimed here.
+
 ## Capture and labeling
 
 `capture.status`, `errorCode`, `errorMessage`, and `successful` describe capture,

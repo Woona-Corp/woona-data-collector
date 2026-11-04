@@ -342,6 +342,32 @@ fun WoonaDatabase.hashPendingArtifacts(): Int {
     return pending.size
 }
 
+const val SYNC_GAP_RECORDING_MISSING = "recording_missing"
+const val SYNC_GAP_PROFILE_MISSING = "profile_missing"
+const val SYNC_GAP_SYNC_MISSING = "sync_missing"
+
+enum class SyncGapOutcome { REMOVED_LOCALLY, MISSING_METADATA }
+
+/** A recording deleted locally is finished; missing prerequisite rows are not. */
+fun syncGapOutcome(gap: String?): SyncGapOutcome =
+    if (gap == SYNC_GAP_RECORDING_MISSING) SyncGapOutcome.REMOVED_LOCALLY else SyncGapOutcome.MISSING_METADATA
+
+/**
+ * Distinguishes "nothing left to sync" from "a required local row is absent".
+ * `recordingSyncRecord` returns null for a removed recording, a missing profile
+ * row and a missing recording_sync row alike; silently succeeding on the last
+ * two hides a real write failure.
+ */
+fun WoonaDatabase.recordingSyncGap(recordingId: String): String? {
+    if (recording(recordingId) == null) return SYNC_GAP_RECORDING_MISSING
+    if (recordingSyncRecord(recordingId) != null) return null
+    val hasSyncRow = readableDatabase.rawQuery(
+        "SELECT 1 FROM recording_sync WHERE recording_id=? LIMIT 1",
+        arrayOf(recordingId),
+    ).use { it.moveToFirst() }
+    return if (hasSyncRow) SYNC_GAP_PROFILE_MISSING else SYNC_GAP_SYNC_MISSING
+}
+
 fun WoonaDatabase.recordingSyncRecord(recordingId: String): RecordingSyncRecord? {
     val recording = readableDatabase.rawQuery(
         """
