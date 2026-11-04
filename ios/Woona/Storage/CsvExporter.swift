@@ -26,7 +26,7 @@ struct CsvExporter {
         var firstSampleTimerMillis: Int64?
         var previousSampleTimerMillis: Int64?
 
-        try forEachPacket(in: packetFile) { packetBytes in
+        try RecordedPacketFileParser().forEachPacket(in: packetFile) { packetBytes in
             switch packetValidator.validate(packetBytes) {
             case let .accepted(packet):
                 let rows = buildRows(
@@ -69,7 +69,7 @@ struct CsvExporter {
         try output.write(contentsOf: Data(header(columns: orderedColumns).utf8))
         previousSampleTimerMillis = nil
 
-        try forEachPacket(in: packetFile) { packetBytes in
+        try RecordedPacketFileParser().forEachPacket(in: packetFile) { packetBytes in
             switch packetValidator.validate(packetBytes) {
             case let .accepted(packet):
                 let rows = buildRows(
@@ -102,53 +102,6 @@ struct CsvExporter {
 
         try output.synchronize()
         return targetFile
-    }
-
-    private func forEachPacket(
-        in packetFile: URL,
-        onPacket: ([UInt8]) throws -> Void
-    ) throws {
-        let input = try FileHandle(forReadingFrom: packetFile)
-        defer {
-            try? input.close()
-        }
-
-        var offset = 0
-        while true {
-            let headerData = try input.read(upToCount: PacketValidator.minimumPacketSize) ?? Data()
-            if headerData.isEmpty {
-                return
-            }
-
-            guard headerData.count == PacketValidator.minimumPacketSize else {
-                throw RecordedPacketFileParserError.truncatedPacketHeader(offset: offset)
-            }
-
-            var packetBytes = [UInt8](headerData)
-            guard PacketValidator.hasStartMarker(packetBytes, at: 0) else {
-                throw RecordedPacketFileParserError.invalidPacketStartMarker(offset: offset)
-            }
-
-            let packetLength = PacketValidator.decodeLength(packetBytes)
-            guard (PacketValidator.minimumPacketSize...PacketValidator.maximumPacketSize).contains(packetLength) else {
-                throw RecordedPacketFileParserError.invalidPacketLength(length: packetLength, offset: offset)
-            }
-
-            let remainingByteCount = packetLength - PacketValidator.minimumPacketSize
-            if remainingByteCount > 0 {
-                let bodyData = try input.read(upToCount: remainingByteCount) ?? Data()
-                guard bodyData.count == remainingByteCount else {
-                    throw RecordedPacketFileParserError.truncatedPacketBody(
-                        offset: offset,
-                        expectedLength: packetLength
-                    )
-                }
-                packetBytes.append(contentsOf: bodyData)
-            }
-
-            try onPacket(packetBytes)
-            offset += packetLength
-        }
     }
 
     private func header(columns: [CsvColumnKey]) -> String {

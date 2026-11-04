@@ -565,19 +565,15 @@ class PacketCaptureProcessor(
             // Retain before append: append itself can fail after a partial write.
             unflushedFragments.add(fragment)
             unflushedBytes += fragment.bytes.size
-            try {
-                rawFragmentFileStore.appendFragment(
-                    sequence = receivedFragmentCount,
-                    receivedAtMillis = fragment.receivedAtMillis,
-                    receivedAtMonotonicNs = fragment.receivedAtMonotonicNs,
-                    fragmentBytes = fragment.bytes,
-                )
-                receivedFragmentCount++
-                receivedRawBytes += fragment.bytes.size.toLong()
-                if (unflushedFragments.size >= MAX_UNFLUSHED_FRAGMENTS) flushRawBatchLocked()
-            } catch (exception: Exception) {
-                throw exception
-            }
+            rawFragmentFileStore.appendFragment(
+                sequence = receivedFragmentCount,
+                receivedAtMillis = fragment.receivedAtMillis,
+                receivedAtMonotonicNs = fragment.receivedAtMonotonicNs,
+                fragmentBytes = fragment.bytes,
+            )
+            receivedFragmentCount++
+            receivedRawBytes += fragment.bytes.size.toLong()
+            if (unflushedFragments.size >= MAX_UNFLUSHED_FRAGMENTS) flushRawBatchLocked()
 
             val updates = mutableListOf<PacketProcessingUpdate>()
 
@@ -594,17 +590,7 @@ class PacketCaptureProcessor(
                             }
                         }
                         registerRejection(rejectionReason)
-                        val statsSnapshot = packetStats.snapshot()
-                        updates += PacketProcessingUpdate(
-                            packetsReceived = statsSnapshot.packetsReceived,
-                            packetsLost = statsSnapshot.packetsLost,
-                            packetsRejected = rejectedPackets,
-                            timerRegressionRejects = timerRegressionRejects,
-                            fragmentsReceived = queuedFragmentCount.get(),
-                            rawBytesReceived = receivedRawBytes,
-                            fragmentsPersisted = receivedFragmentCount,
-                            fragmentsDropped = droppedFragmentCount.get(),
-                            chartSamplesByStream = emptyMap(),
+                        updates += createStatsUpdateLocked(
                             lastPacketIssue = rejectionReason,
                             rejectionBreakdown = buildRejectionBreakdown(),
                             diagnosticEvents = listOf(
@@ -631,17 +617,7 @@ class PacketCaptureProcessor(
                                     }
                                     registerRejection(timerRegressionMessage)
                                     if (sequenceDecision.issue == PacketSequenceIssue.TIMER_REGRESSION) timerRegressionRejects++
-                                    val statsSnapshot = packetStats.snapshot()
-                                    updates += PacketProcessingUpdate(
-                                        packetsReceived = statsSnapshot.packetsReceived,
-                                        packetsLost = statsSnapshot.packetsLost,
-                                        packetsRejected = rejectedPackets,
-                                        timerRegressionRejects = timerRegressionRejects,
-                                        fragmentsReceived = queuedFragmentCount.get(),
-                                        rawBytesReceived = receivedRawBytes,
-                                        fragmentsPersisted = receivedFragmentCount,
-                                        fragmentsDropped = droppedFragmentCount.get(),
-                                        chartSamplesByStream = emptyMap(),
+                                    updates += createStatsUpdateLocked(
                                         lastPacketIssue = timerRegressionMessage,
                                         rejectionBreakdown = buildRejectionBreakdown(),
                                         diagnosticEvents = listOf(
@@ -660,19 +636,15 @@ class PacketCaptureProcessor(
                                 }
 
                                 val diagnosticEvents = mutableListOf<PacketDiagnosticEvent>()
-                                try {
-                                    packetFileStore.append(validation.packet.bytes)
-                                    packetTimelineFileStore?.append(
-                                        sequence = acceptedPacketSequence++,
-                                        counter = validation.packet.counter,
-                                        deviceTimerMillis = validation.packet.timerMillis,
-                                        hostWallClockMillis = fragment.receivedAtMillis,
-                                        hostMonotonicNs = fragment.receivedAtMonotonicNs,
-                                        packetBytes = validation.packet.bytes.size,
-                                    )
-                                } catch (exception: Exception) {
-                                    throw exception
-                                }
+                                packetFileStore.append(validation.packet.bytes)
+                                packetTimelineFileStore?.append(
+                                    sequence = acceptedPacketSequence++,
+                                    counter = validation.packet.counter,
+                                    deviceTimerMillis = validation.packet.timerMillis,
+                                    hostWallClockMillis = fragment.receivedAtMillis,
+                                    hostMonotonicNs = fragment.receivedAtMonotonicNs,
+                                    packetBytes = validation.packet.bytes.size,
+                                )
 
                                 val previousTimerMillis = if (lastAcceptedTimerMillis == UNINITIALIZED_TIMER_MILLIS) {
                                     null
@@ -714,15 +686,7 @@ class PacketCaptureProcessor(
                                     message = buildAcceptedPacketMessage(validation.packet),
                                 )
 
-                                updates += PacketProcessingUpdate(
-                                    packetsReceived = recordResult.snapshot.packetsReceived,
-                                    packetsLost = recordResult.snapshot.packetsLost,
-                                    packetsRejected = rejectedPackets,
-                                    timerRegressionRejects = timerRegressionRejects,
-                                    fragmentsReceived = queuedFragmentCount.get(),
-                                    rawBytesReceived = receivedRawBytes,
-                                    fragmentsPersisted = receivedFragmentCount,
-                                    fragmentsDropped = droppedFragmentCount.get(),
+                                updates += createStatsUpdateLocked(
                                     chartSamplesByStream = buildChartSamplesByStream(
                                         packet = validation.packet,
                                         previousTimerMillis = if (recordResult.gapCount > 0 || sequenceDecision.startsNewSegment) null else previousTimerMillis,
@@ -737,17 +701,7 @@ class PacketCaptureProcessor(
                             is PacketValidationResult.Rejected -> {
                                 val rejectionReason = localizedReason(validation.reason)
                                 registerRejection(rejectionReason)
-                                val statsSnapshot = packetStats.snapshot()
-                                updates += PacketProcessingUpdate(
-                                    packetsReceived = statsSnapshot.packetsReceived,
-                                    packetsLost = statsSnapshot.packetsLost,
-                                    packetsRejected = rejectedPackets,
-                                    timerRegressionRejects = timerRegressionRejects,
-                                    fragmentsReceived = queuedFragmentCount.get(),
-                                    rawBytesReceived = receivedRawBytes,
-                                    fragmentsPersisted = receivedFragmentCount,
-                                    fragmentsDropped = droppedFragmentCount.get(),
-                                    chartSamplesByStream = emptyMap(),
+                                updates += createStatsUpdateLocked(
                                     lastPacketIssue = rejectionReason,
                                     rejectionBreakdown = buildRejectionBreakdown(),
                                     diagnosticEvents = listOf(

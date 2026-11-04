@@ -2,7 +2,7 @@ import XCTest
 @testable import Woona
 
 final class PacketReplayControllerTests: XCTestCase {
-    func testEmptyReplayFileErrorsAndStops() async {
+    func testEmptyReplayFileErrorsAndStops() async throws {
         let events = ReplayEventBox()
         let controller = PacketReplayController(
             submitFragment: { _ in .accepted },
@@ -13,13 +13,14 @@ final class PacketReplayControllerTests: XCTestCase {
             packetIntervalMillis: 0
         )
 
-        await controller.startReplay([])
+        await controller.startReplay(from: try replayFile([]))
+        await events.waitUntilContains("stopped")
 
         let recordedEvents = await events.values
         XCTAssertEqual(recordedEvents, ["error:\(PacketReplayMessage.emptyFile)", "stopped"])
     }
 
-    func testInvalidReplayFileErrorsAndStops() async {
+    func testInvalidReplayFileErrorsAndStops() async throws {
         let events = ReplayEventBox()
         let controller = PacketReplayController(
             submitFragment: { _ in .accepted },
@@ -30,7 +31,8 @@ final class PacketReplayControllerTests: XCTestCase {
             packetIntervalMillis: 0
         )
 
-        await controller.startReplay([0x01, 0x02, 0x03])
+        await controller.startReplay(from: try replayFile([0x01, 0x02, 0x03]))
+        await events.waitUntilContains("stopped")
 
         let recordedEvents = await events.values
         XCTAssertEqual(recordedEvents, ["error:\(PacketReplayMessage.invalidFile)", "stopped"])
@@ -74,7 +76,7 @@ final class PacketReplayControllerTests: XCTestCase {
             blocks: [makeSensorBlock(sensorType: 2, channelSamples: [[20]])]
         )
 
-        await controller.startReplay(first + second)
+        await controller.startReplay(from: try replayFile(first + second))
         await events.waitUntilContains("completed")
         await processor.flush()
 
@@ -141,7 +143,7 @@ final class PacketReplayControllerTests: XCTestCase {
                 bytes: Array(recovered.dropFirst(PacketValidator.minimumPacketSize))
             )
 
-        await controller.startReplay(rawFile)
+        await controller.startReplay(from: try replayFile(rawFile))
         await events.waitUntilContains("completed")
         await processor.flush()
 
@@ -158,7 +160,7 @@ final class PacketReplayControllerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: packetFile), Data(first + recovered))
     }
 
-    func testRawFragmentReplayTimingCapIsIndependentFromChunkDelay() async {
+    func testRawFragmentReplayTimingCapIsIndependentFromChunkDelay() async throws {
         let events = ReplayEventBox()
         let submitted = SubmittedFragmentBox()
         let rawFile = RawFragmentFileStore.magicHeader
@@ -177,7 +179,7 @@ final class PacketReplayControllerTests: XCTestCase {
             packetIntervalMillis: 0
         )
 
-        await controller.startReplay(rawFile)
+        await controller.startReplay(from: try replayFile(rawFile))
         await events.waitUntilContains("completed", timeoutNanoseconds: 300_000_000)
 
         let submittedFragments = await submitted.values
@@ -186,7 +188,7 @@ final class PacketReplayControllerTests: XCTestCase {
         XCTAssertEqual(recordedEvents, ["started", "completed"])
     }
 
-    func testRuntimeFailureStopsReplayState() async {
+    func testRuntimeFailureStopsReplayState() async throws {
         let events = ReplayEventBox()
         let controller = PacketReplayController(
             submitFragment: { _ in .overflow },
@@ -197,14 +199,14 @@ final class PacketReplayControllerTests: XCTestCase {
             packetIntervalMillis: 0
         )
 
-        await controller.startReplay(makeTestPacket(counter: 1, measurementCount: 1))
+        await controller.startReplay(from: try replayFile(makeTestPacket(counter: 1, measurementCount: 1)))
         await events.waitUntilContains("stopped")
 
         let recordedEvents = await events.values
         XCTAssertEqual(recordedEvents, ["started", "error:\(PacketReplayMessage.failed)", "stopped"])
     }
 
-    func testReplayCancellationStopsWithoutCompleting() async {
+    func testReplayCancellationStopsWithoutCompleting() async throws {
         let events = ReplayEventBox()
         let first = makeTestPacket(counter: 1, measurementCount: 1)
         let second = makeTestPacket(counter: 2, measurementCount: 1)
@@ -219,12 +221,61 @@ final class PacketReplayControllerTests: XCTestCase {
             packetIntervalMillis: 10_000
         )
 
-        await controller.startReplay(first + second)
+        await controller.startReplay(from: try replayFile(first + second))
         await events.waitUntilContains("started")
         await controller.stop()
 
         let recordedEvents = await events.values
         XCTAssertEqual(recordedEvents, ["started", "stopped"])
+    }
+
+    func testTruncatedTailDoesNotSubmitValidPrefix() async throws {
+        let events = ReplayEventBox()
+        let submitted = SubmittedFragmentBox()
+        let controller = PacketReplayController(
+            submitFragment: { bytes in await submitted.append(bytes); return .accepted },
+            onReplayStarted: { await events.append("started") },
+            onReplayCompleted: { await events.append("completed") },
+            onReplayStopped: { await events.append("stopped") },
+            onError: { message, _ in await events.append("error:\(message)") },
+            packetIntervalMillis: 0
+        )
+        let bytes = makeTestPacket(counter: 1, measurementCount: 1) + [0x33, 0x99]
+        let file = try replayFile(bytes)
+        await controller.startReplay(from: file)
+        await events.waitUntilContains("stopped")
+        await controller.stop()
+        let fragments = await submitted.values
+        let recorded = await events.values
+        XCTAssertTrue(fragments.isEmpty)
+        XCTAssertEqual(recorded, ["error:\(PacketReplayMessage.invalidFile)", "stopped"])
+        XCTAssertEqual(try Data(contentsOf: file), Data(bytes))
+    }
+
+    func testMissingReplaySourceReportsLoadFailure() async throws {
+        let events = ReplayEventBox()
+        let directory = try temporaryDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let controller = PacketReplayController(
+            submitFragment: { _ in .accepted },
+            onReplayStarted: { await events.append("started") },
+            onReplayCompleted: { await events.append("completed") },
+            onReplayStopped: { await events.append("stopped") },
+            onError: { message, _ in await events.append("error:\(message)") }
+        )
+        await controller.startReplay(from: directory.appendingPathComponent("missing.bin"))
+        await events.waitUntilContains("stopped")
+        await controller.stop()
+        let recorded = await events.values
+        XCTAssertEqual(recorded, ["error:\(PacketReplayMessage.loadFailed)", "stopped"])
+    }
+
+    private func replayFile(_ bytes: [UInt8]) throws -> URL {
+        let directory = try temporaryDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("input.bin")
+        try Data(bytes).write(to: file)
+        return file
     }
 
     private func temporaryDirectory() throws -> URL {

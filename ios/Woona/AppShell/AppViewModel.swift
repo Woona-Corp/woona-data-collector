@@ -934,25 +934,12 @@ final class AppViewModel: ObservableObject {
 
     func startReplay(from fileURL: URL) {
         Task {
-            do {
-                let didAccess = fileURL.startAccessingSecurityScopedResource()
-                defer {
-                    if didAccess {
-                        fileURL.stopAccessingSecurityScopedResource()
-                    }
-                }
-                let bytes = try [UInt8](Data(contentsOf: fileURL))
-                packetUpdateBatcher.clearPending()
-                await packetProcessor.resetSession()
-                hasPreparedActiveCapture = true
-                invalidateSessionExportAvailability()
-                packetUpdateBatcher.clearPending()
-                await replayController.startReplay(bytes)
-            } catch {
-                await packetProcessor.resetSession()
-                showError("Failed to load replay file", error: error)
-                if activeRecording?.source == "replay" { stopActiveCapture(status: "failed") }
-            }
+            packetUpdateBatcher.clearPending()
+            await packetProcessor.resetSession()
+            hasPreparedActiveCapture = true
+            invalidateSessionExportAvailability()
+            packetUpdateBatcher.clearPending()
+            await replayController.startReplay(from: fileURL)
         }
     }
 
