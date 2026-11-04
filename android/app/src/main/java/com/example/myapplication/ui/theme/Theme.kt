@@ -88,18 +88,3 @@ fun MyApplicationTheme(
         content = content
     )
 }
-
-object AppThemeEntryPoint {
-    @Composable
-    fun Render(
-        themeMode: AppThemeMode = AppThemeMode.SYSTEM,
-        dynamicColor: Boolean = false,
-        content: @Composable () -> Unit,
-    ) {
-        MyApplicationTheme(
-            themeMode = themeMode,
-            dynamicColor = dynamicColor,
-            content = content,
-        )
-    }
-}

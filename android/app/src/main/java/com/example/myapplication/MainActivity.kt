@@ -49,7 +49,7 @@ import com.example.myapplication.feature.device.DeviceFeatureController
 import com.example.myapplication.feature.device.VideoCaptureState
 import com.example.myapplication.localization.AppLanguage
 import com.example.myapplication.localization.AppLanguagePreferences
-import com.example.myapplication.localization.AppLocalizationEntryPoint
+import com.example.myapplication.localization.AppLocalizationProvider
 import com.example.myapplication.localization.AppTextResolver
 import com.example.myapplication.profile.DogQuestionnaireDialog
 import com.example.myapplication.profile.ProfilesOverview
@@ -67,7 +67,7 @@ import com.example.myapplication.sync.ServerSyncScheduler
 import com.example.myapplication.sync.LocalRetirementCleanupWorker
 import com.example.myapplication.sync.ServerSyncStatus
 import com.example.myapplication.sync.ServerSyncUiState
-import com.example.myapplication.ui.theme.AppThemeEntryPoint
+import com.example.myapplication.ui.theme.MyApplicationTheme
 import com.example.myapplication.ui.theme.AppThemeMode
 import com.example.myapplication.ui.theme.AppThemePreferences
 import com.example.myapplication.ui.theme.applyAppThemeMode
@@ -279,7 +279,7 @@ class MainActivity : ComponentActivity() {
                 }
             },
         ) {
-            DeviceFeatureModuleEntryPoint.create(
+            createDeviceFeatureController(
                 context = app,
                 filesDir = filesDir,
                 fileProviderAuthority = "$packageName.provider",
@@ -329,20 +329,20 @@ class MainActivity : ComponentActivity() {
         }
         enableEdgeToEdge()
         setContent {
-            AppLocalizationEntryPoint.Provide(
+            AppLocalizationProvider(
                 language = selectedLanguage,
                 textResolver = appTextResolver,
             ) {
                 if (!startupReady) {
-                    AppThemeEntryPoint.Render(themeMode = selectedThemeMode) {
+                    MyApplicationTheme(themeMode = selectedThemeMode) {
                         com.example.myapplication.storage.StartupRecoveryScreen(selectedLanguage, startupRecoveryRunning, startupRecoveryError) { beginStartupRecovery() }
                     }
                 } else {
                 val historyListState = androidx.compose.runtime.saveable.rememberSaveable(selectedProfileId, saver = androidx.compose.foundation.lazy.LazyListState.Saver) { androidx.compose.foundation.lazy.LazyListState() }
                 val uiState = deviceFeatureController.uiState
-                AppThemeEntryPoint.Render(themeMode = selectedThemeMode) {
+                MyApplicationTheme(themeMode = selectedThemeMode) {
                     val serverMutationBlock = serverMutationBlockReason(serverSyncState.uploading)
-                    AppShellEntryPoint.Render(
+                    DeviceAppShell(
                         uiState = uiState,
                         selectedLanguage = selectedLanguage,
                         selectedThemeMode = selectedThemeMode,

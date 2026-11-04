@@ -1094,7 +1094,7 @@ class WoonaDatabaseTest {
                 "/v1/recordings/$retiredRecord"->410 to "{}"
                 "/v1/recordings/$unknownGone"->410 to "{}"
                 "/v1/recordings/${original.id}"->404 to "{}"
-                "/v1/deletions"->200 to JSONObject().put("entities",org.json.JSONArray(listOf(JSONObject().put("kind","dog").put("id_sha256",hash(retiredDog)),JSONObject().put("kind","recording").put("id_sha256",hash(retiredRecord))))).toString()
+                "/v1/deletions?limit=1000"->200 to JSONObject().put("entities",org.json.JSONArray(listOf(JSONObject().put("kind","dog").put("id_sha256",hash(retiredDog)),JSONObject().put("kind","recording").put("id_sha256",hash(retiredRecord))))).toString()
                 else->error("Unexpected fixture path $path")
             }
         },headers)
@@ -1102,7 +1102,7 @@ class WoonaDatabaseTest {
         assertEquals(1,snapshot.dogs.size);assertEquals(1,snapshot.recordings.size)
         assertEquals(4,snapshot.warnings.size);assertEquals(2,snapshot.warnings.count {!it.confirmedRetirement})
         assertFalse(snapshot.warnings.single { it.id == unknownGone }.confirmedRetirement)
-        assertEquals("/v1/deletions",requested.last());assertTrue(headers.all {it=="account-a"})
+        assertEquals("/v1/deletions?limit=1000",requested.last());assertTrue(headers.all {it=="account-a"})
         assertTrue(requireNotNull(com.example.myapplication.sync.restoreWarningsText(snapshot.warnings,com.example.myapplication.localization.AppLanguage.ENGLISH)).contains("partially"))
         database.restoreServerMetadata(snapshot.dogs,snapshot.recordings);database.applyServerDeletions(snapshot.deletions)
         assertEquals(original.sessionLabel,database.recording(original.id)?.sessionLabel)

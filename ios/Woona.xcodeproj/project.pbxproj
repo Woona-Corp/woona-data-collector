@@ -69,6 +69,9 @@
 		8A1AC0002B0000000000B106 /* V2PreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000B105 /* V2PreviewView.swift */; };
 		8A1AC0002B0000000000B108 /* V2PreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1AC0002B0000000000B107 /* V2PreviewTests.swift */; };
 		8A1AD0002B0000000000C102 /* storage-api-contract.json in Resources */ = {isa = PBXBuildFile; fileRef = 8A1AD0002B0000000000C101 /* storage-api-contract.json */; };
+		F690E24897AD4D30ACD48D9E /* PacketIngress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EC755D247C24291993944BA /* PacketIngress.swift */; };
+		7E86B89FE496486688DE4040 /* PresentationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E82CFB6E2E1A45758C0FB74E /* PresentationModels.swift */; };
+		55D5A9F27F9A4742B090E02D /* BackgroundExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BA7A65E6DE0410FAF57F652 /* BackgroundExecution.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -148,6 +151,9 @@
 		8A1AC0002B0000000000B105 /* V2PreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V2PreviewView.swift; sourceTree = "<group>"; };
 		8A1AC0002B0000000000B107 /* V2PreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V2PreviewTests.swift; sourceTree = "<group>"; };
 		8A1AD0002B0000000000C101 /* storage-api-contract.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = storage-api-contract.json; path = "../shared/testdata/storage-api-contract.json"; sourceTree = SOURCE_ROOT; };
+		2EC755D247C24291993944BA /* PacketIngress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketIngress.swift; sourceTree = "<group>"; };
+		E82CFB6E2E1A45758C0FB74E /* PresentationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresentationModels.swift; sourceTree = "<group>"; };
+		2BA7A65E6DE0410FAF57F652 /* BackgroundExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundExecution.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -220,6 +226,8 @@
 		8A1A00192B00000100000001 /* AppShell */ = {
 			isa = PBXGroup;
 			children = (
+				2BA7A65E6DE0410FAF57F652 /* BackgroundExecution.swift */,
+				E82CFB6E2E1A45758C0FB74E /* PresentationModels.swift */,
 				8A1AC0002B0000000000B105 /* V2PreviewView.swift */,
 				8A1A000C2B00000100000001 /* AppViewModel.swift */,
 				8A1A000E2B00000100000001 /* AppRootView.swift */,
@@ -297,6 +305,7 @@
 		8A1A00522B00000400000001 /* Capture */ = {
 			isa = PBXGroup;
 			children = (
+				2EC755D247C24291993944BA /* PacketIngress.swift */,
 				8A1A00532B00000400000001 /* CaptureModels.swift */,
 				8A1A00552B00000400000001 /* PacketCaptureProcessor.swift */,
 				8A1A00572B00000400000001 /* PacketProcessingUpdateBatcher.swift */,
@@ -450,6 +459,9 @@
 				8A1AC0002B0000000000A102 /* WoonaV2Codec.swift in Sources */,
 				8A1A000B2B00000100000001 /* WoonaApp.swift in Sources */,
 				8A1A000D2B00000100000001 /* AppViewModel.swift in Sources */,
+				55D5A9F27F9A4742B090E02D /* BackgroundExecution.swift in Sources */,
+				7E86B89FE496486688DE4040 /* PresentationModels.swift in Sources */,
+				F690E24897AD4D30ACD48D9E /* PacketIngress.swift in Sources */,
 				8A1A000F2B00000100000001 /* AppRootView.swift in Sources */,
 				8A1A00112B00000100000001 /* OverviewView.swift in Sources */,
 				8A1A00132B00000100000001 /* ChartsView.swift in Sources */,
