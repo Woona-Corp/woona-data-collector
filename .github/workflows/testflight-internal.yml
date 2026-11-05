@@ -55,7 +55,7 @@ jobs:
           # testflight.yml uploads with the build number
           # 10000 + run number * 100 + attempt at the exact release tag ios-v<version>.
           line=$(gh api "repos/$REPOSITORY/actions/runs?head_sha=$COMMIT_SHA&status=success&per_page=100" \
-            --jq '[.workflow_runs[] | select(.path == ".github/workflows/testflight.yml" and .event == "push" and .head_branch == ("ios-v'"$CHECK_VERSION"'"))] | first | if . == null then "" else "\\(.run_number) \\(.run_attempt)" end')
+            --jq '[.workflow_runs[] | select(.path == ".github/workflows/testflight.yml" and .event == "push" and .head_branch == ("ios-v'"$CHECK_VERSION"'"))] | first | if . == null then "" else [.run_number, .run_attempt] | @tsv end')
           if [[ -z "$line" ]]; then
             echo "::error::No successful testflight.yml distribution run found for commit $COMMIT_SHA and tag ios-v$CHECK_VERSION; dispatch from the release commit or pass the exact build as the build input." >&2
             exit 1
