@@ -270,6 +270,98 @@ final class PacketReplayControllerTests: XCTestCase {
         XCTAssertEqual(recorded, ["error:\(PacketReplayMessage.loadFailed)", "stopped"])
     }
 
+    func testConcurrentStartsKeepOnlyLatestReplay() async throws {
+        let gate = ReplaySubmissionGate()
+        let controller = gatedReplayController(gate)
+        let first = try rawReplayFile(marker: 1)
+        let replaced = try rawReplayFile(marker: 2)
+        let latest = try rawReplayFile(marker: 3)
+        await controller.startReplay(from: first)
+        await gate.events.waitUntilContains("submitted:1")
+        let replacing = Task { await controller.startReplay(from: replaced) }
+        await gate.events.waitUntilContains("cancelled")
+
+        let entered = expectation(description: "Latest request entered the controller")
+        let startingLatest = Task {
+            await requestReplay(on: controller, from: latest, entered: entered)
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        await gate.release()
+        await replacing.value
+        await startingLatest.value
+        await gate.events.waitUntilContains("submitted:3")
+        await controller.stop()
+        try await Task.sleep(nanoseconds: 250_000_000)
+
+        let submitted = await gate.values
+        XCTAssertEqual(submitted, [[1], [3]])
+    }
+
+    func testStopSupersedesPendingStartAndWaitsForFragment() async throws {
+        let gate = ReplaySubmissionGate()
+        let controller = gatedReplayController(gate)
+        await controller.startReplay(from: try rawReplayFile(marker: 1))
+        await gate.events.waitUntilContains("submitted:1")
+        let replacement = try rawReplayFile(marker: 2)
+        let replacing = Task { await controller.startReplay(from: replacement) }
+        await gate.events.waitUntilContains("cancelled")
+
+        let returned = expectation(description: "Stop must await the blocked fragment")
+        returned.isInverted = true
+        let stopping = Task {
+            await controller.stop()
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 0.1)
+        await gate.release()
+        await replacing.value
+        await stopping.value
+        await controller.stop()
+
+        let submitted = await gate.values
+        XCTAssertEqual(submitted, [[1]])
+    }
+
+    func testCloseWaitsForReplayAlreadyBeingStopped() async throws {
+        let gate = ReplaySubmissionGate()
+        let controller = gatedReplayController(gate)
+        await controller.startReplay(from: try rawReplayFile(marker: 1))
+        await gate.events.waitUntilContains("submitted:1")
+        let stopping = Task { await controller.stop() }
+        await gate.events.waitUntilContains("cancelled")
+
+        let returned = expectation(description: "Close must await the blocked fragment")
+        returned.isInverted = true
+        let closing = Task {
+            await controller.close()
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 0.1)
+        await gate.release()
+        await stopping.value
+        await closing.value
+
+        let submitted = await gate.values
+        XCTAssertEqual(submitted, [[1]])
+    }
+
+    private func gatedReplayController(_ gate: ReplaySubmissionGate) -> PacketReplayController {
+        PacketReplayController(
+            submitFragment: { await gate.submit($0) },
+            onReplayStarted: {},
+            onReplayCompleted: {},
+            onReplayStopped: {},
+            onError: { message, _ in XCTFail(message) },
+            packetIntervalMillis: 200
+        )
+    }
+
+    private func rawReplayFile(marker: UInt8) throws -> URL {
+        try replayFile(RawFragmentFileStore.magicHeader
+            + makeReplayRawFragmentRecord(sequence: 0, receivedAtMillis: 0, bytes: [marker])
+            + makeReplayRawFragmentRecord(sequence: 1, receivedAtMillis: 200, bytes: [marker]))
+    }
+
     private func replayFile(_ bytes: [UInt8]) throws -> URL {
         let directory = try temporaryDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
@@ -284,6 +376,39 @@ final class PacketReplayControllerTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+}
+
+private func requestReplay(
+    on controller: isolated PacketReplayController,
+    from file: URL,
+    entered: XCTestExpectation
+) async {
+    entered.fulfill()
+    await controller.startReplay(from: file)
+}
+
+private actor ReplaySubmissionGate {
+    let events = ReplayEventBox()
+    private(set) var values: [[UInt8]] = []
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func submit(_ bytes: [UInt8]) async -> PacketSubmitResult {
+        values.append(bytes)
+        await events.append("submitted:\(bytes[0])")
+        if bytes == [1], values.count == 1 {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation = $0 }
+            } onCancel: {
+                Task { await self.events.append("cancelled") }
+            }
+        }
+        return .accepted
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

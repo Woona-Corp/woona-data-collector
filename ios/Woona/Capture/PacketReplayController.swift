@@ -36,6 +36,7 @@ actor PacketReplayController {
     private let maximumRawFragmentDelayMillis: UInt64
 
     private var replayTask: Task<Void, Never>?
+    private var latestRequestID = UUID()
 
     init(
         submitFragment: @escaping @Sendable ([UInt8]) async -> PacketSubmitResult,
@@ -64,7 +65,11 @@ actor PacketReplayController {
     }
 
     func startReplay(from fileURL: URL) async {
-        await stop()
+        let requestID = UUID()
+        latestRequestID = requestID
+        replayTask?.cancel()
+        await replayTask?.value
+        guard latestRequestID == requestID else { return }
         let submitFragment = submitFragment
         let onReplayStarted = onReplayStarted
         let onReplayCompleted = onReplayCompleted
@@ -171,10 +176,12 @@ actor PacketReplayController {
     }
 
     func stop() async {
-        guard let task = replayTask else { return }
-        replayTask = nil
-        task.cancel()
-        await task.value
+        let requestID = UUID()
+        latestRequestID = requestID
+        // Retain the draining task so concurrent stop/close calls also await it.
+        replayTask?.cancel()
+        await replayTask?.value
+        if latestRequestID == requestID { replayTask = nil }
     }
 
     func close() async {
