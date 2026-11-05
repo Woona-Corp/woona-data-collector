@@ -10,6 +10,23 @@ from server.tests.test_heart import heart_manifest, request
 
 
 class AccountApiTest(unittest.TestCase):
+    def test_historical_v1_edit_preserves_schema_and_rejects_upgrade(self):
+        manifest, _ = heart_manifest()
+        original = test_api.session_questionnaire()
+        manifest["recording"].update(questionnaireSchemaVersion=1, sessionQuestionnaire=original, videoRequested=False)
+        manifest["artifacts"] = [a for a in manifest["artifacts"] if a["type"] != "video"]
+        recording = str(uuid.uuid4())
+        request("PUT", "/v1/recordings/" + recording, manifest, headers=self.headers)
+        path = "/v1/recordings/" + recording + "/questionnaire"
+        upgraded = dict(original, schemaVersion=2, plannedActivities=["Покой"])
+        rejected = expect_http(422, "PUT", path, {"expectedRevision": 1, "questionnaire": upgraded}, headers=self.headers)
+        self.assertEqual("immutable_capture_field", rejected["code"])
+        self.assertEqual("schemaVersion", rejected["field"])
+        edited = dict(original, sessionLabel="Edited historical v1")
+        saved = json.loads(request("PUT", path, {"expectedRevision": 1, "questionnaire": edited}, headers=self.headers)[2])
+        self.assertEqual(edited, saved["sessionQuestionnaire"])
+        self.assertEqual(2, saved["questionnaireRevision"])
+
     @classmethod
     def setUpClass(cls):
         test_api.ApiIntegrationTest.setUpClass()

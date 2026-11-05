@@ -1332,6 +1332,13 @@ class WoonaDatabase(
         val original = requireNotNull(recording.questionnaire)
         require(!recording.requiresServerQuestionnaireEdit) { "Для изменения восстановленной серверной анкеты подключитесь к серверу. Черновик сохранён в редакторе / Connect to the server to edit a restored server questionnaire. Your draft remains in the editor" }
         require(recording.status in setOf(RecordingStatus.COMPLETED, RecordingStatus.FAILED, RecordingStatus.INTERRUPTED) && recording.serverSyncState != "synced" && recording.serverSyncState != "uploading")
+        val storedSchema = readableDatabase.rawQuery("SELECT questionnaire_schema_version FROM recordings WHERE id=?", arrayOf(recordingId)).use {
+            check(it.moveToFirst())
+            it.getInt(0)
+        }
+        require((storedSchema == 0 || storedSchema == original.schemaVersion) && original.schemaVersion == questionnaire.schemaVersion) {
+            "Историческая схема анкеты должна сохраняться / Preserve the historical questionnaire schema"
+        }
         require(questionnaire.validate().isValid)
         require(original.animalId == questionnaire.animalId && original.videoRequested == questionnaire.videoRequested && original.sessionKind == questionnaire.sessionKind)
         val sync = File(recordingDirectory(recording.relativeDirectory), "sync.json")

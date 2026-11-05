@@ -20,6 +20,26 @@ import org.json.JSONObject
 @RunWith(AndroidJUnit4::class)
 class WoonaDatabaseTest {
     @Test
+    fun sessionEditCannotChangeHistoricalSchemaOrPersistMixedVersions() {
+        val dog = database.saveProfile(completeDogQuestionnaire("Historical"))
+        val original = completeSessionQuestionnaire()
+        val recording = database.beginRecording(dog.id, RecordingSource.LIVE, original)
+        database.finishRecording(recording.id, RecordingStatus.COMPLETED)
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            database.saveSessionQuestionnaire(recording.id, original.copy(schemaVersion = 2, plannedActivities = listOf("Покой")))
+        }
+        assertEquals(original, database.recording(recording.id)?.questionnaire)
+        database.readableDatabase.rawQuery("SELECT questionnaire_schema_version,questionnaire_json FROM recordings WHERE id=?", arrayOf(recording.id)).use {
+            assertTrue(it.moveToFirst())
+            assertEquals(1, it.getInt(0))
+            assertEquals(1, JSONObject(it.getString(1)).getInt("schemaVersion"))
+        }
+        database.writableDatabase.execSQL("UPDATE recordings SET questionnaire_schema_version=0 WHERE id=?", arrayOf(recording.id))
+        database.saveSessionQuestionnaire(recording.id, original.copy(sessionLabel = "Completed legacy draft"))
+        assertEquals(1, database.recording(recording.id)?.questionnaire?.schemaVersion)
+    }
+
+    @Test
     fun interruptedCaptureRegistersDurablePacketRecoveryWithoutChangingOriginalBytes() {
         val dog = database.saveProfile(completeDogQuestionnaire("Recovery"))
         val recording = database.beginRecording(dog.id, RecordingSource.LIVE, completeSessionQuestionnaire())
