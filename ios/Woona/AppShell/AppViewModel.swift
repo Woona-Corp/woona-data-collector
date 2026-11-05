@@ -31,10 +31,13 @@ final class AppViewModel: ObservableObject {
     @Published var selectedLanguage: AppLanguage = .english {
         didSet { UserDefaults.standard.set(selectedLanguage.rawValue, forKey: "language") }
     }
-    @Published private var sessionChart = SessionChart()
+    @Published private(set) var chart = ChartUiState()
+    // Mutate history in place; publish only the rendered chart.
+    private var sessionChart = SessionChart() {
+        didSet { chart = sessionChart.chart }
+    }
     var selectedSensorType: Int { sessionChart.selectedSensorType }
     var selectedChannel: Int { sessionChart.selectedChannel }
-    var chart: ChartUiState { sessionChart.chart }
     @Published private(set) var availableSessionExportKinds: Set<ExportKind> = []
     @Published private(set) var sessionExportAvailabilityRevision: UInt64 = 0
     private var exportAvailabilityReadGeneration: UInt64 = 0
