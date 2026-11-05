@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 import SQLite3
 import UIKit
 import SwiftUI
@@ -1098,6 +1099,9 @@ final class AppShellTests: XCTestCase {
 
     func testChartSelectionPanZoomAndReset() {
         let viewModel = AppViewModel(store: nil, uiTesting: true)
+        var publishedChart = ChartUiState()
+        let observation = viewModel.$chart.sink { publishedChart = $0 }
+        defer { observation.cancel() }
         let key = ChartStreamKey(sensorType: 2, channel: 1)
         let points = (0..<2_000).map { index in
             ChartPoint(timeMillis: UInt64(index * 1_000), value: Float(index % 200) - 100)
@@ -1119,6 +1123,7 @@ final class AppShellTests: XCTestCase {
 
         viewModel.selectChartWindow(.sixtySeconds)
         XCTAssertEqual(viewModel.chart.windowPreset, .sixtySeconds)
+        XCTAssertEqual(publishedChart.windowPreset, .sixtySeconds)
 
         viewModel.panChartLeft()
         XCTAssertFalse(viewModel.chart.isFollowingLive)

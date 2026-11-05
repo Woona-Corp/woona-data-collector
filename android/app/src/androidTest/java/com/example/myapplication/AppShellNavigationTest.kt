@@ -29,6 +29,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.junit4.StateRestorationTester
@@ -58,6 +59,26 @@ private const val CHART_FULLSCREEN_DIALOG_TEST_TAG = "chart_fullscreen_dialog"
 
 @RunWith(AndroidJUnit4::class)
 class AppShellNavigationTest {
+    @Test
+    fun historicalSessionEditorPreservesV1SchemaAndAnswers() {
+        val original = com.example.myapplication.data.SessionQuestionnaire(
+            sessionLabel = "Historical v1", operatorName = "Operator", activityGroup = "stationary", activityType = "rest",
+            location = "indoors", surface = "concrete", airTemperatureStatus = "not_measured",
+            sensorPosition = "dorsal_neck", collarTightness = "snug", preMeasurementState = "rest",
+            pulseStatus = "not_measured", respirationStatus = "not_measured", bodyTemperatureStatus = "not_measured",
+            videoRequested = false,
+        )
+        var saved: com.example.myapplication.data.SessionQuestionnaire? = null
+        composeRule.setContent { MaterialTheme {
+            SessionQuestionnaireDialog(AppLanguage.ENGLISH, onDismiss = {}, initial = original,
+                onSave = {}, onSaveAtRevision = { answers, _ -> saved = answers })
+        } }
+        composeRule.onNodeWithText("Historical v1").performScrollTo().performTextReplacement("Historical v1 edited")
+        composeRule.onNodeWithText("Validate and save").performClick()
+        composeRule.waitUntil(5_000) { saved != null }
+        composeRule.runOnIdle { assertEquals(original.copy(sessionLabel = "Historical v1 edited"), saved) }
+    }
+
     @get:Rule
     val composeRule = createAndroidComposeRule<ComponentActivity>()
 

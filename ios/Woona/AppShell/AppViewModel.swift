@@ -31,9 +31,13 @@ final class AppViewModel: ObservableObject {
     @Published var selectedLanguage: AppLanguage = .english {
         didSet { UserDefaults.standard.set(selectedLanguage.rawValue, forKey: "language") }
     }
-    @Published private(set) var selectedSensorType = 2
-    @Published private(set) var selectedChannel = 1
     @Published private(set) var chart = ChartUiState()
+    // Mutate history in place; publish only the rendered chart.
+    private var sessionChart = SessionChart() {
+        didSet { chart = sessionChart.chart }
+    }
+    var selectedSensorType: Int { sessionChart.selectedSensorType }
+    var selectedChannel: Int { sessionChart.selectedChannel }
     @Published private(set) var availableSessionExportKinds: Set<ExportKind> = []
     @Published private(set) var sessionExportAvailabilityRevision: UInt64 = 0
     private var exportAvailabilityReadGeneration: UInt64 = 0
@@ -340,14 +344,6 @@ final class AppViewModel: ObservableObject {
     private var didInjectProfileSaveFailure = false
     #endif
     private var currentSessionWallClockStartMillis: Int64?
-    private var chartHistory: [ChartStreamKey: [ChartPoint]] = [:]
-    private var sessionStartMillis: UInt64?
-    private var latestChartTimeMillis: UInt64?
-    private var chartWindowPreset: ChartWindowPreset = .thirtySeconds
-    private var isFollowingLive = true
-    private var manualViewportEndMillis: UInt64?
-    private var chartVerticalZoomFactor: Float = 1
-    private var chartVerticalCenterOverride: Float?
     private var hasInitializedBleSessionManager = false
     private var isCaptureDiagnosticsActive = false
     private var finishCaptureProcessingTask: Task<Void, Never>?
@@ -860,7 +856,7 @@ final class AppViewModel: ObservableObject {
         guard canOpenBLEPicker else { return }
         isV2PreviewActive = true
         isCaptureReady = false
-        clearChartHistory()
+        sessionChart.clearChartHistory()
         v2Preview.prepare()
         let intent = UUID(); previewConnectIntent = intent
         let generation = v2Preview.generation
@@ -878,7 +874,7 @@ final class AppViewModel: ObservableObject {
         previewConnectIntent = nil
         v2Preview.disconnected()
         isV2PreviewActive = false
-        clearChartHistory(); selectedSensorType = 2; selectedChannel = 1
+        sessionChart.clearChartHistory(); sessionChart.selectSensorType(2)
         bleConnectionPurpose = .record
         bleSessionManager.disconnect()
     }
@@ -1018,7 +1014,7 @@ final class AppViewModel: ObservableObject {
     func startReplaySession() {
         setCaptureClockAnchor()
         currentSessionWallClockStartMillis = Self.currentWallClockMillis()
-        clearChartHistory()
+        sessionChart.clearChartHistory()
         resetCounters()
         selectedTab = .session
         isReplayRunning = true
@@ -1101,7 +1097,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func installV2PreviewSnapshotForTesting(_ snapshot: V2PreviewSnapshot) {
-        if !isV2PreviewActive { clearChartHistory() }
+        if !isV2PreviewActive { sessionChart.clearChartHistory() }
         isV2PreviewActive = true
         v2Preview.installSnapshotForTesting(snapshot)
     }
@@ -1163,131 +1159,61 @@ final class AppViewModel: ObservableObject {
                 ChartPoint(timeMillis: point.timestampUs / 1000, value: Float(point.value), startsNewSegment: point.breakBefore)
             }
         }
-        chartHistory = history
-        sessionStartMillis = history.values.compactMap { $0.first?.timeMillis }.min()
-        latestChartTimeMillis = history.values.compactMap { $0.last?.timeMillis }.max()
+        sessionChart.replaceHistory(history)
         if !snapshot.streams.isEmpty, !snapshot.streams.contains(where: { $0.id + 1 == selectedSensorType }) {
-            selectedSensorType = snapshot.streams.map { $0.id + 1 }.min() ?? 2
-            selectedChannel = 1; chartVerticalCenterOverride = nil
+            sessionChart.selectSensorType(snapshot.streams.map { $0.id + 1 }.min() ?? 2)
         }
         if let stream = snapshot.streams.first(where: { $0.id + 1 == selectedSensorType }), selectedChannel > stream.channels {
-            selectedChannel = 1
+            sessionChart.selectChannel(1)
         }
-        trimChartHistory()
-        rebuildChartState()
     }
 
     func selectSensorType(_ sensorType: Int) {
-        selectedSensorType = sensorType
-        selectedChannel = 1
-        chartVerticalCenterOverride = nil
-        rebuildChartState()
+        sessionChart.selectSensorType(sensorType)
     }
 
     func selectChannel(_ channel: Int) {
-        selectedChannel = channel
-        chartVerticalCenterOverride = nil
-        rebuildChartState()
+        sessionChart.selectChannel(channel)
     }
 
     func selectChartWindow(_ preset: ChartWindowPreset) {
-        chartWindowPreset = preset
-        chartVerticalCenterOverride = nil
-        rebuildChartState()
+        sessionChart.selectChartWindow(preset)
     }
 
     func setFollowLive(_ enabled: Bool) {
-        isFollowingLive = enabled
-        manualViewportEndMillis = enabled ? nil : latestChartTimeMillis
-        chartVerticalCenterOverride = nil
-        rebuildChartState()
+        sessionChart.setFollowLive(enabled)
     }
 
     func jumpToLive() {
-        setFollowLive(true)
+        sessionChart.jumpToLive()
     }
 
     func panChartLeft() {
-        guard let latest = latestChartTimeMillis, let sessionStartMillis else { return }
-        let currentEnd = resolveViewportEnd(latest: latest)
-        let duration = effectiveViewportDurationMillis(viewportEnd: currentEnd)
-        guard duration > 0 else { return }
-        let minViewportEnd = min(sessionStartMillis + duration, latest)
-        let panStep = chartPanStepMillis(viewportEnd: currentEnd)
-        let shiftedEnd = currentEnd > panStep ? currentEnd - panStep : 0
-        chartVerticalCenterOverride = nil
-        isFollowingLive = false
-        manualViewportEndMillis = max(shiftedEnd, minViewportEnd)
-        rebuildChartState()
+        sessionChart.panChartLeft()
     }
 
     func panChartRight() {
-        guard let latest = latestChartTimeMillis else { return }
-        let currentEnd = resolveViewportEnd(latest: latest)
-        let shiftedEnd = min(currentEnd + chartPanStepMillis(viewportEnd: currentEnd), latest)
-        chartVerticalCenterOverride = nil
-        isFollowingLive = shiftedEnd >= latest
-        manualViewportEndMillis = isFollowingLive ? nil : shiftedEnd
-        rebuildChartState()
+        sessionChart.panChartRight()
     }
 
     func panChart(byFraction deltaFraction: Double) {
-        guard
-            let latest = latestChartTimeMillis
-        else { return }
-        let viewportEnd = resolveViewportEnd(latest: latest)
-
-        let duration = effectiveViewportDurationMillis(viewportEnd: viewportEnd)
-        guard duration > 0 else { return }
-        let deltaMillis = Int64(Double(duration) * deltaFraction)
-        guard deltaMillis != 0, let sessionStartMillis else { return }
-
-        let minViewportEnd = min(sessionStartMillis + duration, latest)
-        let shiftedEnd: UInt64
-        if deltaMillis < 0 {
-            shiftedEnd = viewportEnd > UInt64(abs(deltaMillis)) ? viewportEnd - UInt64(abs(deltaMillis)) : 0
-        } else {
-            shiftedEnd = viewportEnd + UInt64(deltaMillis)
-        }
-
-        chartVerticalCenterOverride = nil
-        let clampedEnd = min(max(shiftedEnd, minViewportEnd), latest)
-        isFollowingLive = clampedEnd >= latest
-        manualViewportEndMillis = isFollowingLive ? nil : clampedEnd
-        rebuildChartState()
+        sessionChart.panChart(byFraction: deltaFraction)
     }
 
     func zoomChart(scaleFactor: Float, anchorFractionY: Float = 0.5) {
-        guard scaleFactor > 0 else { return }
-        let currentRange = chart.yAxisAbsRange
-        let currentCenter = chart.yAxisCenter
-        let nextZoomFactor = min(max(chartVerticalZoomFactor * scaleFactor, 1), 64)
-        guard nextZoomFactor != chartVerticalZoomFactor else { return }
-
-        let nextRange = chartYAxisAbsRange(zoomFactor: nextZoomFactor)
-        chartVerticalZoomFactor = nextZoomFactor
-        if nextZoomFactor == 1 {
-            chartVerticalCenterOverride = nil
-        } else {
-            let clampedAnchor = min(max(anchorFractionY, 0), 1)
-            let anchorCoefficient = 1 - (2 * clampedAnchor)
-            chartVerticalCenterOverride = currentCenter + ((currentRange - nextRange) * anchorCoefficient)
-        }
-        rebuildChartState()
+        sessionChart.zoomChart(scaleFactor: scaleFactor, anchorFractionY: anchorFractionY)
     }
 
     func zoomChartIn() {
-        zoomChart(scaleFactor: 2)
+        sessionChart.zoomChartIn()
     }
 
     func zoomChartOut() {
-        zoomChart(scaleFactor: 0.5)
+        sessionChart.zoomChartOut()
     }
 
     func resetChartY() {
-        chartVerticalZoomFactor = 1
-        chartVerticalCenterOverride = nil
-        rebuildChartState()
+        sessionChart.resetChartY()
     }
 
     func prepareCompleteDataArchive() {
@@ -1712,7 +1638,6 @@ final class AppViewModel: ObservableObject {
         historyLimit = showingAllRecordings ? 100 : 10
         reloadRecentRecordings()
     }
-
 
     private func reloadProfiles(selecting preferredID: UUID? = nil) {
         guard let store else { return }
@@ -2233,7 +2158,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func applyPacketUpdate(_ update: PacketProcessingUpdate) {
-        appendChartSamples(update.chartSamplesByStream)
+        sessionChart.appendChartSamples(update.chartSamplesByStream)
         packetsReceived = update.packetsReceived
         packetsLost = update.packetsLost
         packetsRejected = update.packetsRejected
@@ -2242,7 +2167,6 @@ final class AppViewModel: ObservableObject {
         rawBytesReceived = update.rawBytesReceived
         lastPacketIssue = update.lastPacketIssue ?? lastPacketIssue
         rejectionBreakdown = update.rejectionBreakdown ?? rejectionBreakdown
-        rebuildChartState()
         // Counters only trigger a fresh filesystem check when a writer may have
         // opened. They never determine whether an export action is enabled.
         if (update.packetsReceived > 0 && !availableSessionExportKinds.contains(.packetDump)) ||
@@ -2432,163 +2356,10 @@ final class AppViewModel: ObservableObject {
         return Self.currentWallClockMillis()
     }
 
-    private func appendChartSamples(_ samplesByStream: [ChartStreamKey: [ChartPoint]]) {
-        guard !samplesByStream.isEmpty else { return }
-
-        for (streamKey, points) in samplesByStream where !points.isEmpty {
-            chartHistory[streamKey, default: []].append(contentsOf: points)
-
-            if let first = points.first?.timeMillis {
-                sessionStartMillis = min(sessionStartMillis ?? first, first)
-            }
-            if let last = points.last?.timeMillis {
-                latestChartTimeMillis = max(latestChartTimeMillis ?? last, last)
-            }
-        }
-
-        trimChartHistory()
-    }
-
-    private func clearChartHistory() {
-        chartHistory.removeAll(keepingCapacity: true)
-        sessionStartMillis = nil
-        latestChartTimeMillis = nil
-        chartWindowPreset = .thirtySeconds
-        isFollowingLive = true
-        manualViewportEndMillis = nil
-        chartVerticalZoomFactor = 1
-        chartVerticalCenterOverride = nil
-        chart = ChartUiState()
-    }
-
-    private func trimChartHistory() {
-        guard let latestChartTimeMillis else { return }
-        let cutoff = latestChartTimeMillis > Self.maxRetainedHistoryMillis
-            ? latestChartTimeMillis - Self.maxRetainedHistoryMillis
-            : 0
-
-        for key in Array(chartHistory.keys) {
-            guard let firstPoint = chartHistory[key]?.first, firstPoint.timeMillis < cutoff else { continue }
-            guard let firstRetainedIndex = chartHistory[key]?.firstIndex(where: { $0.timeMillis >= cutoff }) else {
-                chartHistory.removeValue(forKey: key)
-                continue
-            }
-            if firstRetainedIndex > 0 {
-                chartHistory[key]?.removeSubrange(0..<firstRetainedIndex)
-            }
-        }
-
-        sessionStartMillis = chartHistory.values.compactMap(\.first?.timeMillis).min()
-        self.latestChartTimeMillis = chartHistory.values.compactMap(\.last?.timeMillis).max()
-        if !isFollowingLive {
-            manualViewportEndMillis = manualViewportEndMillis.map { max($0, sessionStartMillis ?? $0) }
-        }
-    }
-
-    private func rebuildChartState() {
-        let sessionStart = sessionStartMillis
-        let latest = latestChartTimeMillis
-        let viewportEnd = latest.map { resolveViewportEnd(latest: $0) }
-        let viewportDuration = viewportEnd.map(effectiveViewportDurationMillis) ?? chartWindowPreset.durationMillis
-        let viewportStart: UInt64?
-        if let viewportEnd {
-            viewportStart = max(sessionStart ?? viewportEnd, viewportEnd > viewportDuration ? viewportEnd - viewportDuration : 0)
-        } else {
-            viewportStart = nil
-        }
-
-        let streamPoints = chartHistory[ChartStreamKey(sensorType: selectedSensorType, channel: selectedChannel)] ?? []
-        let visiblePoints: [ChartPoint]
-        if let viewportStart, let viewportEnd {
-            visiblePoints = downsampleVisiblePoints(
-                Array(slicePoints(streamPoints, startMillis: viewportStart, endMillis: viewportEnd)),
-                maxPoints: Self.maxRenderedChartPoints
-            )
-        } else {
-            visiblePoints = []
-        }
-
-        chart = ChartUiState(
-            points: visiblePoints,
-            windowPreset: chartWindowPreset,
-            isFollowingLive: isFollowingLive,
-            canPanLeft: viewportStart != nil && sessionStart != nil && viewportStart! > sessionStart!,
-            canPanRight: !isFollowingLive && viewportEnd != nil && latest != nil && viewportEnd! < latest!,
-            canZoomIn: chartVerticalZoomFactor < 64,
-            canZoomOut: chartVerticalZoomFactor > 1,
-            yAxisAbsRange: chartYAxisAbsRange(),
-            yAxisCenter: chartYAxisCenter(points: visiblePoints),
-            viewportStartMillis: viewportStart,
-            viewportEndMillis: viewportEnd,
-            sessionStartMillis: sessionStart,
-            latestPointMillis: latest
-        )
-    }
-
-    private func resolveViewportEnd(latest: UInt64) -> UInt64 {
-        if isFollowingLive {
-            return latest
-        }
-        return min(manualViewportEndMillis ?? latest, latest)
-    }
-
-    private func chartPanStepMillis(viewportEnd: UInt64) -> UInt64 {
-        max(effectiveViewportDurationMillis(viewportEnd: viewportEnd) / 4, 1_000)
-    }
-
-    private func effectiveViewportDurationMillis(viewportEnd: UInt64) -> UInt64 {
-        let sessionStart = sessionStartMillis ?? viewportEnd
-        let availableDuration = viewportEnd > sessionStart ? viewportEnd - sessionStart : 0
-        return min(chartWindowPreset.durationMillis, availableDuration)
-    }
-
-    private func chartYAxisAbsRange(zoomFactor: Float? = nil) -> Float {
-        max(32_768 / (zoomFactor ?? chartVerticalZoomFactor), 256)
-    }
-
-    private func chartYAxisCenter(points: [ChartPoint]) -> Float {
-        if let chartVerticalCenterOverride {
-            return chartVerticalCenterOverride
-        }
-        guard !points.isEmpty else { return 0 }
-        let values = points.map(\.value)
-        return ((values.min() ?? 0) + (values.max() ?? 0)) / 2
-    }
-
-    private func slicePoints(_ points: [ChartPoint], startMillis: UInt64, endMillis: UInt64) -> ArraySlice<ChartPoint> {
-        guard !points.isEmpty else { return [] }
-        guard let firstIndex = points.firstIndex(where: { $0.timeMillis >= startMillis }) else { return [] }
-        guard let lastIndex = points.lastIndex(where: { $0.timeMillis <= endMillis }), lastIndex >= firstIndex else { return [] }
-        let startIndex = max(points.startIndex, firstIndex - 1)
-        return points[startIndex...lastIndex]
-    }
-
-    private func downsampleVisiblePoints(_ points: [ChartPoint], maxPoints: Int) -> [ChartPoint] {
-        guard points.count > maxPoints else { return points }
-        let step = max(Int(ceil(Double(points.count) / Double(maxPoints))), 1)
-        var result: [ChartPoint] = []
-        var pendingSegmentBreak = false
-
-        for (index, point) in points.enumerated() {
-            pendingSegmentBreak = pendingSegmentBreak || point.startsNewSegment
-            if index == 0 || index == points.count - 1 || index.isMultiple(of: step) {
-                result.append(
-                    ChartPoint(
-                        timeMillis: point.timeMillis,
-                        value: point.value,
-                        startsNewSegment: result.isEmpty ? false : pendingSegmentBreak
-                    )
-                )
-                pendingSegmentBreak = false
-            }
-        }
-        return result
-    }
-
     private func resetSessionUi(keepConnectionState: Bool = false) {
         invalidateSessionExportAvailability()
         currentSessionWallClockStartMillis = Self.currentWallClockMillis()
-        clearChartHistory()
+        sessionChart.clearChartHistory()
         resetCounters()
         errorMessage = nil
         preparedExport = nil
@@ -2630,8 +2401,6 @@ final class AppViewModel: ObservableObject {
         captureSessionZeroUncertaintyNs = nil
     }
 
-    private static let maxRenderedChartPoints = 1_200
-    private static let maxRetainedHistoryMillis: UInt64 = 15 * 60_000
     private static let maxPendingPacketFragments = 512
     private static let backgroundSyncIdentifier = "com.woona.apps.sync"
 

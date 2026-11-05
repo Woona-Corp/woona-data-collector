@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1C258C66363A492AAC86975B /* SessionChartTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18E4EDFA9E224A87941B4D18 /* SessionChartTests.swift */; };
+		393DC58D61B94AEEB6C7C84F /* SessionChart.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E3C44346BB9479DBD925EDD /* SessionChart.swift */; };
 		8A1A000B2B00000100000001 /* WoonaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1A000A2B00000100000001 /* WoonaApp.swift */; };
 		8A1A000D2B00000100000001 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1A000C2B00000100000001 /* AppViewModel.swift */; };
 		8A1A000F2B00000100000001 /* AppRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1A000E2B00000100000001 /* AppRootView.swift */; };
@@ -86,6 +88,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		18E4EDFA9E224A87941B4D18 /* SessionChartTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionChartTests.swift; sourceTree = "<group>"; };
+		6E3C44346BB9479DBD925EDD /* SessionChart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionChart.swift; sourceTree = "<group>"; };
 		8A1A00062B00000100000001 /* Woona.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Woona.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8A1A00082B00000100000001 /* WoonaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WoonaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8A1A000A2B00000100000001 /* WoonaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoonaApp.swift; sourceTree = "<group>"; };
@@ -215,6 +219,7 @@
 			isa = PBXGroup;
 			children = (
 				8A1A00162B00000100000001 /* AppShellTests.swift */,
+				18E4EDFA9E224A87941B4D18 /* SessionChartTests.swift */,
 				8A1A00692B00000600000001 /* BLETests */,
 				8A1A00592B00000400000001 /* CaptureTests */,
 				8A1A003F2B00000200000001 /* ProtocolTests */,
@@ -228,6 +233,7 @@
 			children = (
 				2BA7A65E6DE0410FAF57F652 /* BackgroundExecution.swift */,
 				E82CFB6E2E1A45758C0FB74E /* PresentationModels.swift */,
+				6E3C44346BB9479DBD925EDD /* SessionChart.swift */,
 				8A1AC0002B0000000000B105 /* V2PreviewView.swift */,
 				8A1A000C2B00000100000001 /* AppViewModel.swift */,
 				8A1A000E2B00000100000001 /* AppRootView.swift */,
@@ -461,6 +467,7 @@
 				8A1A000D2B00000100000001 /* AppViewModel.swift in Sources */,
 				55D5A9F27F9A4742B090E02D /* BackgroundExecution.swift in Sources */,
 				7E86B89FE496486688DE4040 /* PresentationModels.swift in Sources */,
+				393DC58D61B94AEEB6C7C84F /* SessionChart.swift in Sources */,
 				F690E24897AD4D30ACD48D9E /* PacketIngress.swift in Sources */,
 				8A1A000F2B00000100000001 /* AppRootView.swift in Sources */,
 				8A1A00112B00000100000001 /* OverviewView.swift in Sources */,
@@ -501,6 +508,7 @@
 				8A1AC0002B0000000000B108 /* V2PreviewTests.swift in Sources */,
 				8A1AC0002B0000000000A108 /* WoonaV2Tests.swift in Sources */,
 				8A1A00172B00000100000001 /* AppShellTests.swift in Sources */,
+				1C258C66363A492AAC86975B /* SessionChartTests.swift in Sources */,
 				8A1A00342B00000200000001 /* ProtocolTestSupport.swift in Sources */,
 				8A1A00362B00000200000001 /* SensorBlockParserTests.swift in Sources */,
 				8A1A00382B00000200000001 /* PacketValidatorTests.swift in Sources */,

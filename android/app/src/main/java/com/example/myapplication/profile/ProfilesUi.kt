@@ -587,287 +587,11 @@ private fun polarStatusLine(status: PolarStatus, language: AppLanguage): String 
 }
 
 @Composable
-private fun LegacyDogQuestionnaireDialog(
-    initial: DogQuestionnaire?,
-    required: Boolean,
+private fun LegacySessionQuestionnaireFields(
+    values: MutableMap<String, String>,
+    errors: Map<String, String>,
     language: AppLanguage,
-    onDismiss: () -> Unit,
-    onSave: (DogQuestionnaire) -> Unit,
 ) {
-    val values = rememberSaveable(initial, saver = questionnaireValuesSaver) {
-        mutableStateMapOf<String, String>().apply { putDog(initial) }
-    }
-    var errors by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-    val progress = dogProgress(values)
-    QuestionnaireDialog(
-        title = tr(language, "Dog profile", "Карточка собаки"),
-        subtitle = tr(language, "Every question requires an explicit answer", "На каждый вопрос нужен явный ответ"),
-        language = language,
-        progress = progress,
-        errorCount = errors.size,
-        firstErrorKey = errors.keys.firstOrNull(),
-        canDismiss = !required,
-        onDismiss = onDismiss,
-        onSave = {
-            val result = values.toDogQuestionnaire()
-            errors = result.validate().errors
-            if (errors.isEmpty()) onSave(result)
-        },
-    ) {
-        SectionTitle(tr(language, "Who", "Кто"))
-        Field(values, "numberOrName", tr(language, "Number or name *", "Номер или кличка *"), error = errors["numberOrName"])
-        Field(values, "shelterOrPlace", tr(language, "Shelter or place *", "Приют или место *"), error = errors["shelterOrPlace"])
-        Choice(
-            values,
-            "breedStatus",
-            tr(language, "Breed status *", "Статус породы *"),
-            options(
-                language,
-                "purebred" to ("Purebred" to "Породистая"),
-                "mixed" to ("Mixed" to "Метис"),
-                "unknown" to ("Unknown" to "Неизвестно"),
-            ),
-            errors["breedStatus"],
-        ) {
-            values.remove("breedName")
-            values.remove("resembles")
-        }
-        if (values["breedStatus"] in setOf("purebred", "mixed")) {
-            Field(values, "breedName", tr(language, "Breed name *", "Название породы *"), error = errors["breedName"])
-        }
-        if (values["breedStatus"] == "mixed") {
-            Field(values, "resembles", tr(language, "Resembles *", "На кого похожа *"), error = errors["resembles"])
-        }
-        Choice(
-            values,
-            "size",
-            tr(language, "Size *", "Размер *"),
-            options(
-                language,
-                "small" to ("Small" to "Маленькая"),
-                "medium" to ("Medium" to "Средняя"),
-                "large" to ("Large" to "Крупная"),
-                "giant" to ("Giant" to "Гигантская"),
-                "unknown" to ("Unknown" to "Неизвестно"),
-            ),
-            errors["size"],
-        )
-        Choice(
-            values,
-            "ageStatus",
-            tr(language, "Age status *", "Статус возраста *"),
-            options(
-                language,
-                "known" to ("Known" to "Известен"),
-                "estimated" to ("Estimated" to "Оценён"),
-                "unknown" to ("Unknown" to "Неизвестен"),
-            ),
-            errors["ageStatus"],
-        ) {
-            if (it == "unknown") {
-                values.remove("ageYears")
-                values.remove("ageMonths")
-                values["ageSource"] = "unknown"
-            } else if (values["ageSource"] == "unknown") {
-                values.remove("ageSource")
-            }
-        }
-        if (values["ageStatus"] in setOf("known", "estimated")) {
-            Field(values, "ageYears", tr(language, "Full years", "Полных лет"), KeyboardType.Number, errors["ageYears"])
-            Field(values, "ageMonths", tr(language, "Additional months", "Дополнительных месяцев"), KeyboardType.Number, errors["ageMonths"])
-            Choice(
-                values,
-                "ageSource",
-                tr(language, "Age source *", "Источник возраста *"),
-                options(
-                    language,
-                    "documents" to ("Documents" to "Документы"),
-                    "shelter_report" to ("Shelter report" to "Со слов приюта"),
-                    "dental_estimate" to ("Dental estimate" to "Оценка по зубам"),
-                    "operator_estimate" to ("Operator estimate" to "Оценка оператора"),
-                ),
-                errors["ageSource"],
-            )
-        }
-        Choice(values, "sex", tr(language, "Sex *", "Пол *"), options(
-            language,
-            "male" to ("Male" to "Самец"),
-            "female" to ("Female" to "Самка"),
-            "unknown" to ("Unknown" to "Неизвестно"),
-        ), errors["sex"])
-        Choice(values, "sterilizationStatus", tr(language, "Sterilized *", "Стерилизация *"), yesNoUnknown(language), errors["sterilizationStatus"])
-
-        SectionTitle(tr(language, "Body", "Тело"))
-        Choice(values, "weightStatus", tr(language, "Weight status *", "Статус веса *"), options(
-            language,
-            "measured" to ("Measured" to "Измерен"),
-            "estimated" to ("Estimated" to "Оценён"),
-            "unknown" to ("Unknown" to "Неизвестен"),
-        ), errors["weightStatus"]) {
-            if (it == "unknown") values.remove("weightKg")
-        }
-        if (values["weightStatus"] in setOf("measured", "estimated")) {
-            Field(values, "weightKg", tr(language, "Weight, kg *", "Вес, кг *"), KeyboardType.Decimal, errors["weightKg"])
-        }
-        Choice(values, "bodyConditionStatus", tr(language, "BCS status *", "Статус BCS *"), options(
-            language,
-            "assessed" to ("Assessed" to "Оценён"),
-            "unable" to ("Unable" to "Невозможно оценить"),
-        ), errors["bodyConditionStatus"]) {
-            if (it == "unable") values.remove("bodyConditionScore")
-        }
-        if (values["bodyConditionStatus"] == "assessed") {
-            Choice(values, "bodyConditionScore", "BCS 1–9 *", (1..9).map { it.toString() to it.toString() }, errors["bodyConditionScore"])
-        }
-        Choice(values, "muscleMass", tr(language, "Muscle mass *", "Мышечная масса *"), options(
-            language,
-            "normal" to ("Normal" to "Норма"),
-            "mild_loss" to ("Mild loss" to "Лёгкая потеря"),
-            "moderate_loss" to ("Moderate loss" to "Умеренная потеря"),
-            "severe_loss" to ("Severe loss" to "Выраженная потеря"),
-            "unable" to ("Unable" to "Невозможно оценить"),
-        ), errors["muscleMass"])
-        Choice(values, "neckCircumferenceStatus", tr(language, "Neck measurement *", "Обхват шеи *"), measuredNotMeasured(language), errors["neckCircumferenceStatus"]) {
-            if (it == "not_measured") values.remove("neckCircumferenceCm")
-        }
-        if (values["neckCircumferenceStatus"] == "measured") {
-            Field(values, "neckCircumferenceCm", tr(language, "Neck, cm *", "Обхват, см *"), KeyboardType.Decimal, errors["neckCircumferenceCm"])
-        }
-        Choice(values, "coatLength", tr(language, "Coat length *", "Длина шерсти *"), options(
-            language,
-            "short" to ("Short" to "Короткая"),
-            "medium" to ("Medium" to "Средняя"),
-            "long" to ("Long" to "Длинная"),
-            "unknown" to ("Unknown" to "Неизвестно"),
-        ), errors["coatLength"])
-        Choice(values, "undercoat", tr(language, "Undercoat *", "Подшёрсток *"), options(
-            language,
-            "none" to ("None" to "Нет"),
-            "moderate" to ("Moderate" to "Умеренный"),
-            "dense" to ("Dense" to "Плотный"),
-            "unknown" to ("Unknown" to "Неизвестно"),
-        ), errors["undercoat"])
-        Choice(values, "shavedAreasStatus", tr(language, "Shaved areas *", "Выстриженные участки *"), options(
-            language,
-            "none" to ("None" to "Нет"),
-            "present" to ("Present" to "Есть"),
-            "unknown" to ("Unknown" to "Неизвестно"),
-        ), errors["shavedAreasStatus"]) {
-            if (it != "present") values.remove("shavedAreasDetails")
-        }
-        if (values["shavedAreasStatus"] == "present") {
-            Field(values, "shavedAreasDetails", tr(language, "Describe shaved areas *", "Опишите участки *"), error = errors["shavedAreasDetails"], singleLine = false)
-        }
-
-        SectionTitle(tr(language, "Condition", "Состояние"))
-        MultiChoice(
-            values,
-            "observedSigns",
-            tr(language, "Observed signs *", "Наблюдаемые признаки *"),
-            options(
-                language,
-                "none" to ("None" to "Нет"),
-                "unknown" to ("Unknown" to "Неизвестно"),
-                "labored_breathing" to ("Labored breathing" to "Затруднённое дыхание"),
-                "fainting" to ("Fainting" to "Обморок"),
-                "seizures" to ("Seizures" to "Судороги"),
-                "cannot_urinate" to ("Cannot urinate" to "Не может помочиться"),
-                "limb_weakness" to ("Limb weakness" to "Слабость конечностей"),
-                "jaundice" to ("Jaundice" to "Желтушность"),
-                "vomiting_or_no_appetite" to ("Vomiting/no appetite" to "Рвота/нет аппетита"),
-                "stool_changes" to ("Stool changes" to "Изменения стула"),
-                "cough" to ("Cough" to "Кашель"),
-                "pain_or_lameness" to ("Pain/lameness" to "Боль/хромота"),
-                "thirst_changes" to ("Thirst changes" to "Изменение жажды"),
-                "distress" to ("Distress" to "Беспокойство"),
-            ),
-            errors["observedSigns"],
-            exclusive = setOf("none", "unknown"),
-        )
-        Choice(values, "diagnosesStatus", tr(language, "Veterinary diagnoses *", "Диагнозы врача *"), yesNoUnknown(language), errors["diagnosesStatus"]) {
-            if (it != "yes") values.remove("diagnosesDetails")
-        }
-        if (values["diagnosesStatus"] == "yes") {
-            Field(values, "diagnosesDetails", tr(language, "Diagnoses and medication *", "Диагнозы и препараты *"), error = errors["diagnosesDetails"], singleLine = false)
-        }
-
-        SectionTitle(tr(language, "Housing", "Содержание"))
-        Choice(values, "housing", tr(language, "Housing *", "Где живёт *"), options(
-            language,
-            "enclosure" to ("Enclosure" to "Вольер"),
-            "room" to ("Room" to "Комната"),
-            "home" to ("Home" to "Дом"),
-            "free_range" to ("Free range" to "Свободный выгул"),
-            "other" to ("Other" to "Другое"),
-            "unknown" to ("Unknown" to "Неизвестно"),
-        ), errors["housing"]) {
-            if (it != "other") values.remove("housingDetails")
-        }
-        if (values["housing"] == "other") Field(values, "housingDetails", tr(language, "Housing details *", "Описание жилья *"), error = errors["housingDetails"])
-        Choice(values, "walksStatus", tr(language, "Walks *", "Прогулки *"), options(
-            language,
-            "known" to ("Known" to "Известно"),
-            "none" to ("None" to "Нет"),
-            "unknown" to ("Unknown" to "Неизвестно"),
-        ), errors["walksStatus"]) {
-            if (it != "known") values.remove("walksDescription")
-        }
-        if (values["walksStatus"] == "known") Field(values, "walksDescription", tr(language, "Walk details *", "Описание прогулок *"), error = errors["walksDescription"])
-        Choice(values, "cohabitants", tr(language, "Lives with *", "С кем живёт *"), options(
-            language,
-            "alone" to ("Alone" to "Один"),
-            "other_animals" to ("Other animals" to "С животными"),
-            "people_only" to ("People only" to "Только с людьми"),
-            "unknown" to ("Unknown" to "Неизвестно"),
-        ), errors["cohabitants"])
-        Choice(values, "shelterPermission", tr(language, "Written permission *", "Письменное разрешение *"), options(
-            language,
-            "yes" to ("Yes" to "Да"),
-            "no" to ("No" to "Нет"),
-            "not_required" to ("Not required" to "Не требуется"),
-            "unknown" to ("Unknown" to "Неизвестно"),
-        ), errors["shelterPermission"])
-        Choice(values, "notesStatus", tr(language, "Notes *", "Примечания *"), options(
-            language,
-            "none" to ("None" to "Нет"),
-            "provided" to ("Provided" to "Есть"),
-        ), errors["notesStatus"]) {
-            if (it == "none") values.remove("notes")
-        }
-        if (values["notesStatus"] == "provided") Field(values, "notes", tr(language, "Notes *", "Примечания *"), error = errors["notes"], singleLine = false)
-    }
-}
-
-@Composable
-private fun LegacySessionQuestionnaireDialog(
-    language: AppLanguage,
-    onDismiss: () -> Unit,
-    onSave: (SessionQuestionnaire) -> Unit,
-) {
-    val values = rememberSaveable(saver = questionnaireValuesSaver) {
-        mutableStateMapOf<String, String>()
-    }
-    var errors by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-    val progress = sessionProgress(values)
-    QuestionnaireDialog(
-        title = tr(language, "Recording session", "Карточка сессии"),
-        subtitle = tr(language, "Start time and UUID are recorded automatically", "Время старта и UUID запишутся автоматически"),
-        language = language,
-        progress = progress,
-        errorCount = errors.size,
-        firstErrorKey = errors.keys.firstOrNull(),
-        canDismiss = true,
-        onDismiss = onDismiss,
-        onSave = {
-            val result = values.toSessionQuestionnaire()
-            errors = result.validate().errors.toMutableMap().apply {
-                if (values["videoRequested"] !in setOf("yes", "no")) {
-                    put("videoRequested", tr(language, "Required", "Обязательное поле"))
-                }
-            }
-            if (errors.isEmpty()) onSave(result)
-        },
-    ) {
         SectionTitle(tr(language, "Protocol", "Протокол"))
         Field(values, "sessionLabel", tr(language, "Session label *", "Название сессии *"), error = errors["sessionLabel"])
         Field(values, "operatorName", tr(language, "Operator *", "Оператор *"), error = errors["operatorName"])
@@ -973,8 +697,7 @@ private fun LegacySessionQuestionnaireDialog(
         } else {
             values.remove("measurementAtUtc")
         }
-        Choice(values, "videoRequested", tr(language, "Record video *", "Записывать видео *"), yesNo(language), errors["videoRequested"])
-    }
+        Text(tr(language, "Record video", "Записывать видео") + ": " + if (values["videoRequested"] == "yes") tr(language, "Yes", "Да") else tr(language, "No", "Нет"))
 }
 
 @Composable
@@ -1294,54 +1017,6 @@ private fun firstErrorModifier(key: String): Modifier {
     return Modifier.bringIntoViewRequester(requester)
 }
 
-private fun dogProgress(values: Map<String, String>): Pair<Int, Int> {
-    val keys = mutableListOf(
-        "numberOrName",
-        "shelterOrPlace",
-        "breedStatus",
-        "size",
-        "ageStatus",
-        "sex",
-        "sterilizationStatus",
-        "weightStatus",
-        "bodyConditionStatus",
-        "muscleMass",
-        "neckCircumferenceStatus",
-        "coatLength",
-        "undercoat",
-        "shavedAreasStatus",
-        "observedSigns",
-        "diagnosesStatus",
-        "housing",
-        "walksStatus",
-        "cohabitants",
-        "shelterPermission",
-        "notesStatus",
-    )
-    when (values["breedStatus"]) {
-        "purebred" -> keys += "breedName"
-        "mixed" -> keys += listOf("breedName", "resembles")
-    }
-    if (values["ageStatus"] in setOf("known", "estimated")) {
-        keys += listOf("age", "ageSource")
-    }
-    if (values["weightStatus"] in setOf("measured", "estimated")) keys += "weightKg"
-    if (values["bodyConditionStatus"] == "assessed") keys += "bodyConditionScore"
-    if (values["neckCircumferenceStatus"] == "measured") keys += "neckCircumferenceCm"
-    if (values["shavedAreasStatus"] == "present") keys += "shavedAreasDetails"
-    if (values["diagnosesStatus"] == "yes") keys += "diagnosesDetails"
-    if (values["housing"] == "other") keys += "housingDetails"
-    if (values["walksStatus"] == "known") keys += "walksDescription"
-    if (values["notesStatus"] == "provided") keys += "notes"
-    return keys.count { key ->
-        if (key == "age") {
-            !values["ageYears"].isNullOrBlank() || !values["ageMonths"].isNullOrBlank()
-        } else {
-            !values[key].isNullOrBlank()
-        }
-    } to keys.size
-}
-
 private fun sessionProgress(values: Map<String, String>): Pair<Int, Int> {
     val keys = mutableListOf(
         "sessionLabel",
@@ -1654,6 +1329,7 @@ fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onS
     onSaveAtRevision: (suspend (SessionQuestionnaire, Int?) -> Unit)? = null,
     externalError: String? = null,
     videoAllowed: Boolean = true) {
+    val legacy = initial?.schemaVersion == 1
     val values = rememberSaveable(saver = questionnaireValuesSaver) { mutableStateMapOf<String, String>().apply {
         put("sessionDate", java.time.LocalDate.now().toString())
         put("videoRequested", if (videoAllowed) "yes" else "no")
@@ -1675,10 +1351,10 @@ fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onS
     QuestionnaireDialog(
         title = tr(language, "Session questionnaire", "Анкета сессии"),
         subtitle = questionnaireText("Собака связывается с выбранной карточкой. Фактические время и длительность записываются автоматически.", language),
-        language = language, progress = listOf("sessionLabel", if (values["sessionKind"] == "heart") "sessionKind" else "plannedActivities").count { !values[it].isNullOrBlank() } to 2,
+        language = language, progress = if (legacy) sessionProgress(values) else listOf("sessionLabel", if (values["sessionKind"] == "heart") "sessionKind" else "plannedActivities").count { !values[it].isNullOrBlank() } to 2,
         errorCount = errors.size, firstErrorKey = errors.keys.firstOrNull(), canDismiss = true, onDismiss = onDismiss,
         onSave = {
-            val result = values.toSessionQuestionnaire().copy(
+            val result = if (legacy) values.toSessionQuestionnaire() else values.toSessionQuestionnaire().copy(
                 schemaVersion = 2, savedAtLocal = java.time.LocalDateTime.now().toString(),
                 sessionDate = values.text("sessionDate"), startTime = values.text("startTime"), endTime = values.text("endTime"),
                 durationMinutes = values.sheetDouble("durationMinutes"), plannedActivities = values.list("plannedActivities"),
@@ -1705,6 +1381,9 @@ fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onS
             retainedDraft = if (stack.length() <= 1) null else org.json.JSONArray((0 until stack.length() - 1).map { stack.getJSONObject(it) }).toString()
         }),
     ) {
+        if (legacy) {
+            LegacySessionQuestionnaireFields(values, errors, language)
+        } else {
         if (initial == null) Choice(values, "sessionKind", "Вид сессии", listOf("activity" to "Активность", "heart" to "Сердцебиение"), onChange = { if (it == "heart") values["videoRequested"] = "no" })
         Field(values, "sessionLabel", "Номер сессии *", error = errors["sessionLabel"])
         if (values["sessionKind"] == "heart") {
@@ -1731,6 +1410,7 @@ fun SessionQuestionnaireDialog(language: AppLanguage, onDismiss: () -> Unit, onS
         Field(values, "notes", "Примечания", singleLine = false)
         Field(values, "specialistName", "ФИО специалиста, проводящего запись")
         if (initial == null && videoAllowed) Choice(values, "videoRequested", "Записывать видео", yesNo(language))
+        }
         }
     }
 }
