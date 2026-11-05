@@ -74,7 +74,7 @@ final class PacketAssembler {
     private let packetValidator: PacketValidator
 
     init(
-        initialCapacity: Int = 512 * 1024,
+        initialCapacity: Int = PacketValidator.maximumPacketSize,
         sensorBlockParser: SensorBlockParser = SensorBlockParser()
     ) {
         self.buffer = []

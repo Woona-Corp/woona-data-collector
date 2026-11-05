@@ -32,9 +32,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -57,6 +54,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -643,7 +641,7 @@ private fun DeviceDiscoveryDialogContent(
                 ) {
                     if (uiState.isReplayPreparing) {
                         Icon(
-                            imageVector = Icons.Rounded.Close,
+                            painter = painterResource(R.drawable.ic_close),
                             contentDescription = null,
                             modifier = Modifier.size(18.dp),
                         )
@@ -1062,7 +1060,7 @@ private fun ScanSection(
             ) {
                 if (uiState.isReplayPreparing) {
                     Icon(
-                        imageVector = Icons.Rounded.Close,
+                        painter = painterResource(R.drawable.ic_close),
                         contentDescription = null,
                         modifier = Modifier.size(18.dp),
                     )
@@ -1311,7 +1309,7 @@ private fun ChartHeader(
             modifier = Modifier.size(40.dp),
         ) {
             Icon(
-                imageVector = Icons.Rounded.Fullscreen,
+                painter = painterResource(R.drawable.ic_fullscreen),
                 contentDescription = appStringResource(R.string.chart_enter_fullscreen),
             )
         }
@@ -1536,7 +1534,7 @@ private fun ChartFullscreenCloseButton(
             modifier = Modifier.fillMaxSize(),
         ) {
             Icon(
-                imageVector = Icons.Rounded.Close,
+                painter = painterResource(R.drawable.ic_close),
                 contentDescription = appStringResource(R.string.chart_exit_fullscreen),
             )
         }
@@ -2430,114 +2428,6 @@ internal fun buildXAxisTickModels(
 private fun languageDisplayName(language: AppLanguage): String {
     return appStringResource(language.displayNameRes)
 }
-
-object DeviceScreenEntryPoint {
-    @Composable
-    fun Overview(
-        uiState: DeviceUiState,
-        onStartScan: () -> Unit,
-        onConnect: (String) -> Unit,
-        onDisconnect: () -> Unit,
-        onV2Discovery: () -> Unit = {},
-        onV2PreviewConnect: (String) -> Unit = {},
-        onV2PreviewScan: () -> Unit = {},
-        onV2StreamToggle: (Int) -> Unit = {},
-        onV2LiveStart: () -> Unit = {},
-        onV2LiveStop: () -> Unit = {},
-        showReplayAction: Boolean,
-        onReplayRequest: () -> Unit,
-        profileContent: @Composable () -> Unit = {},
-        modifier: Modifier = Modifier,
-    ) {
-        DeviceOverviewScreen(
-            uiState = uiState,
-            onStartScan = onStartScan,
-            onConnect = onConnect,
-            onDisconnect = onDisconnect,
-            onV2Discovery = onV2Discovery,
-            onV2PreviewConnect = onV2PreviewConnect,
-            onV2PreviewScan = onV2PreviewScan,
-            onV2StreamToggle = onV2StreamToggle,
-            onV2LiveStart = onV2LiveStart,
-            onV2LiveStop = onV2LiveStop,
-            showReplayAction = showReplayAction,
-            onReplayRequest = onReplayRequest,
-            profileContent = profileContent,
-            modifier = modifier,
-        )
-    }
-
-    @Composable
-    fun Charts(
-        uiState: DeviceUiState,
-        onSensorSelect: (Int) -> Unit,
-        onChannelSelect: (Int) -> Unit,
-        onChartWindowSelect: (ChartWindowPreset) -> Unit,
-        onFollowLiveChange: (Boolean) -> Unit,
-        onChartPanLeft: () -> Unit,
-        onChartPanRight: () -> Unit,
-        onChartZoomIn: () -> Unit,
-        onChartZoomOut: () -> Unit,
-        onChartZoomReset: () -> Unit,
-        onChartPanGesture: (Float) -> Unit,
-        onChartZoomGesture: (Float, Float) -> Unit,
-        onChartFullscreenChange: (Boolean) -> Unit = {},
-        modifier: Modifier = Modifier,
-    ) {
-        DeviceChartsScreen(
-            uiState = uiState,
-            onSensorSelect = onSensorSelect,
-            onChannelSelect = onChannelSelect,
-            onChartWindowSelect = onChartWindowSelect,
-            onFollowLiveChange = onFollowLiveChange,
-            onChartPanLeft = onChartPanLeft,
-            onChartPanRight = onChartPanRight,
-            onChartZoomIn = onChartZoomIn,
-            onChartZoomOut = onChartZoomOut,
-            onChartZoomReset = onChartZoomReset,
-            onChartPanGesture = onChartPanGesture,
-            onChartZoomGesture = onChartZoomGesture,
-            onChartFullscreenChange = onChartFullscreenChange,
-            modifier = modifier,
-        )
-    }
-
-    @Composable
-    fun Settings(
-        uiState: DeviceUiState,
-        selectedLanguage: AppLanguage,
-        selectedThemeMode: AppThemeMode,
-        onTransportProfileSelect: (BleTransportProfile) -> Unit,
-        onLanguageSelect: (AppLanguage) -> Unit,
-        onThemeModeSelect: (AppThemeMode) -> Unit,
-        serverSyncState: ServerSyncUiState = ServerSyncUiState(),
-        onServerConfigure: () -> Unit = {},
-        onServerWifiOnlyChange: (Boolean) -> Unit = {},
-        onServerRetryPending: () -> Unit = {},
-        onServerRestore: () -> Unit = {},
-    onServerCheck: () -> Unit = {},
-    onServerStorageCheck: () -> Unit = {},
-        modifier: Modifier = Modifier,
-    ) {
-        DeviceSettingsScreen(
-            uiState = uiState,
-            selectedLanguage = selectedLanguage,
-            selectedThemeMode = selectedThemeMode,
-            serverSyncState = serverSyncState,
-            onTransportProfileSelect = onTransportProfileSelect,
-            onLanguageSelect = onLanguageSelect,
-            onThemeModeSelect = onThemeModeSelect,
-            onServerConfigure = onServerConfigure,
-            onServerWifiOnlyChange = onServerWifiOnlyChange,
-            onServerRetryPending = onServerRetryPending,
-            onServerRestore = onServerRestore,
-            onServerCheck = onServerCheck,
-            onServerStorageCheck = onServerStorageCheck,
-            modifier = modifier,
-        )
-    }
-}
-
 private data class AxisTick(
     val label: String,
     val value: Float,

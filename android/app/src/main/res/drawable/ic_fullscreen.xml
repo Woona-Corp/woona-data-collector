@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+* Copyright 2024 The Android Open Source Project
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+Rounded geometry from AndroidX Material Icons 1.7.0.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#FF000000" android:pathData="M6.0  14.0 c-0.55  0.0  -1.0  0.45  -1.0  1.0 v3.0 c0.0  0.55  0.45  1.0  1.0  1.0 h3.0 c0.55  0.0  1.0  -0.45  1.0  -1.0 s-0.45  -1.0  -1.0  -1.0 L7.0  17.0 v-2.0 c0.0  -0.55  -0.45  -1.0  -1.0  -1.0 Z M6.0  10.0 c0.55  0.0  1.0  -0.45  1.0  -1.0 L7.0  7.0 h2.0 c0.55  0.0  1.0  -0.45  1.0  -1.0 s-0.45  -1.0  -1.0  -1.0 L6.0  5.0 c-0.55  0.0  -1.0  0.45  -1.0  1.0 v3.0 c0.0  0.55  0.45  1.0  1.0  1.0 Z M17.0  17.0 h-2.0 c-0.55  0.0  -1.0  0.45  -1.0  1.0 s0.45  1.0  1.0  1.0 h3.0 c0.55  0.0  1.0  -0.45  1.0  -1.0 v-3.0 c0.0  -0.55  -0.45  -1.0  -1.0  -1.0 s-1.0  0.45  -1.0  1.0 v2.0 Z M14.0  6.0 c0.0  0.55  0.45  1.0  1.0  1.0 h2.0 v2.0 c0.0  0.55  0.45  1.0  1.0  1.0 s1.0  -0.45  1.0  -1.0 L19.0  6.0 c0.0  -0.55  -0.45  -1.0  -1.0  -1.0 h-3.0 c-0.55  0.0  -1.0  0.45  -1.0  1.0 Z" />
+</vector>

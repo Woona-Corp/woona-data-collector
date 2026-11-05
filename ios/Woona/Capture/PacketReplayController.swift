@@ -3,6 +3,7 @@ import Foundation
 enum PacketReplayMessage {
     static let emptyFile = "Replay file is empty"
     static let invalidFile = "Replay file is not a valid replay file"
+    static let loadFailed = "Failed to load replay file"
     static let interrupted = "Replay interrupted"
     static let failed = "Replay failed"
 }
@@ -35,6 +36,7 @@ actor PacketReplayController {
     private let maximumRawFragmentDelayMillis: UInt64
 
     private var replayTask: Task<Void, Never>?
+    private var latestRequestID = UUID()
 
     init(
         submitFragment: @escaping @Sendable ([UInt8]) async -> PacketSubmitResult,
@@ -62,87 +64,124 @@ actor PacketReplayController {
         self.maximumRawFragmentDelayMillis = maximumRawFragmentDelayMillis ?? packetIntervalMillis
     }
 
-    func startReplay(_ fileBytes: [UInt8]) async {
-        guard !fileBytes.isEmpty else {
-            await onError(PacketReplayMessage.emptyFile, nil)
-            await onReplayStopped()
-            return
-        }
-
-        await stop()
-
-        let replaySource: ReplaySource
-        do {
-            replaySource = try parseReplaySource(fileBytes)
-        } catch {
-            await onError(PacketReplayMessage.invalidFile, error)
-            await onReplayStopped()
-            return
-        }
-        guard !replaySource.isEmpty else {
-            await onError(PacketReplayMessage.emptyFile, nil)
-            await onReplayStopped()
-            return
-        }
-
+    func startReplay(from fileURL: URL) async {
+        let requestID = UUID()
+        latestRequestID = requestID
+        replayTask?.cancel()
+        await replayTask?.value
+        guard latestRequestID == requestID else { return }
         let submitFragment = submitFragment
         let onReplayStarted = onReplayStarted
         let onReplayCompleted = onReplayCompleted
         let onReplayStopped = onReplayStopped
         let onError = onError
+        let packetFileParser = packetFileParser
+        let rawFragmentFileParser = rawFragmentFileParser
         let chunkSize = chunkSize
         let chunkDelayMillis = chunkDelayMillis
         let packetIntervalMillis = packetIntervalMillis
         let maximumRawFragmentDelayMillis = maximumRawFragmentDelayMillis
 
-        replayTask = Task {
-            await onReplayStarted()
-
+        replayTask = Task.detached {
+            #if os(iOS) || os(macOS)
+            let didAccess = fileURL.startAccessingSecurityScopedResource()
+            defer { if didAccess { fileURL.stopAccessingSecurityScopedResource() } }
+            #endif
+            var started = false
             do {
-                switch replaySource {
-                case .packetDump(let packets):
+                try Task.checkCancellation()
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: directory) }
+                let prepared = directory.appendingPathComponent("replay.bin")
+                try Self.copyReplaySource(from: fileURL, to: prepared)
+                let input = try FileHandle(forReadingFrom: prepared)
+                defer { try? input.close() }
+
+                let prefix = try input.readReplayBytes(upToCount: RawFragmentFileStore.magicHeader.count)
+                let isRaw = rawFragmentFileParser.hasMagicHeader(prefix)
+                try input.seek(toOffset: 0)
+                var recordCount = 0
+                let countRecord: () throws -> Void = {
+                    try Task.checkCancellation()
+                    recordCount += 1
+                }
+                // Validate the complete immutable copy before publishing any capture data.
+                if isRaw {
+                    try rawFragmentFileParser.forEachFragment(read: input.readReplayBytes) { _ in try countRecord() }
+                } else {
+                    try packetFileParser.forEachPacket(read: input.readReplayBytes) { _ in try countRecord() }
+                }
+                try Task.checkCancellation()
+                guard recordCount > 0 else {
+                    await onError(PacketReplayMessage.emptyFile, nil)
+                    await onReplayStopped()
+                    return
+                }
+                try input.seek(toOffset: 0)
+                await onReplayStarted()
+                started = true
+                try Task.checkCancellation()
+                if isRaw {
+                    let isV2 = try rawFragmentFileParser.readMagicHeader(read: input.readReplayBytes)
+                    var offset = RawFragmentFileStore.magicHeader.count
+                    try await Self.replayRawFragments(
+                        next: { try rawFragmentFileParser.readFragment(read: input.readReplayBytes, isV2: isV2, offset: &offset) },
+                        maximumFragmentDelayMillis: maximumRawFragmentDelayMillis,
+                        submitFragment: submitFragment
+                    )
+                } else {
+                    var offset = 0
                     try await Self.replayPackets(
-                        packets,
+                        next: { try packetFileParser.readPacket(read: input.readReplayBytes, offset: &offset) },
                         chunkSize: chunkSize,
                         chunkDelayMillis: chunkDelayMillis,
                         packetIntervalMillis: packetIntervalMillis,
                         submitFragment: submitFragment
                     )
-                case .rawFragments(let fragments):
-                    try await Self.replayRawFragments(
-                        fragments,
-                        maximumFragmentDelayMillis: maximumRawFragmentDelayMillis,
-                        submitFragment: submitFragment
-                    )
                 }
-
-                if Task.isCancelled {
-                    await onReplayStopped()
-                } else {
-                    await onReplayCompleted()
-                }
+                try Task.checkCancellation()
+                await onReplayCompleted()
             } catch is CancellationError {
                 await onReplayStopped()
             } catch {
-                await onError(PacketReplayMessage.failed, error)
+                let message: String
+                if started {
+                    message = PacketReplayMessage.failed
+                } else if error is RecordedPacketFileParserError || error is RawFragmentFileParserError {
+                    message = PacketReplayMessage.invalidFile
+                } else {
+                    message = PacketReplayMessage.loadFailed
+                }
+                await onError(message, error)
                 await onReplayStopped()
             }
         }
     }
 
-    private func parseReplaySource(_ fileBytes: [UInt8]) throws -> ReplaySource {
-        if rawFragmentFileParser.hasMagicHeader(fileBytes) {
-            return .rawFragments(try rawFragmentFileParser.splitIntoFragments(fileBytes))
+    private static func copyReplaySource(from source: URL, to target: URL) throws {
+        let input = try FileHandle(forReadingFrom: source)
+        defer { try? input.close() }
+        guard FileManager.default.createFile(atPath: target.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
         }
-
-        return .packetDump(try packetFileParser.splitIntoPackets(fileBytes))
+        let output = try FileHandle(forWritingTo: target)
+        defer { try? output.close() }
+        while true {
+            try Task.checkCancellation()
+            let chunk = try input.read(upToCount: 64 * 1024) ?? Data()
+            if chunk.isEmpty { return }
+            try output.write(contentsOf: chunk)
+        }
     }
 
     func stop() async {
-        guard let task = replayTask else { return }
-        replayTask = nil
-        task.cancel()
-        await task.value
+        let requestID = UUID()
+        latestRequestID = requestID
+        // Retain the draining task so concurrent stop/close calls also await it.
+        replayTask?.cancel()
+        await replayTask?.value
+        if latestRequestID == requestID { replayTask = nil }
     }
 
     func close() async {
@@ -150,7 +189,7 @@ actor PacketReplayController {
     }
 
     private static func replayPackets(
-        _ packets: [[UInt8]],
+        next: () throws -> [UInt8]?,
         chunkSize: Int,
         chunkDelayMillis: UInt64,
         packetIntervalMillis: UInt64,
@@ -158,7 +197,7 @@ actor PacketReplayController {
     ) async throws {
         let resolvedChunkSize = max(1, chunkSize)
 
-        for packet in packets {
+        while let packet = try next() {
             try Task.checkCancellation()
             let packetStartNanos = DispatchTime.now().uptimeNanoseconds
 
@@ -192,15 +231,15 @@ actor PacketReplayController {
     }
 
     private static func replayRawFragments(
-        _ fragments: [RawFragmentRecord],
+        next: () throws -> RawFragmentRecord?,
         maximumFragmentDelayMillis: UInt64,
         submitFragment: @Sendable ([UInt8]) async -> PacketSubmitResult
     ) async throws {
-        for (index, fragment) in fragments.enumerated() {
+        var current = try next()
+        while let fragment = current {
             try Task.checkCancellation()
             let result = await submitFragment(fragment.bytes)
             try Task.checkCancellation()
-
             switch result {
             case .accepted:
                 break
@@ -209,14 +248,11 @@ actor PacketReplayController {
             case .overflow:
                 throw PacketReplayRuntimeError.queueOverflow
             }
-
-            if index < fragments.count - 1 {
-                let delayMillis = rawReplayDelayMillis(
-                    from: fragment,
-                    to: fragments[index + 1],
-                    maximumDelayMillis: maximumFragmentDelayMillis
-                )
-                try await sleep(milliseconds: delayMillis)
+            current = try next()
+            if let following = current {
+                try await sleep(milliseconds: rawReplayDelayMillis(
+                    from: fragment, to: following, maximumDelayMillis: maximumFragmentDelayMillis
+                ))
             }
         }
     }
@@ -237,17 +273,4 @@ actor PacketReplayController {
         try await Task.sleep(nanoseconds: milliseconds * 1_000_000)
     }
 
-    private enum ReplaySource {
-        case packetDump([[UInt8]])
-        case rawFragments([RawFragmentRecord])
-
-        var isEmpty: Bool {
-            switch self {
-            case .packetDump(let packets):
-                packets.isEmpty
-            case .rawFragments(let fragments):
-                fragments.isEmpty
-            }
-        }
-    }
 }

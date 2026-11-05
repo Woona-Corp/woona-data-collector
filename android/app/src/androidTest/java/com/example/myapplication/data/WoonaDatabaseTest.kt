@@ -9,6 +9,8 @@ import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -280,6 +282,27 @@ class WoonaDatabaseTest {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         if (root == File(context.filesDir, "Woona")) ActivityDatabase.resetForTesting()
         root.deleteRecursively()
+    }
+
+    @Test
+    fun syncGapSeparatesARemovedRecordingFromAMissingSyncRow() {
+        val profile = database.saveProfile(completeDogQuestionnaire("Gap dog"))
+        val session = database.beginRecording(profile.id, RecordingSource.LIVE, completeSessionQuestionnaire())
+        database.finishRecording(session.id, RecordingStatus.COMPLETED)
+        // begin/finish alone leave recording_sync absent: the row a write failure
+        // would leave behind, which must not be reported as "nothing to sync".
+        assertNull(database.recordingSyncRecord(session.id))
+        assertEquals(SYNC_GAP_SYNC_MISSING, database.recordingSyncGap(session.id))
+        val recording = requireNotNull(database.recording(session.id))
+        database.writeSyncMetadata(session.id, CaptureSyncMetadata(
+            recordingId = session.id,
+            profileId = profile.id,
+            source = recording.source.value,
+            timezone = recording.timezone,
+            selectedSessionStartUtc = requireNotNull(recording.startedAtUtc),
+        ))
+        assertNull(database.recordingSyncGap(session.id))
+        assertNotNull(database.recordingSyncRecord(session.id))
     }
 
     @Test
@@ -1071,7 +1094,7 @@ class WoonaDatabaseTest {
                 "/v1/recordings/$retiredRecord"->410 to "{}"
                 "/v1/recordings/$unknownGone"->410 to "{}"
                 "/v1/recordings/${original.id}"->404 to "{}"
-                "/v1/deletions"->200 to JSONObject().put("entities",org.json.JSONArray(listOf(JSONObject().put("kind","dog").put("id_sha256",hash(retiredDog)),JSONObject().put("kind","recording").put("id_sha256",hash(retiredRecord))))).toString()
+                "/v1/deletions?limit=1000"->200 to JSONObject().put("entities",org.json.JSONArray(listOf(JSONObject().put("kind","dog").put("id_sha256",hash(retiredDog)),JSONObject().put("kind","recording").put("id_sha256",hash(retiredRecord))))).toString()
                 else->error("Unexpected fixture path $path")
             }
         },headers)
@@ -1079,7 +1102,7 @@ class WoonaDatabaseTest {
         assertEquals(1,snapshot.dogs.size);assertEquals(1,snapshot.recordings.size)
         assertEquals(4,snapshot.warnings.size);assertEquals(2,snapshot.warnings.count {!it.confirmedRetirement})
         assertFalse(snapshot.warnings.single { it.id == unknownGone }.confirmedRetirement)
-        assertEquals("/v1/deletions",requested.last());assertTrue(headers.all {it=="account-a"})
+        assertEquals("/v1/deletions?limit=1000",requested.last());assertTrue(headers.all {it=="account-a"})
         assertTrue(requireNotNull(com.example.myapplication.sync.restoreWarningsText(snapshot.warnings,com.example.myapplication.localization.AppLanguage.ENGLISH)).contains("partially"))
         database.restoreServerMetadata(snapshot.dogs,snapshot.recordings);database.applyServerDeletions(snapshot.deletions)
         assertEquals(original.sessionLabel,database.recording(original.id)?.sessionLabel)

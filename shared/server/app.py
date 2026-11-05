@@ -4,7 +4,6 @@ import hashlib
 import errno
 import json
 import logging
-import math
 import os
 import re
 import stat
@@ -25,7 +24,6 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError as SchemaValidationError
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
@@ -35,6 +33,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from server.safety import (LOCAL_ONLY_TOKEN, active_entity_sql, append_upload,
                            identity_lock, production_auth_guard)
 from server.integrity_audit import audit_limits, integrity_page
+from server.payloads import (AccountAssignment, ArtifactPayload, DogPayload, ProfilePut,
+                             ProfileVersionPayload, QuestionnaireEdit, RecordingManifest,
+                             RecordingPayload, ReferenceMetadata, StrictModel, SyncPayload)
 from server.storage_diagnostics import unavailable as storage_diagnostic_unavailable
 from server.storage_policy import (check_account_assignment, reserve_artifact, reserve_manifest,
                                    reservation_lock, storage_status, limits as storage_limits)
@@ -53,7 +54,6 @@ ALLOW_LEGACY_MIGRATION = os.getenv("WOONA_ALLOW_LEGACY_MIGRATION", "false").lowe
 MAX_CHUNK_BYTES = 16 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 100 * 1024 * 1024 * 1024
-HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACT_RULES = {
     "packet": ({".bin"}, {"application/octet-stream"}),
     "packet_timeline": ({".bin"}, {"application/octet-stream"}),
@@ -113,261 +113,6 @@ def load_validator(env_name: str, default_path: str) -> Draft202012Validator:
 
 dog_validator: Draft202012Validator | None = None
 session_validator: Draft202012Validator | None = None
-
-
-class StrictModel(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid", populate_by_name=True, str_strip_whitespace=True
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def database_safe_metadata(cls, value):
-        # JSON accepts unpaired surrogates and nonfinite numbers; PostgreSQL
-        # JSONB and UTF-8 do not. Validate before hashing or idempotent returns.
-        pending = [(value, 0)]
-        while pending:
-            item, depth = pending.pop()
-            if depth > 64:
-                raise ValueError("Metadata nesting exceeds 64 levels")
-            if isinstance(item, str):
-                if "\x00" in item:
-                    raise ValueError("Text must not contain NUL characters")
-                try:
-                    item.encode("utf-8")
-                except UnicodeEncodeError as error:
-                    raise ValueError("Text must contain valid Unicode characters") from error
-            elif isinstance(item, float) and not math.isfinite(item):
-                raise ValueError("Numbers must be finite")
-            elif isinstance(item, int) and not -(2**63) <= item < 2**63:
-                raise ValueError("Integers must fit the signed 64-bit storage range")
-            elif isinstance(item, dict):
-                pending.extend((part, depth + 1) for pair in item.items() for part in pair)
-            elif isinstance(item, (list, tuple)):
-                pending.extend((part, depth + 1) for part in item)
-        return value
-
-    @field_validator("*")
-    @classmethod
-    def representable_utc(cls, value):
-        # Catch coercions such as a numeric string or finite 1e30 becoming int.
-        if isinstance(value, int) and not -(2**63) <= value < 2**63:
-            raise ValueError("Integers must fit the signed 64-bit storage range")
-        if isinstance(value, float) and not math.isfinite(value):
-            raise ValueError("Numbers must be finite")
-        if isinstance(value, datetime):
-            try:
-                value.astimezone(timezone.utc)
-            except (OverflowError, ValueError) as error:
-                raise ValueError("Timestamp must be representable in UTC years 1–9999") from error
-        return value
-
-
-class DogPayload(StrictModel):
-    id: uuid.UUID
-    number_or_name: str = Field(alias="numberOrName", min_length=1, max_length=100)
-    expected_revision: int = Field(alias="expectedRevision", ge=0)
-
-
-class ProfileVersionPayload(StrictModel):
-    id: uuid.UUID
-    schema_version: int = Field(alias="schemaVersion", ge=1, le=32767)
-    validation_state: Literal["complete", "legacy_incomplete"] = Field(
-        alias="validationState"
-    )
-    questionnaire: dict[str, Any]
-    content_sha256: str = Field(alias="contentSha256")
-    client_created_at_utc: AwareDatetime = Field(alias="clientCreatedAtUtc")
-
-    @field_validator("content_sha256")
-    @classmethod
-    def valid_hash(cls, value: str) -> str:
-        if not HEX_64.fullmatch(value):
-            raise ValueError("must be lowercase SHA-256")
-        return value
-
-
-class ProfilePut(StrictModel):
-    dog: DogPayload
-    profile_version: ProfileVersionPayload = Field(alias="profileVersion")
-
-
-class AccountAssignment(StrictModel):
-    account_id: str = Field(alias="accountId")
-
-
-class QuestionnaireEdit(StrictModel):
-    expected_revision: int = Field(alias="expectedRevision", ge=1)
-    questionnaire: dict[str, Any]
-
-
-class RecordingPayload(StrictModel):
-    source: Literal["live", "replay"]
-    capture_status: Literal["completed", "failed", "interrupted"] = Field(
-        alias="captureStatus"
-    )
-    started_at_utc: AwareDatetime = Field(alias="startedAtUtc")
-    ended_at_utc: AwareDatetime | None = Field(alias="endedAtUtc")
-    timezone: str = Field(min_length=1, max_length=100)
-    session_label: str = Field(alias="sessionLabel", min_length=1, max_length=100)
-    video_requested: bool = Field(alias="videoRequested")
-    sensor_hardware_id: str | None = Field(alias="sensorHardwareId", default=None)
-    app_version: str = Field(alias="appVersion", min_length=1, max_length=100)
-    protocol_version: str | None = Field(alias="protocolVersion", default=None)
-    questionnaire_schema_version: int = Field(
-        alias="questionnaireSchemaVersion", ge=1, le=32767
-    )
-    questionnaire_validation_state: Literal["complete", "legacy_incomplete"] = Field(
-        alias="questionnaireValidationState"
-    )
-    session_questionnaire: dict[str, Any] = Field(alias="sessionQuestionnaire")
-    capture_error_code: str | None = Field(alias="captureErrorCode", default=None)
-    capture_error_message: str | None = Field(
-        alias="captureErrorMessage", default=None
-    )
-
-
-class SyncPayload(StrictModel):
-    schema_version: int = Field(alias="schemaVersion", ge=1, le=32767)
-    monotonic_clock: Literal[
-        "android.elapsedRealtimeNanos", "ios.CMClock.hostTime"
-    ] = Field(
-        alias="monotonicClock"
-    )
-    session_zero_at_utc: AwareDatetime = Field(alias="sessionZeroAtUtc")
-    session_zero_wall_clock_ms: int = Field(alias="sessionZeroWallClockMs", ge=0)
-    session_zero_monotonic_ns: int = Field(alias="sessionZeroMonotonicNs", ge=0)
-    session_zero_uncertainty_ns: int = Field(
-        alias="sessionZeroUncertaintyNs", ge=0
-    )
-    first_sensor_packet_monotonic_ns: int | None = Field(
-        alias="firstSensorPacketMonotonicNs", default=None, ge=0
-    )
-    first_sensor_device_timer_ms: int | None = Field(
-        alias="firstSensorDeviceTimerMs", default=None, ge=0
-    )
-    last_sensor_packet_monotonic_ns: int | None = Field(
-        alias="lastSensorPacketMonotonicNs", default=None, ge=0
-    )
-    video_requested_monotonic_ns: int | None = Field(
-        alias="videoRequestedMonotonicNs", default=None, ge=0
-    )
-    media_recorder_started_monotonic_ns: int | None = Field(
-        alias="mediaRecorderStartedMonotonicNs", default=None, ge=0
-    )
-    video_first_frame_monotonic_ns: int | None = Field(
-        alias="videoFirstFrameMonotonicNs", default=None, ge=0
-    )
-    video_first_frame_camera_timestamp_ns: int | None = Field(
-        alias="videoFirstFrameCameraTimestampNs", default=None, ge=0
-    )
-    video_first_frame_callback_monotonic_ns: int | None = Field(
-        alias="videoFirstFrameCallbackMonotonicNs", default=None, ge=0
-    )
-    video_first_sample_pts_us: int | None = Field(
-        alias="videoFirstSamplePtsUs", default=None, ge=0
-    )
-    video_offset_from_sensor_ns: int | None = Field(
-        alias="videoOffsetFromSensorNs", default=None
-    )
-    camera_timestamp_source: Literal[
-        "realtime", "avfoundation_session_clock", "unknown"
-    ] | None = Field(
-        alias="cameraTimestampSource", default=None
-    )
-    camera_clock_quality: Literal[
-        "hardware_monotonic", "callback_estimate", "unavailable"
-    ] = Field(alias="cameraClockQuality")
-    sensor_clock_quality: Literal[
-        "first_packet_arrival", "device_timer_mapped", "calibrated", "unavailable"
-    ] = Field(alias="sensorClockQuality")
-    overall_sync_quality: Literal[
-        "arrival_aligned", "callback_estimate", "degraded", "unavailable"
-    ] = Field(alias="overallSyncQuality")
-    calibration_offset_ns: int = Field(alias="calibrationOffsetNs", default=0)
-    estimated_drift_ppm: float | None = Field(
-        alias="estimatedDriftPpm", default=None
-    )
-
-    @model_validator(mode="after")
-    def consistent_anchors(self):
-        if self.overall_sync_quality in {"arrival_aligned", "callback_estimate"}:
-            if self.first_sensor_packet_monotonic_ns is None or self.video_first_frame_monotonic_ns is None:
-                raise ValueError("Aligned capture requires sensor and camera anchors")
-            if self.video_offset_from_sensor_ns != self.video_first_frame_monotonic_ns - self.first_sensor_packet_monotonic_ns:
-                raise ValueError("Video offset does not match monotonic anchors")
-        if self.camera_clock_quality == "hardware_monotonic" and (
-            not self.video_first_frame_monotonic_ns or self.camera_timestamp_source not in {"realtime", "avfoundation_session_clock"}
-        ):
-            raise ValueError("Hardware camera clock requires a comparable timestamp source")
-        return self
-
-
-class ReferenceMetadata(StrictModel):
-    source: str = Field(min_length=1, max_length=200)
-    started_at_utc: AwareDatetime = Field(alias="startedAtUtc")
-    ended_at_utc: AwareDatetime = Field(alias="endedAtUtc")
-    offset_from_recording_ms: float | None = Field(alias="offsetFromRecordingMs", default=None, allow_inf_nan=False)
-    notes: str | None = Field(default=None, max_length=2000)
-
-    @field_validator("started_at_utc", "ended_at_utc")
-    @classmethod
-    def explicit_timezone(cls, value: datetime) -> datetime:
-        if value.tzinfo is None:
-            raise ValueError("include a timezone")
-        return value
-
-
-class ArtifactPayload(StrictModel):
-    id: uuid.UUID
-    type: Literal[
-        "packet",
-        "packet_timeline",
-        "raw",
-        "diagnostic",
-        "csv",
-        "video",
-        "sync",
-        "imported_source",
-        "ecg", "heart_rate", "rr",
-    ]
-    file_name: str = Field(alias="fileName", min_length=1, max_length=255)
-    mime_type: str = Field(alias="mimeType", min_length=1, max_length=150)
-    size_bytes: int = Field(alias="sizeBytes", ge=0)
-    sha256: str
-    client_created_at_utc: AwareDatetime = Field(alias="clientCreatedAtUtc")
-    reference_metadata: ReferenceMetadata | None = Field(alias="referenceMetadata", default=None)
-
-    @field_validator("file_name")
-    @classmethod
-    def safe_name(cls, value: str) -> str:
-        if (
-            "/" in value
-            or "\\" in value
-            or "\x00" in value
-            or "\r" in value
-            or "\n" in value
-            or value in {".", ".."}
-        ):
-            raise ValueError("path separators are not allowed")
-        return value
-
-    @field_validator("sha256")
-    @classmethod
-    def valid_hash(cls, value: str) -> str:
-        if not HEX_64.fullmatch(value):
-            raise ValueError("must be lowercase SHA-256")
-        return value
-
-
-class RecordingManifest(StrictModel):
-    schema_version: int = Field(alias="schemaVersion", ge=1, le=32767)
-    capture_device_id: uuid.UUID = Field(alias="captureDeviceId")
-    dog: DogPayload
-    dog_profile_version: ProfileVersionPayload = Field(alias="dogProfileVersion")
-    recording: RecordingPayload
-    sync: SyncPayload
-    artifacts: list[ArtifactPayload] = Field(min_length=1, max_length=32)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -901,11 +646,47 @@ def ensure_not_retired(connection: Connection, kind: str, identity: uuid.UUID) -
         raise HTTPException(410, detail={"code": "entity_retired", "kind": kind})
 
 
+DELETION_KINDS = ("dog", "profile", "recording", "artifact")
+DELETION_PAGE_MAX = 5000
+DELETION_PAGE_DEFAULT = 1000
+DELETION_CURSOR = re.compile(r"^(dog|profile|recording|artifact):([0-9a-f]{64})$")
+
+
+def deletion_page_arguments(limit: int, cursor: str | None) -> tuple[int, tuple[str, str] | None]:
+    """Validate a bounded page request; a marker list is never returned unbounded."""
+    if limit < 1 or limit > DELETION_PAGE_MAX:
+        raise HTTPException(422, detail={"code": "invalid_deletion_limit",
+                                        "minLimit": 1, "maxLimit": DELETION_PAGE_MAX})
+    if cursor is None:
+        return limit, None
+    matched = DELETION_CURSOR.fullmatch(cursor)
+    if matched is None:
+        raise HTTPException(422, detail={"code": "invalid_deletion_cursor"})
+    return limit, (matched.group(1), matched.group(2))
+
+
 @app.get("/v1/deletions")
-def get_deletions(device_id: Annotated[uuid.UUID, Depends(authenticated_device)]) -> dict:
+def get_deletions(
+    device_id: Annotated[uuid.UUID, Depends(authenticated_device)],
+    limit: int = DELETION_PAGE_DEFAULT,
+    cursor: str | None = None,
+) -> dict:
+    limit, after = deletion_page_arguments(limit, cursor)
+    # Retirement markers carry no account column (migration 0005), so this page
+    # is ordered and bounded rather than account-scoped. A device that stops
+    # following nextCursor would miss markers, therefore the page is larger than
+    # any current deployment and the clients loop until nextCursor is null.
+    query = "SELECT kind,id_sha256 FROM retired_entities"
+    parameters: dict[str, Any] = {"limit": limit + 1}
+    if after is not None:
+        query += " WHERE (kind,id_sha256) > (:after_kind,:after_hash)"
+        parameters.update(after_kind=after[0], after_hash=after[1])
+    query += " ORDER BY kind,id_sha256 LIMIT :limit"
     with engine.connect() as connection:
-        rows = connection.execute(text("SELECT kind,id_sha256 FROM retired_entities ORDER BY kind,id_sha256")).mappings()
-        return {"entities": [dict(row) for row in rows]}
+        rows = [dict(row) for row in connection.execute(text(query), parameters).mappings()]
+    page = rows[:limit]
+    next_cursor = f"{page[-1]['kind']}:{page[-1]['id_sha256']}" if len(rows) > limit and page else None
+    return {"entities": page, "limit": limit, "nextCursor": next_cursor}
 
 
 @app.put("/v1/dogs/{dog_id}/profile-versions/{profile_id}")
@@ -1509,7 +1290,46 @@ async def patch_artifact(
     )
 
 
+STORAGE_FAILURE_CODES = frozenset({"storage_full", "storage_unavailable", "storage_space_low"})
+
+
+def record_upload_failure(artifact_id: uuid.UUID, failure: HTTPException) -> None:
+    """Store a server-side storage cause so a stalled upload stays explainable.
+
+    Only server storage conditions are persisted. Offset mismatches, ownership
+    and size conflicts describe a request the client must correct, and inventing
+    a stored reason for them would misreport the server's own state.
+    """
+    detail = failure.detail if isinstance(failure.detail, dict) else {}
+    code = detail.get("code")
+    if failure.status_code not in {503, 507} or code not in STORAGE_FAILURE_CODES:
+        return
+    message = error_guidance(str(code), failure.status_code)["message"]
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("""
+                UPDATE artifacts SET error_code=:code,error_message=:message
+                WHERE id=:id AND storage_status='uploading'
+                """), {"code": code, "message": message, "id": artifact_id})
+    except Exception:  # Never replace the real upload failure with a logging one.
+        logger.exception("upload_failure_not_recorded artifactId=%s", artifact_id)
+
+
 def persist_artifact_chunk(
+    artifact_id: uuid.UUID,
+    device_id: uuid.UUID,
+    upload_offset: int,
+    body: bytearray,
+    request_id: str = "",
+) -> Response:
+    try:
+        return persist_artifact_chunk_locked(artifact_id, device_id, upload_offset, body, request_id)
+    except HTTPException as failure:
+        record_upload_failure(artifact_id, failure)
+        raise
+
+
+def persist_artifact_chunk_locked(
     artifact_id: uuid.UUID,
     device_id: uuid.UUID,
     upload_offset: int,
@@ -1564,7 +1384,7 @@ def persist_artifact_chunk(
                     """
                     UPDATE artifacts
                     SET stored_size_bytes=:offset,storage_status='uploading',
-                        upload_updated_at=now()
+                        upload_updated_at=now(),error_code=NULL,error_message=NULL
                     WHERE id=:id
                     """
                 ),

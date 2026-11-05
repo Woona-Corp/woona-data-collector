@@ -407,8 +407,8 @@ class PacketAssembler(
 
     private companion object {
         val START_MARKER = byteArrayOf(0x33, 0x99.toByte(), 0xAA.toByte(), 0x55)
-        const val DEFAULT_CAPACITY = 512 * 1024
         const val MAX_PACKET_SIZE = 16_384
+        const val DEFAULT_CAPACITY = MAX_PACKET_SIZE
         const val MAX_NESTED_OVERLAP_LOOKBACK_BYTES = 16_384
         const val ASSUMED_NOTIFICATION_PAYLOAD_BYTES = 244
         const val HEADER_SIZE = 4

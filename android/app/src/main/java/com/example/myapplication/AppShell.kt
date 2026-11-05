@@ -16,19 +16,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.CloudDone
-import androidx.compose.material.icons.rounded.CloudOff
-import androidx.compose.material.icons.rounded.CloudUpload
-import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.Pets
-import androidx.compose.material.icons.rounded.Videocam
-import androidx.compose.material.icons.rounded.Folder
 import com.example.myapplication.profile.ProfileScreenSection
 import androidx.compose.material3.FilterChip
 import androidx.compose.ui.platform.testTag
-import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material.icons.rounded.ShowChart
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -40,6 +30,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,7 +39,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -56,7 +46,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.myapplication.ble.BleTransportProfile
 import com.example.myapplication.feature.device.ChartWindowPreset
-import com.example.myapplication.feature.device.DeviceScreenEntryPoint
+import com.example.myapplication.feature.device.DeviceOverviewScreen
+import com.example.myapplication.feature.device.DeviceChartsScreen
+import com.example.myapplication.feature.device.DeviceSettingsScreen
 import com.example.myapplication.feature.device.DeviceUiState
 import com.example.myapplication.feature.device.ExportPhase
 import com.example.myapplication.localization.AppLanguage
@@ -69,17 +61,17 @@ import com.example.myapplication.ui.theme.AppThemeMode
 private enum class AppDestination(
     val titleRes: Int,
     val navLabelRes: Int,
-    val icon: ImageVector,
+    val iconRes: Int,
     val supportsExport: Boolean,
 ) {
-    ANIMALS(R.string.nav_animals, R.string.nav_animals, Icons.Rounded.Pets, false),
-    SESSION(R.string.nav_session, R.string.nav_session, Icons.Rounded.ShowChart, true),
-    VIDEO(R.string.nav_video, R.string.nav_video, Icons.Rounded.Videocam, false),
-    RECORDINGS(R.string.nav_records, R.string.nav_records, Icons.Rounded.Folder, true),
+    ANIMALS(R.string.nav_animals, R.string.nav_animals, R.drawable.ic_pets, false),
+    SESSION(R.string.nav_session, R.string.nav_session, R.drawable.ic_show_chart, true),
+    VIDEO(R.string.nav_video, R.string.nav_video, R.drawable.ic_videocam, false),
+    RECORDINGS(R.string.nav_records, R.string.nav_records, R.drawable.ic_folder, true),
     SETTINGS(
         titleRes = R.string.nav_settings,
         navLabelRes = R.string.nav_settings,
-        icon = Icons.Rounded.Settings,
+        iconRes = R.drawable.ic_settings,
         supportsExport = false,
     ),
 }
@@ -209,7 +201,7 @@ fun DeviceAppShell(
                             FilterChip(selected = showSessionCharts, onClick = { showSessionCharts = true }, label = { Text(appStringResource(R.string.nav_charts)) }, modifier = Modifier.testTag("session.charts"))
                         }
                         Box(modifier = Modifier.weight(1f)) {
-                        if (!showSessionCharts) DeviceScreenEntryPoint.Overview(
+                        if (!showSessionCharts) DeviceOverviewScreen(
                             uiState = uiState.copy(errorMessage = null),
                             onStartScan = onStartScan,
                             onConnect = onConnect,
@@ -223,7 +215,7 @@ fun DeviceAppShell(
                             showReplayAction = showReplayAction,
                             onReplayRequest = onReplayRequest,
                             profileContent = { overviewProfileContent(ProfileScreenSection.SESSION) },
-                        ) else DeviceScreenEntryPoint.Charts(
+                        ) else DeviceChartsScreen(
                         uiState = uiState.copy(errorMessage = null),
                         onSensorSelect = onSensorSelect,
                         onChannelSelect = onChannelSelect,
@@ -241,7 +233,7 @@ fun DeviceAppShell(
                         }
                     }
 
-                    AppDestination.SETTINGS -> DeviceScreenEntryPoint.Settings(
+                    AppDestination.SETTINGS -> DeviceSettingsScreen(
                         uiState = uiState.copy(errorMessage = null),
                         selectedLanguage = selectedLanguage,
                         selectedThemeMode = selectedThemeMode,
@@ -310,10 +302,10 @@ private fun ServerSyncTopStatus(state: ServerSyncUiState) {
     if (state.status == ServerSyncStatus.NOT_CONFIGURED) return
 
     val colorScheme = MaterialTheme.colorScheme
-    val icon = when (state.status) {
-        ServerSyncStatus.READY -> Icons.Rounded.CloudDone
-        ServerSyncStatus.NEEDS_ATTENTION -> Icons.Rounded.CloudOff
-        else -> Icons.Rounded.CloudUpload
+    val iconRes = when (state.status) {
+        ServerSyncStatus.READY -> R.drawable.ic_cloud_done
+        ServerSyncStatus.NEEDS_ATTENTION -> R.drawable.ic_cloud_off
+        else -> R.drawable.ic_cloud_upload
     }
     val contentColor = when (state.status) {
         ServerSyncStatus.NEEDS_ATTENTION -> colorScheme.error
@@ -340,7 +332,7 @@ private fun ServerSyncTopStatus(state: ServerSyncUiState) {
             color = colorScheme.surfaceVariant,
         ) {
             Icon(
-                imageVector = icon,
+                painter = painterResource(iconRes),
                 contentDescription = label,
                 tint = contentColor,
                 modifier = Modifier
@@ -552,7 +544,7 @@ private fun ShellNavItem(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Icon(
-                    imageVector = destination.icon,
+                    painter = painterResource(destination.iconRes),
                     contentDescription = null,
                     tint = titleColor,
                     modifier = Modifier.size(20.dp),
@@ -666,109 +658,5 @@ private fun ExportActionButton(
                 )
             }
         }
-    }
-}
-
-object AppShellEntryPoint {
-    @OptIn(ExperimentalMaterial3Api::class)
-    @Composable
-    fun Render(
-        uiState: DeviceUiState,
-        selectedLanguage: AppLanguage,
-        selectedThemeMode: AppThemeMode,
-        onStartScan: () -> Unit,
-        onConnect: (String) -> Unit,
-        onTransportProfileSelect: (BleTransportProfile) -> Unit,
-        onLanguageSelect: (AppLanguage) -> Unit,
-        onThemeModeSelect: (AppThemeMode) -> Unit,
-        serverSyncState: ServerSyncUiState = ServerSyncUiState(),
-        onServerConfigure: () -> Unit = {},
-        onServerWifiOnlyChange: (Boolean) -> Unit = {},
-        onServerRetryPending: () -> Unit = {},
-        onServerRestore: () -> Unit = {},
-    onServerCheck: () -> Unit = {},
-    onServerStorageCheck: () -> Unit = {},
-        onDisconnect: () -> Unit,
-        onV2Discovery: () -> Unit = {},
-        onV2PreviewConnect: (String) -> Unit = {},
-        onV2PreviewScan: () -> Unit = {},
-        onV2StreamToggle: (Int) -> Unit = {},
-        onV2LiveStart: () -> Unit = {},
-        onV2LiveStop: () -> Unit = {},
-        onSensorSelect: (Int) -> Unit,
-        onChannelSelect: (Int) -> Unit,
-        onChartWindowSelect: (ChartWindowPreset) -> Unit,
-        onFollowLiveChange: (Boolean) -> Unit,
-        onChartPanLeft: () -> Unit,
-        onChartPanRight: () -> Unit,
-        onChartZoomIn: () -> Unit,
-        onChartZoomOut: () -> Unit,
-        onChartZoomReset: () -> Unit,
-        onChartPanGesture: (Float) -> Unit,
-        onChartZoomGesture: (Float, Float) -> Unit,
-        onChartFullscreenChange: (Boolean) -> Unit = {},
-        canShareAllFiles: Boolean,
-        canSharePacketFile: Boolean,
-        canShareCsvFile: Boolean,
-        canShareRawFile: Boolean,
-        canShareLogFile: Boolean,
-        onShareAllFiles: () -> Unit,
-        onSharePacketFile: () -> Unit,
-        onShareCsvFile: () -> Unit,
-        onShareRawFile: () -> Unit,
-        onShareLogFile: () -> Unit,
-        showReplayAction: Boolean,
-        onReplayRequest: () -> Unit,
-        overviewProfileContent: @Composable (ProfileScreenSection) -> Unit = {},
-    ) {
-        DeviceAppShell(
-            uiState = uiState,
-            selectedLanguage = selectedLanguage,
-            selectedThemeMode = selectedThemeMode,
-            serverSyncState = serverSyncState,
-            onStartScan = onStartScan,
-            onConnect = onConnect,
-            onTransportProfileSelect = onTransportProfileSelect,
-            onLanguageSelect = onLanguageSelect,
-            onThemeModeSelect = onThemeModeSelect,
-            onServerConfigure = onServerConfigure,
-            onServerWifiOnlyChange = onServerWifiOnlyChange,
-            onServerRetryPending = onServerRetryPending,
-            onServerRestore = onServerRestore,
-            onServerCheck = onServerCheck,
-            onServerStorageCheck = onServerStorageCheck,
-            onDisconnect = onDisconnect,
-            onV2Discovery = onV2Discovery,
-            onV2PreviewConnect = onV2PreviewConnect,
-            onV2PreviewScan = onV2PreviewScan,
-            onV2StreamToggle = onV2StreamToggle,
-            onV2LiveStart = onV2LiveStart,
-            onV2LiveStop = onV2LiveStop,
-            onSensorSelect = onSensorSelect,
-            onChannelSelect = onChannelSelect,
-            onChartWindowSelect = onChartWindowSelect,
-            onFollowLiveChange = onFollowLiveChange,
-            onChartPanLeft = onChartPanLeft,
-            onChartPanRight = onChartPanRight,
-            onChartZoomIn = onChartZoomIn,
-            onChartZoomOut = onChartZoomOut,
-            onChartZoomReset = onChartZoomReset,
-            onChartPanGesture = onChartPanGesture,
-            onChartZoomGesture = onChartZoomGesture,
-            onChartFullscreenChange = onChartFullscreenChange,
-            canShareAllFiles = canShareAllFiles,
-            canSharePacketFile = canSharePacketFile,
-            canShareCsvFile = canShareCsvFile,
-            canShareRawFile = canShareRawFile,
-            canShareLogFile = canShareLogFile,
-            onShareAllFiles = onShareAllFiles,
-            onSharePacketFile = onSharePacketFile,
-            onShareCsvFile = onShareCsvFile,
-            onShareRawFile = onShareRawFile,
-            onShareLogFile = onShareLogFile,
-            showReplayAction = showReplayAction,
-            onReplayRequest = onReplayRequest,
-            overviewProfileContent = overviewProfileContent,
-        )
     }
 }

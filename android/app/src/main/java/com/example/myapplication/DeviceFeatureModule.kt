@@ -470,47 +470,6 @@ private fun playConnectionAlarm(
         handler.postDelayed(tone::release, durationMillis + 100L)
     }
 }
-
-object DeviceFeatureModuleEntryPoint {
-    fun create(
-        context: Context,
-        filesDir: File,
-        fileProviderAuthority: String,
-        serviceUuid: UUID,
-        characteristicUuid: UUID,
-        descriptorUuid: UUID,
-        initialTransportProfile: BleTransportProfile? = null,
-        packetCaptureControllerFactory: ((DeviceUiStateHolder, Handler) -> PacketCaptureController)? = null,
-        bleSessionControllerFactory: ((BleSessionListener) -> BleSessionController)? = null,
-        fileShareIntentFactory: FileShareIntentFactory? = null,
-        woonaDatabase: WoonaDatabase? = null,
-        snapshotDirectory: File? = null,
-        onRecordingChanged: () -> Unit = {},
-        onCaptureLifecycleChanged: (Boolean) -> Unit = {},
-        appTextResolver: AppTextResolver = AppTextResolver(context.applicationContext) {
-            AppLanguage.defaultFrom()
-        },
-    ): DeviceFeatureController {
-        return createDeviceFeatureController(
-            context = context,
-            filesDir = filesDir,
-            fileProviderAuthority = fileProviderAuthority,
-            serviceUuid = serviceUuid,
-            characteristicUuid = characteristicUuid,
-            descriptorUuid = descriptorUuid,
-            initialTransportProfile = initialTransportProfile,
-            packetCaptureControllerFactory = packetCaptureControllerFactory,
-            bleSessionControllerFactory = bleSessionControllerFactory,
-            fileShareIntentFactory = fileShareIntentFactory,
-            woonaDatabase = woonaDatabase,
-            snapshotDirectory = snapshotDirectory,
-            onRecordingChanged = onRecordingChanged,
-            onCaptureLifecycleChanged = onCaptureLifecycleChanged,
-            appTextResolver = appTextResolver,
-        )
-    }
-}
-
 /** Retains the capture owner when an Activity is recreated while recording. */
 object DeviceFeatureControllerHolder {
     private var controller: DeviceFeatureController? = null

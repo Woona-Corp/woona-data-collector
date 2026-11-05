@@ -36,18 +36,3 @@ fun appStringResource(
 
 @Composable
 fun currentAppLanguage(): AppLanguage = LocalAppLanguage.current
-
-object AppLocalizationEntryPoint {
-    @Composable
-    fun Provide(
-        language: AppLanguage,
-        textResolver: AppTextResolver,
-        content: @Composable () -> Unit,
-    ) {
-        AppLocalizationProvider(
-            language = language,
-            textResolver = textResolver,
-            content = content,
-        )
-    }
-}

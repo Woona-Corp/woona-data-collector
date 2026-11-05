@@ -74,4 +74,19 @@ final class RecordedPacketFileParserTests: XCTestCase {
 
         XCTAssertEqual(packets, [first, second])
     }
+
+    func testFileAndArrayReportTheSameTruncatedTailOffset() throws {
+        let prefix = makeTestPacket(counter: 1, measurementCount: 1)
+        let bytes = prefix + [0x33, 0x99]
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data(bytes).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let expected = RecordedPacketFileParserError.truncatedPacketHeader(offset: prefix.count)
+        XCTAssertThrowsError(try parser.forEachPacket(bytes) { _ in }) { error in
+            XCTAssertEqual(error as? RecordedPacketFileParserError, expected)
+        }
+        XCTAssertThrowsError(try parser.forEachPacket(in: file) { _ in }) { error in
+            XCTAssertEqual(error as? RecordedPacketFileParserError, expected)
+        }
+    }
 }

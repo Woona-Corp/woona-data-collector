@@ -479,9 +479,31 @@ final class WoonaServerClient {
     }
 
     func deletions(timeout: TimeInterval = 20) async throws -> [ServerDeletion] {
-        struct Response: Decodable { let entities: [ServerDeletion] }
-        let data = try await boundedMetadata(path: "/v1/deletions", timeout: timeout)
-        return try JSONDecoder().decode(Response.self, from: data).entities
+        struct Response: Decodable {
+            let entities: [ServerDeletion]
+            let nextCursor: String?
+        }
+        // The server bounds each page, so stopping after one response would leave
+        // retired recordings on the device. Follow nextCursor to its end.
+        var markers: [ServerDeletion] = []
+        var seenCursors = Set<String>()
+        var cursor: String?
+        for _ in 0..<200 {
+            let suffix = cursor.map { "&cursor=\($0)" } ?? ""
+            let data = try await boundedMetadata(path: "/v1/deletions?limit=1000\(suffix)", timeout: timeout)
+            let page = try JSONDecoder().decode(Response.self, from: data)
+            markers.append(contentsOf: page.entities)
+            guard let next = page.nextCursor, !next.isEmpty else { return markers }
+            guard seenCursors.insert(next).inserted else {
+                throw ServerSyncError.transfer(code: "pagination_stalled",
+                                               message: "The server repeated a retirement cursor. Previously restored local data is preserved.",
+                                               retryable: false)
+            }
+            cursor = next
+        }
+        throw ServerSyncError.transfer(code: "pagination_stalled",
+                                       message: "The server kept returning retirement pages. Previously restored local data is preserved.",
+                                       retryable: false)
     }
 
     func storageStatus(timeout: TimeInterval = 15) async throws -> ServerStorageStatus {

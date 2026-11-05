@@ -42,9 +42,38 @@ class BoundedRestoreDeviceTest {
         })
         val result=client.fetchRestoreSnapshot()
         assertEquals(ids,result.dogs.map {it.id});assertTrue(result.recordings.isEmpty())
-        assertEquals(4,maximum.get());assertEquals(0,active.get());assertEquals("/v1/deletions",paths.last())
-        assertTrue(paths.filter {it.contains('?')}.all {it.contains("limit=200")})
+        assertEquals(4,maximum.get());assertEquals(0,active.get());assertEquals("/v1/deletions?limit=1000",paths.last())
+        assertTrue(paths.filter {it.contains('?') && !it.startsWith("/v1/deletions?")}.all {it.contains("limit=200")})
     }
+    @Test fun deletionRequestsPreserveThePageBoundAndFollowTheServerCursor() {
+        val paths = mutableListOf<String>()
+        val firstHash = "a".repeat(64)
+        val secondHash = "b".repeat(64)
+        val client = ServerApiClient(settings, connectionFactory = { url ->
+            object : HttpURLConnection(url) {
+                override fun connect() {}
+                override fun usingProxy() = false
+                override fun disconnect() {}
+                override fun getResponseCode(): Int {
+                    assertEquals("account-a", getRequestProperty("X-Woona-Account"))
+                    paths += url.file
+                    return 200
+                }
+                override fun getInputStream() = when (url.file) {
+                    "/v1/deletions?limit=1000" -> JSONObject()
+                        .put("entities", JSONArray().put(JSONObject().put("kind", "dog").put("id_sha256", firstHash)))
+                        .put("nextCursor", "page-two")
+                    "/v1/deletions?limit=1000&cursor=page-two" -> JSONObject()
+                        .put("entities", JSONArray().put(JSONObject().put("kind", "recording").put("id_sha256", secondHash)))
+                        .put("nextCursor", JSONObject.NULL)
+                    else -> error("Unexpected deletion page ${url.file}")
+                }.toString().byteInputStream()
+            }
+        })
+        assertEquals(listOf("dog" to firstHash, "recording" to secondHash), client.fetchDeletions())
+        assertEquals(listOf("/v1/deletions?limit=1000", "/v1/deletions?limit=1000&cursor=page-two"), paths)
+    }
+
     @Test fun fatalDetailFailureDisconnectsSiblingRequestsWithoutCancellingUnrelatedTransfers() {
         val ids=(1..4).map {"00000000-0000-0000-0000-${it.toString().padStart(12,'0')}"}
         val allStarted=CountDownLatch(4);val release=CountDownLatch(1);val disconnected=CountDownLatch(3)

@@ -35,63 +35,62 @@ struct RawFragmentRecord: Equatable {
 }
 
 struct RawFragmentFileParser {
-    func hasMagicHeader(_ fileBytes: [UInt8]) -> Bool {
-        fileBytes.count >= RawFragmentFileStore.magicHeader.count
-            && (fileBytes[0..<RawFragmentFileStore.magicHeader.count].elementsEqual(RawFragmentFileStore.magicHeader)
-                || fileBytes[0..<RawFragmentFileStore.legacyMagicHeader.count].elementsEqual(RawFragmentFileStore.legacyMagicHeader))
+    func hasMagicHeader(_ bytes: [UInt8]) -> Bool {
+        bytes.starts(with: RawFragmentFileStore.magicHeader)
+            || bytes.starts(with: RawFragmentFileStore.legacyMagicHeader)
     }
 
     func splitIntoFragments(_ fileBytes: [UInt8]) throws -> [RawFragmentRecord] {
         var fragments: [RawFragmentRecord] = []
-        try forEachFragment(fileBytes) { fragment in
-            fragments.append(fragment)
-        }
+        try forEachFragment(fileBytes) { fragments.append($0) }
         return fragments
     }
 
-    func forEachFragment(
-        _ fileBytes: [UInt8],
-        onFragment: (RawFragmentRecord) throws -> Void
-    ) throws {
-        guard hasMagicHeader(fileBytes) else {
-            throw RawFragmentFileParserError.invalidMagicHeader
-        }
+    func forEachFragment(_ fileBytes: [UInt8], onFragment: (RawFragmentRecord) throws -> Void) throws {
+        var remaining = fileBytes[...]
+        try forEachFragment(read: { count in
+            let bytes = Array(remaining.prefix(count))
+            remaining = remaining.dropFirst(bytes.count)
+            return bytes
+        }, onFragment: onFragment)
+    }
 
-        let isV2 = fileBytes[0..<RawFragmentFileStore.magicHeader.count].elementsEqual(RawFragmentFileStore.magicHeader)
-        let headerSize = isV2 ? Self.v2RecordHeaderSize : Self.v1RecordHeaderSize
+    func forEachFragment(read: (Int) throws -> [UInt8], onFragment: (RawFragmentRecord) throws -> Void) throws {
+        let isV2 = try readMagicHeader(read: read)
         var offset = RawFragmentFileStore.magicHeader.count
-        while offset < fileBytes.count {
-            guard offset + headerSize <= fileBytes.count else {
-                throw RawFragmentFileParserError.truncatedRecordHeader(offset: offset)
-            }
-
-            let sequence = Self.decodeBigEndianInt64(fileBytes, at: offset)
-            let receivedAtMillis = Self.decodeBigEndianInt64(fileBytes, at: offset + 8)
-            let receivedAtMonotonicNs = isV2 ? Self.decodeBigEndianInt64(fileBytes, at: offset + 16) : nil
-            let fragmentLength = Self.decodeBigEndianInt32(fileBytes, at: offset + (isV2 ? 24 : 16))
-            guard fragmentLength > 0 else {
-                throw RawFragmentFileParserError.invalidFragmentLength(length: fragmentLength, offset: offset)
-            }
-
-            let bodyOffset = offset + headerSize
-            let endOffset = bodyOffset + Int(fragmentLength)
-            guard endOffset <= fileBytes.count else {
-                throw RawFragmentFileParserError.truncatedFragmentBody(
-                    offset: offset,
-                    expectedLength: Int(fragmentLength)
-                )
-            }
-
-            try onFragment(
-                RawFragmentRecord(
-                    sequence: sequence,
-                    receivedAtMillis: receivedAtMillis,
-                    receivedAtMonotonicNs: receivedAtMonotonicNs,
-                    bytes: Array(fileBytes[bodyOffset..<endOffset])
-                )
-            )
-            offset = endOffset
+        while let fragment = try readFragment(read: read, isV2: isV2, offset: &offset) {
+            try onFragment(fragment)
         }
+    }
+
+    func readMagicHeader(read: (Int) throws -> [UInt8]) throws -> Bool {
+        let magic = try read(RawFragmentFileStore.magicHeader.count)
+        guard hasMagicHeader(magic) else { throw RawFragmentFileParserError.invalidMagicHeader }
+        return magic == RawFragmentFileStore.magicHeader
+    }
+
+    func readFragment(read: (Int) throws -> [UInt8], isV2: Bool, offset: inout Int) throws -> RawFragmentRecord? {
+        let headerSize = isV2 ? Self.v2RecordHeaderSize : Self.v1RecordHeaderSize
+        let header = try read(headerSize)
+        guard !header.isEmpty else { return nil }
+        guard header.count == headerSize else {
+            throw RawFragmentFileParserError.truncatedRecordHeader(offset: offset)
+        }
+        let length = Self.decodeBigEndianInt32(header, at: isV2 ? 24 : 16)
+        guard length > 0 else {
+            throw RawFragmentFileParserError.invalidFragmentLength(length: length, offset: offset)
+        }
+        let bytes = try read(Int(length))
+        guard bytes.count == Int(length) else {
+            throw RawFragmentFileParserError.truncatedFragmentBody(offset: offset, expectedLength: Int(length))
+        }
+        offset += headerSize + bytes.count
+        return RawFragmentRecord(
+            sequence: Self.decodeBigEndianInt64(header, at: 0),
+            receivedAtMillis: Self.decodeBigEndianInt64(header, at: 8),
+            receivedAtMonotonicNs: isV2 ? Self.decodeBigEndianInt64(header, at: 16) : nil,
+            bytes: bytes
+        )
     }
 
     private static func decodeBigEndianInt64(_ bytes: [UInt8], at offset: Int) -> Int64 {
