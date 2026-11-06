@@ -361,7 +361,7 @@ actor PacketCaptureProcessor {
         receivedAtWallClockMillis: Int64,
         receivedAtMonotonicNs: UInt64?
     ) -> [PacketProcessingUpdate] {
-        switch packetValidator.validate(completedPacket.bytes, sensorBlocks: completedPacket.sensorBlocks) {
+        switch completedPacket.validation ?? packetValidator.validate(completedPacket.bytes) {
         case .rejected(let reason):
             let message = reason.rawValue
             registerRejection(message)

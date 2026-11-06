@@ -111,6 +111,15 @@ final class PacketAssemblerTests: XCTestCase {
             return XCTFail("Expected completed packet")
         }
         XCTAssertEqual(completed.channelSamples(sensorType: 2, channel: 2), [30, 40])
+        guard case .accepted(let retained)? = completed.validation else {
+            return XCTFail("Assembler must retain accepted parse evidence for the processor")
+        }
+        XCTAssertEqual(retained.bytes, packet)
+        XCTAssertEqual(retained.sensorBlocks, completed.sensorBlocks)
+        XCTAssertEqual(retained.counter, completed.counter)
+        // An arbitrary CompletedPacket cannot mint validation from supplied blocks.
+        let untrusted = CompletedPacket(bytes: packet, counter: 12, sensorBlocks: [])
+        XCTAssertNil(untrusted.validation)
     }
 
     func testResetDiscardsBufferedFragmentsFromPreviousSession() {

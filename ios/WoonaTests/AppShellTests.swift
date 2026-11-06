@@ -7,6 +7,30 @@ import SwiftUI
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    func testServerConnectionDraftLivesInAppMemoryAcrossViewRecreationAndClearsOnDismissal() {
+        let model = AppViewModel(store: nil, uiTesting: true)
+        model.serverBaseURL = "https://saved.example"
+        model.beginServerConnectionEditing()
+        model.serverConnectionDraft.baseURL = "https://unsaved.example"
+        model.serverConnectionDraft.token = "synthetic-memory-only-token"
+        // SwiftUI can reconstruct either View; neither owns the sensitive draft.
+        _ = SettingsView().environmentObject(model)
+        _ = SettingsView().environmentObject(model)
+        model.beginServerConnectionEditing()
+        XCTAssertTrue(model.serverConnectionDraft.isPresented)
+        XCTAssertEqual(model.serverConnectionDraft.baseURL, "https://unsaved.example")
+        XCTAssertEqual(model.serverConnectionDraft.token, "synthetic-memory-only-token")
+        XCTAssertEqual(model.serverBaseURL, "https://saved.example")
+        XCTAssertEqual(model.serverToken, "")
+        let freshProcessOwner = AppViewModel(store: nil, uiTesting: true)
+        XCTAssertEqual(freshProcessOwner.serverConnectionDraft.token, "")
+        XCTAssertFalse(freshProcessOwner.serverConnectionDraft.isPresented)
+        model.serverConnectionDraft = ServerConnectionDraft() // sheet onDismiss: Cancel/swipe/success
+        model.beginServerConnectionEditing()
+        XCTAssertEqual(model.serverConnectionDraft.baseURL, "https://saved.example")
+        XCTAssertEqual(model.serverConnectionDraft.token, "")
+    }
+
     func testSheetPresentationUsesEnglishWithoutChangingCanonicalQuestionnaireData() throws {
         var dog = DogQuestionnaire()
         dog.schemaVersion = 2; dog.animalId = "presentation-fixture"

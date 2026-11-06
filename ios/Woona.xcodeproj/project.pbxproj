@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F10611060000000000000001 /* CameraRecorderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10611060000000000000002 /* CameraRecorderTests.swift */; };
 		1C258C66363A492AAC86975B /* SessionChartTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18E4EDFA9E224A87941B4D18 /* SessionChartTests.swift */; };
 		393DC58D61B94AEEB6C7C84F /* SessionChart.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E3C44346BB9479DBD925EDD /* SessionChart.swift */; };
 		8A1A000B2B00000100000001 /* WoonaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1A000A2B00000100000001 /* WoonaApp.swift */; };
@@ -88,6 +89,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		F10611060000000000000002 /* CameraRecorderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraRecorderTests.swift; sourceTree = "<group>"; };
 		18E4EDFA9E224A87941B4D18 /* SessionChartTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionChartTests.swift; sourceTree = "<group>"; };
 		6E3C44346BB9479DBD925EDD /* SessionChart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionChart.swift; sourceTree = "<group>"; };
 		8A1A00062B00000100000001 /* Woona.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Woona.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -324,6 +326,7 @@
 		8A1A00592B00000400000001 /* CaptureTests */ = {
 			isa = PBXGroup;
 			children = (
+				F10611060000000000000002 /* CameraRecorderTests.swift */,
 				8A1A005A2B00000400000001 /* PacketCaptureProcessorTests.swift */,
 				8A1A005E2B00000500000001 /* PacketReplayControllerTests.swift */,
 			);
@@ -521,6 +524,7 @@
 				8A1A004E2B00000300000001 /* DiagnosticLogFileStoreTests.swift in Sources */,
 				8A1A00502B00000300000001 /* CsvExporterTests.swift in Sources */,
 				8A1AB0062B00000100000001 /* CompleteDataArchiveTests.swift in Sources */,
+				F10611060000000000000001 /* CameraRecorderTests.swift in Sources */,
 				8A1A005B2B00000400000001 /* PacketCaptureProcessorTests.swift in Sources */,
 				8A1A005F2B00000500000001 /* PacketReplayControllerTests.swift in Sources */,
 				8A1A006B2B00000600000001 /* BleSessionManagerTests.swift in Sources */,

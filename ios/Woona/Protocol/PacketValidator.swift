@@ -42,14 +42,9 @@ struct PacketValidator {
         validate(packetBytes, parseResult: sensorBlockParser.parseResult(packetBytes))
     }
 
-    func validate(_ packetBytes: [UInt8], sensorBlocks: [SensorBlock]) -> PacketValidationResult {
-        validate(packetBytes, parseResult: sensorBlockParser.parseResult(packetBytes), parsedSensorBlocks: sensorBlocks)
-    }
-
     private func validate(
         _ packetBytes: [UInt8],
-        parseResult: SensorBlockParseResult,
-        parsedSensorBlocks: [SensorBlock]? = nil
+        parseResult: SensorBlockParseResult
     ) -> PacketValidationResult {
         guard packetBytes.count >= Self.minimumPacketSize else {
             return .rejected(.invalidLength)
@@ -80,7 +75,7 @@ struct PacketValidator {
                 counter: Self.decodeCounter(packetBytes, at: 0),
                 timerMillis: Self.decodeTimer(packetBytes, at: 0),
                 measurementCount: measurementCount,
-                sensorBlocks: parsedSensorBlocks ?? parseResult.blocks
+                sensorBlocks: parseResult.blocks
             )
         )
     }

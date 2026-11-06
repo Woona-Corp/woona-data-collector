@@ -473,10 +473,23 @@ struct CaptureFinalizationResult: Sendable {
     var cleanupError: String?
 }
 
+struct CaptureStoppedTiming: Sendable {
+    let endedAt: Date
+    let durationSeconds: Double?
+
+    init(endedAt: Date, startedMonotonicNs: UInt64?, stoppedMonotonicNs: UInt64) {
+        self.endedAt = endedAt
+        durationSeconds = startedMonotonicNs.flatMap { start in
+            stoppedMonotonicNs >= start ? Double(stoppedMonotonicNs - start) / 1_000_000_000 : nil
+        }
+    }
+}
+
 enum CaptureFinalizer {
     @discardableResult
     static func run(root: URL, recordingID: UUID, status: String,
                     files: [(type: String, source: URL, name: String, mime: String)], syncJSON: Data,
+                    timing: CaptureStoppedTiming? = nil,
                     onWorkerStart: (@Sendable () -> Void)? = nil) async throws -> CaptureFinalizationResult {
         try Task.checkCancellation()
         let work = Task.detached(priority: .userInitiated) {
@@ -486,7 +499,7 @@ enum CaptureFinalizer {
             guard let recording = try store.recording(id: recordingID) else {
                 throw WoonaStoreError.invalidData("Capture disappeared before local finalization")
             }
-            try store.finalize(recording: recording, status: status, files: files, syncJSON: syncJSON)
+            try store.finalize(recording: recording, status: status, files: files, syncJSON: syncJSON, timing: timing)
             var cleanupError: String?
             do { _ = try store.applyDeferredServerDeletions() }
             catch { cleanupError = error.localizedDescription }
@@ -1004,6 +1017,29 @@ final class WoonaStore {
         return !didExist
     }
 
+    // Preparation creates the row/directory; Start supplies the actual acquisition
+    // wall anchor before immutable manifests exist. Recovery never calls this.
+    func markCaptureStarted(_ id: UUID, at date: Date) throws {
+        guard let recording = try recording(id: id), recording.status == "preparing" else {
+            throw WoonaStoreError.invalidData("Capture is not preparing")
+        }
+        var questionnaire = recording.questionnaire
+        if questionnaire?.schemaVersion == 2 && recording.source == "live" {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(identifier: recording.timezone)
+            formatter.dateFormat = "yyyy-MM-dd"
+            questionnaire?.sessionDate = formatter.string(from: date)
+            formatter.dateFormat = "HH:mm"
+            questionnaire?.startTime = formatter.string(from: date)
+            questionnaire?.endTime = nil
+            questionnaire?.durationMinutes = nil
+        }
+        let json = try questionnaire.map { String(decoding: try Self.sessionQuestionnaireData($0), as: UTF8.self) }
+        try execute("UPDATE recordings SET status='recording',started_at_utc=?,questionnaire_json=COALESCE(?,questionnaire_json) WHERE id=?",
+                    [.text(Self.iso8601(date)), json.map { .text($0) } ?? .null, .text(id.uuidString)])
+    }
+
     func markRecording(_ id: UUID, status: String, endedAt: Date? = nil) throws {
         try execute(
             "UPDATE recordings SET status=?,ended_at_utc=COALESCE(?,ended_at_utc) WHERE id=?",
@@ -1377,7 +1413,8 @@ final class WoonaStore {
         recording: WoonaRecording,
         status: String,
         files: [(type: String, source: URL, name: String, mime: String)],
-        syncJSON: Data
+        syncJSON: Data,
+        timing: CaptureStoppedTiming? = nil
     ) throws {
         let directory = directory(for: recording)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1401,6 +1438,7 @@ final class WoonaStore {
         finalFiles.append(("sync", syncTarget, "application/json"))
 
         let now = Self.iso8601(Date())
+        let endedAt = timing.map { Self.iso8601($0.endedAt) } ?? now
         // Hash closed files outside the write transaction. A large video must
         // not hold SQLite's writer lock while the main actor reads queue state.
         let metadata = try finalFiles.map { item in
@@ -1436,19 +1474,16 @@ final class WoonaStore {
             )
             try execute(
                 "UPDATE recordings SET status=?,ended_at_utc=?,server_sync_state='pending' WHERE id=?",
-                [.text(status), .text(now), .text(recording.id.uuidString)]
+                [.text(status), .text(endedAt), .text(recording.id.uuidString)]
             )
-            if var questionnaire = recording.questionnaire, questionnaire.schemaVersion == 2 && recording.source == "live" {
+            if let timing, let duration = timing.durationSeconds,
+               var questionnaire = recording.questionnaire, questionnaire.schemaVersion == 2 && recording.source == "live" {
                 let formatter = DateFormatter()
                 formatter.locale = Locale(identifier: "en_US_POSIX")
                 formatter.timeZone = TimeZone(identifier: recording.timezone)
                 formatter.dateFormat = "HH:mm"
-                questionnaire.endTime = formatter.string(from: Date())
-                let parser = ISO8601DateFormatter()
-                parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                if let start = parser.date(from: recording.startedAtUTC) ?? ISO8601DateFormatter().date(from: recording.startedAtUTC) {
-                    questionnaire.durationMinutes = max(0, Date().timeIntervalSince(start) / 60)
-                }
+                questionnaire.endTime = formatter.string(from: timing.endedAt)
+                questionnaire.durationMinutes = duration / 60
                 let json = String(data: try Self.sessionQuestionnaireData(questionnaire), encoding: .utf8)!
                 try execute("UPDATE recordings SET questionnaire_json=? WHERE id=?", [.text(json), .text(recording.id.uuidString)])
             }
@@ -2075,8 +2110,13 @@ struct HeartQuestionnaire: Codable, Equatable {
             if referenceBpm == nil || !referenceBpm!.bpm.isFinite || referenceBpm!.bpm <= 0 { errors["referenceBpm"] = "Введите положительную ЧСС" }
             if ReferenceMetadata.date(referenceBpm?.measuredAtUtc ?? "") == nil { errors["referenceMeasuredAtUtc"] = "Введите время UTC" }
         }
-        for detail in [knownHeartConditionDetails, heartRelevantMedicationDetails, referenceArtifact].compactMap({ $0 }) {
-            if detail.count > 2000 { errors["details"] = "Максимум 2000 символов" }
+        let details: [(String, String?, Bool)] = [
+            ("knownHeartConditionDetails", knownHeartConditionDetails, knownHeartCondition?.key == "yes"),
+            ("heartRelevantMedicationDetails", heartRelevantMedicationDetails, heartRelevantMedication?.key == "yes"),
+            ("referenceArtifact", referenceArtifact, ["ecg", "polar_rr"].contains(referenceMethod?.key ?? ""))
+        ]
+        for (key, detail, active) in details where active {
+            if (detail?.count ?? 0) > 2000 { errors[key] = "Максимум 2000 символов" }
         }
         return QuestionnaireValidation(errors: errors)
     }

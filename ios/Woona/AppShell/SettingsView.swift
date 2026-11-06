@@ -1,8 +1,15 @@
 import SwiftUI
 
+// Process-memory only: never SceneStorage, UserDefaults, Keychain or export.
+// AppViewModel ownership survives reconstruction of the Settings/sheet Views.
+struct ServerConnectionDraft {
+    var isPresented = false
+    var baseURL = ""
+    var token = ""
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppViewModel
-    @State private var isServerEditorPresented = false
     @State private var isServerDisconnectPresented = false
     private var russian: Bool { appState.selectedLanguage == .russian }
     private var isServerConfigured: Bool { !appState.serverBaseURL.isEmpty && !appState.serverToken.isEmpty }
@@ -109,7 +116,7 @@ struct SettingsView: View {
                             .font(.subheadline)
                         Spacer()
                         Button(isServerConfigured ? (russian ? "Переподключить" : "Reconnect") : (russian ? "Подключить" : "Connect")) {
-                            isServerEditorPresented = true
+                            appState.beginServerConnectionEditing()
                         }
                         .buttonStyle(.bordered)
                         .accessibilityIdentifier("server.configure")
@@ -165,8 +172,10 @@ struct SettingsView: View {
                     ? "Токен будет удалён, текущие передачи остановятся. Локальные файлы, анкеты и очередь сохранятся. Для продолжения подключите сервер с новым токеном."
                     : "The token will be removed and current transfers will stop. Local files, questionnaires and the queue remain saved. Connect the server with a new token to resume.")
             }
-            .sheet(isPresented: $isServerEditorPresented) {
-                ServerConnectionEditor(baseURL: appState.serverBaseURL, russian: russian) { baseURL, token in
+            .sheet(isPresented: $appState.serverConnectionDraft.isPresented, onDismiss: {
+                appState.serverConnectionDraft = ServerConnectionDraft()
+            }) {
+                ServerConnectionEditor(draft: $appState.serverConnectionDraft, russian: russian) { baseURL, token in
                     guard appState.canChangeAccount else { throw WoonaStoreError.invalidData(appState.serverMutationBlockedReason ?? "Server settings are busy") }
                     let normalizedURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
                     _ = try WoonaServerClient(configuration: ServerConfiguration(baseURL: normalizedURL, wifiOnly: appState.serverWifiOnly, accountID: appState.selectedAccountID), token: token)
@@ -221,25 +230,18 @@ struct SettingsView: View {
 
 private struct ServerConnectionEditor: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var baseURL: String
-    @State private var token = ""
+    @Binding var draft: ServerConnectionDraft
     @State private var error: String?
     let russian: Bool
     let onSave: (String, String) throws -> Void
 
-    init(baseURL: String, russian: Bool, onSave: @escaping (String, String) throws -> Void) {
-        _baseURL = State(initialValue: baseURL)
-        self.russian = russian
-        self.onSave = onSave
-    }
-
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Server URL", text: $baseURL)
+                TextField("Server URL", text: $draft.baseURL)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                     .accessibilityIdentifier("server.url")
-                SecureField(russian ? "Новый токен" : "New token", text: $token)
+                SecureField(russian ? "Новый токен" : "New token", text: $draft.token)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .accessibilityIdentifier("server.token")
                 if let error { Text(error).foregroundStyle(.red) }
@@ -253,9 +255,9 @@ private struct ServerConnectionEditor: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(russian ? "Сохранить" : "Save") {
-                        let cleanToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let cleanToken = draft.token.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !cleanToken.isEmpty else { error = russian ? "Введите токен" : "Enter token"; return }
-                        do { try onSave(baseURL, cleanToken); dismiss() }
+                        do { try onSave(draft.baseURL, cleanToken); dismiss() }
                         catch { self.error = (russian ? "Настройки сервера не сохранены. Исправьте причину и повторите.\n" : "Server settings were not saved. Correct the cause and retry.\n") + error.localizedDescription }
                     }
                     .accessibilityIdentifier("server.save")

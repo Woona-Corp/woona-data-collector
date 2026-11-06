@@ -7,6 +7,9 @@ final class OverviewParityTests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing"]
+        if name.contains("testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions") {
+            app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        }
         if name.contains("testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls") {
             app.launchArguments.append("--ui-testing-v2-charts")
         }
@@ -32,6 +35,37 @@ final class OverviewParityTests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [newDogReady], timeout: 15), .completed,
                        "New dog must become enabled and hittable after launch")
+    }
+
+    func testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        app.buttons["tab.settings"].tap()
+        let configure = app.buttons["server.configure"]
+        for _ in 0..<12 where !configure.isHittable { app.swipeUp() }
+        XCTAssertTrue(configure.isHittable)
+        configure.tap()
+        let url = app.textFields["server.url"]
+        XCTAssertTrue(url.waitForExistence(timeout: 5))
+        url.tap(); url.typeText("not-a-valid-server-url")
+        let token = app.secureTextFields["server.token"]
+        token.tap(); token.typeText("synthetic-memory-only-token")
+        XCUIDevice.shared.orientation = .landscapeRight
+        XCTAssertTrue(app.buttons["server.save"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["server.save"].isHittable)
+        XCTAssertTrue(app.buttons["server.cancel"].isHittable)
+        XCTAssertGreaterThan(app.buttons["server.save"].frame.height, 20)
+        XCTAssertEqual(url.value as? String, "not-a-valid-server-url")
+        attachScreen("ServerEditor-Landscape-Keyboard-Draft")
+        // Validation is local: malformed URL cannot persist or initiate requests.
+        app.buttons["server.save"].tap()
+        XCTAssertTrue(app.navigationBars["Server connection"].exists)
+        XCTAssertEqual(url.value as? String, "not-a-valid-server-url")
+        app.buttons["server.cancel"].tap()
+        XCTAssertTrue(configure.waitForExistence(timeout: 5))
+        configure.tap()
+        XCTAssertTrue(url.waitForExistence(timeout: 5))
+        XCTAssertNotEqual(url.value as? String, "not-a-valid-server-url")
+        app.buttons["server.cancel"].tap()
     }
 
     func testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire() {
