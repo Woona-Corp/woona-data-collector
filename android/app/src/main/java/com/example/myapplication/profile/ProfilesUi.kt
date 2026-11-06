@@ -775,17 +775,17 @@ private fun QuestionnaireDialog(
                             ),
                             style = MaterialTheme.typography.bodySmall,
                         )
-                        if (errorCount > 0) {
-                            Text(
-                                tr(
-                                    language,
-                                    if (errorCount == 1) "1 field needs attention" else "$errorCount fields need attention",
-                                    "Проверьте поля: $errorCount",
-                                ),
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                        }
+                    }
+                    if (errorCount > 0) {
+                        Text(
+                            tr(
+                                language,
+                                if (errorCount == 1) "1 field needs attention" else "$errorCount fields need attention",
+                                "Проверьте поля: $errorCount",
+                            ),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (canDismiss) {
