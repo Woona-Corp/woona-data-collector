@@ -65,9 +65,16 @@ def probe(path):
                              '-of', 'json', str(path)], capture_output=True, text=True,
                             timeout=120, check=True)
     metadata = json.loads(result.stdout)
-    video = next(s for s in metadata['streams'] if s['codec_type'] == 'video')
-    duration = float(video['duration'])
-    start = float(video.get('start_time', 0)) - float(metadata['format'].get('start_time', 0))
+    streams = metadata.get('streams', [])
+    video = next((s for s in streams if s.get('codec_type') == 'video'), None)
+    if video is None:
+        raise ValueError('No video stream')
+    raw_duration = video.get('duration', metadata.get('format', {}).get('duration'))
+    try:
+        duration = float(raw_duration)
+        start = float(video.get('start_time', 0)) - float(metadata['format'].get('start_time', 0))
+    except (TypeError, ValueError) as error:
+        raise ValueError('Invalid video timing') from error
     if not math.isfinite(duration) or duration <= 0 or not math.isfinite(start):
         raise ValueError('Invalid video timing')
     return metadata, video, duration, start
@@ -125,9 +132,14 @@ def source_sampling_error(source, video, frames):
         raise ValueError('Unsupported source timing for identity mapping')
     selected, error = 0, Fraction(0)
     for tick in range(frames):
+        tick_time = Fraction(tick, FPS)
+        # The encoder may clone the final source frame to fill a partial CFR tail.
+        # Cloned ticks carry no new source sample and must not inflate the mapping error.
+        if tick_time > pts[-1]:
+            break
         while selected + 1 < len(pts) and int(pts[selected + 1] * FPS + Fraction(1, 2)) <= tick:
             selected += 1
-        error = max(error, abs(Fraction(tick, FPS) - pts[selected]))
+        error = max(error, abs(tick_time - pts[selected]))
     if error > Fraction(1, FPS):
         raise ValueError('Source sampling error exceeds one CFR frame')
     return float(error)
@@ -201,7 +213,7 @@ def normalize_one(root, row, registry, *, threads=3, preset='ultrafast', crf=18)
     audio = [s for s in metadata['streams'] if s['codec_type'] == 'audio' and s.get('codec_name')]
     for stream in audio:
         command += ['-map', '0:' + str(stream['index'])]
-    command += ['-vf', f'fps=fps=30:start_time=0:round=near:eof_action=pass,tpad=stop_mode=clone:stop_duration=0.034,trim=end_frame={frames}',
+    command += ['-vf', f'fps=fps=30:start_time=0:round=near:eof_action=pass,tpad=stop_mode=clone:stop=1,trim=end_frame={frames}',
                 '-c:v', 'libx264', '-preset', preset, '-crf', str(crf), '-pix_fmt', 'yuv420p',
                 '-threads', str(threads), '-maxrate', '12000k', '-bufsize', '24000k', '-progress', str(progress), '-stats_period', '30', '-fps_mode', 'cfr', '-video_track_timescale', '90000',
                 '-c:a', 'copy', '-t', str(target_duration), '-avoid_negative_ts', 'disabled',
@@ -273,6 +285,8 @@ def prepare(root, rows, registry_path, *, threads=3, preset='ultrafast', crf=18)
                 failed.append(row['recording_id'])
                 print(json.dumps({'recording_id': row['recording_id'], 'error': str(error)}), flush=True)
                 continue
+            if not is_cfr30(item):
+                raise ValueError('Prepared entry failed CFR30 admission')
             registry['entries'][str(row['recording_id'])] = item
             atomic_json(registry_path, registry)
             print(json.dumps({'recording_id': row['recording_id'], 'frame_count': item['frame_count'],

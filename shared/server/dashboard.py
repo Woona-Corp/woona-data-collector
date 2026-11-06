@@ -1,6 +1,7 @@
 """Label Studio-authenticated recording overview and reference uploads."""
 
 import html
+import http.client
 import json
 import os
 import stat
@@ -366,7 +367,7 @@ def load_dashboard() -> dict:
     records, extra = records_from_sources()
     try:
         projects, tasks, labeled, extra['label_service'] = load_label_summary()
-    except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, KeyError) as error:
+    except (HTTPError, URLError, TimeoutError, OSError, http.client.HTTPException, ValueError, RuntimeError, KeyError) as error:
         # A labeling outage must not hide transfer/capture diagnostics or imply zero tasks.
         projects = [{'id': int(os.environ.get('LABEL_PROJECT_ID', '21')),
                      'title': 'Label Studio', 'timeline_name': '', 'labels': []}]
