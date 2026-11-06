@@ -300,8 +300,8 @@ jobs:
       - name: Test server and API
         run: |
           python3 --version
-          ffmpeg -version
-          ffprobe -version
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
           sha256sum "$(command -v ffmpeg)" "$(command -v ffprobe)"
           python3 -m unittest -v server.tests.test_video_normalization
           mkdir -p ../test-run/ci-storage
