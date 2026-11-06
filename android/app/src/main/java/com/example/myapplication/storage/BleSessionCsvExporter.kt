@@ -30,18 +30,27 @@ class BleSessionCsvExporter(
         packetFileParser.forEachPacket(packetFile) { packetBytes ->
             when (val validation = packetValidator.validate(packetBytes)) {
                 is PacketValidationResult.Accepted -> {
-                    val packetRows = buildRows(
-                        sensorBlocks = validation.packet.sensorBlocks,
-                        packetDeviceTimeMillis = validation.packet.timerMillis,
-                        previousSampleTimerMillis = previousSampleTimerMillis,
-                    )
-                    packetRows.forEach { row ->
-                        columns += row.values.keys
-                        if (firstSampleTimerMillis == null) {
-                            firstSampleTimerMillis = row.sampleTimerMillis
+                    val sampleCountsByStream = linkedMapOf<CsvColumnKey, Int>()
+                    validation.packet.sensorBlocks.forEach { block ->
+                        block.channelSamples.forEachIndexed { channelIndex, samples ->
+                            if (samples.isEmpty()) return@forEachIndexed
+
+                            val column = CsvColumnKey(block.sensorType, channelIndex + 1)
+                            sampleCountsByStream[column] = (sampleCountsByStream[column] ?: 0) + samples.size
                         }
                     }
-                    previousSampleTimerMillis = packetRows.lastOrNull()?.sampleTimerMillis ?: previousSampleTimerMillis
+                    columns += sampleCountsByStream.keys
+                    val rowCount = sampleCountsByStream.values.maxOrNull() ?: 0
+                    if (rowCount > 0) {
+                        val packetStartSampleTimerMillis = maxOf(
+                            validation.packet.timerMillis,
+                            (previousSampleTimerMillis ?: Long.MIN_VALUE) + 1,
+                        )
+                        if (firstSampleTimerMillis == null) {
+                            firstSampleTimerMillis = packetStartSampleTimerMillis
+                        }
+                        previousSampleTimerMillis = packetStartSampleTimerMillis + rowCount - 1
+                    }
                 }
 
                 is PacketValidationResult.Rejected -> {

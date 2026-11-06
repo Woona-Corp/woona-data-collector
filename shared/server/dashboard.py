@@ -23,7 +23,7 @@ from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 
 from server.eligibility import activity_exclusion_reasons
-from server.sync_status import recording_status
+from server.sync_status import recording_status, stored_file_observation
 from server.label_sync import active_project, file_url, request_json
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -99,23 +99,28 @@ def records_from_sources() -> tuple[list[dict], dict]:
     app_records = {}
     for row in rows:
         source_id = "woona:" + str(row["id"])
-        record = app_records.setdefault(source_id, {
-            "source_id": source_id, "origin": "Woona", "dog": row["number_or_name"],
-            "date": row["started_at"].date().isoformat(), "files": [],
-            "recording_id": str(row["id"]), "session_kind": row["session_questionnaire"].get("sessionKind", "activity"),
-            "ingest_status": row["ingest_status"], "capture_status": row["capture_status"],
-            "capture_error_code": row["capture_error_code"],
-            "capture_error_message": row["capture_error_message"],
-            "_recording": row, "_artifacts": [],
-            "profile": {"version_id": str(row["profile_id"]), "state": row["profile_state"],
-                        "answers": row["profile_questionnaire"]},
-            "session_questionnaire": {"state": row["questionnaire_validation_state"],
-                                      "answers": row["session_questionnaire"]},
-        })
+        if source_id not in app_records:
+            app_records[source_id] = {
+                "source_id": source_id, "origin": "Woona", "dog": row["number_or_name"],
+                "date": row["started_at"].date().isoformat(), "files": [],
+                "recording_id": str(row["id"]), "session_kind": row["session_questionnaire"].get("sessionKind", "activity"),
+                "ingest_status": row["ingest_status"], "capture_status": row["capture_status"],
+                "capture_error_code": row["capture_error_code"],
+                "capture_error_message": row["capture_error_message"],
+                "_recording": row, "_artifacts": [], "_file_observations": {},
+                "profile": {"version_id": str(row["profile_id"]), "state": row["profile_state"],
+                            "answers": row["profile_questionnaire"]},
+                "session_questionnaire": {"state": row["questionnaire_validation_state"],
+                                          "answers": row["session_questionnaire"]},
+            }
+        record = app_records[source_id]
         if row["artifact_type"]:
             record['_artifacts'].append({**row, 'id': row['artifact_id']})
             relative = row["server_relative_path"]
-            path = (STORAGE_ROOT / relative).resolve() if relative else None
+            observation = (stored_file_observation(row, STORAGE_ROOT)
+                           if row["storage_status"] == "available" else None)
+            if observation is not None:
+                record['_file_observations'][row['artifact_id']] = observation
             record["files"].append({"name": row["file_name"], "relative": "woona/" +
                                     (relative or ""),
                                     "size": row["expected_size_bytes"],
@@ -125,11 +130,10 @@ def records_from_sources() -> tuple[list[dict], dict]:
                                     "uploaded_bytes": row['stored_size_bytes'],
                                     "error_code": row['error_code'], "error_message": row['error_message'],
                                     "last_progress_at_utc": row['upload_updated_at'].isoformat(),
-                                    "available": row["storage_status"] == "available" and
-                                    path is not None and STORAGE_ROOT in path.parents and
-                                    available_file(path, row["expected_size_bytes"])})
+                                    "available": observation[0] if observation is not None else False})
     for record in app_records.values():
-        record['server_status'] = recording_status(record.pop('_recording'), record.pop('_artifacts'), STORAGE_ROOT)
+        record['server_status'] = recording_status(record.pop('_recording'), record.pop('_artifacts'), STORAGE_ROOT,
+                                                   file_observations=record.pop('_file_observations'))
     records.extend(app_records.values())
     return records, {"drive_files": 0,
                      "drive_unindexed_files": 0,

@@ -2595,6 +2595,266 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertEqual(2, try store.artifacts(recordingID: recording.id).count)
     }
 
+    @MainActor
+    func testSelectedSessionExportsCopyOnlyRequestedSource() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (store, sources) = try exportSnapshotFixture(root)
+        let originals = try sources.map { try Data(contentsOf: $0) }
+        let manager = ExportSnapshotFileManager(root: root.appendingPathComponent("snapshots"))
+        let model = AppViewModel(store: store, uiTesting: true, exportFileManager: manager)
+        try await awaitHistoryForTesting(model)
+        for kind in [ExportKind.diagnosticLog, .rawFragments, .packetDump, .channelCsv] {
+            manager.reset()
+            let selected = kind == .diagnosticLog ? sources[2] : kind == .rawFragments ? sources[1] : sources[0]
+            model.prepareExport(kind)
+            XCTAssertNotNil(model.exportPhase)
+            model.prepareExport(kind == .diagnosticLog ? .packetDump : .diagnosticLog)
+            await waitForSessionExport(model)
+            let prepared = try XCTUnwrap(model.preparedExport, model.errorMessage ?? "No export")
+            let output = try XCTUnwrap(prepared.urls.first)
+            let directory = output.deletingLastPathComponent()
+            let names = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+            recordSnapshotEvidence("selected-\(kind.rawValue)", manager: manager, contents: names)
+            XCTAssertEqual(prepared.kind, kind, "Second tap must not replace the first request")
+            XCTAssertEqual(manager.attempts, [selected.lastPathComponent])
+            XCTAssertEqual(manager.successes, 1)
+            XCTAssertEqual(manager.logicalBytes, Int64(try Data(contentsOf: selected).count))
+            XCTAssertEqual(names, kind == .channelCsv ? ["packets.bin", "packets.csv"] : [selected.lastPathComponent])
+            if kind == .channelCsv {
+                let csv = try String(contentsOf: output, encoding: .utf8)
+                XCTAssertTrue(csv.contains("axl_sensor_2_ch_1"))
+                XCTAssertTrue(csv.contains(",50,50,10"))
+            } else {
+                XCTAssertEqual(try Data(contentsOf: output), try Data(contentsOf: selected))
+            }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: output.path), "Share still owns its output")
+            model.clearPreparedExport()
+            model.clearPreparedExport()
+            XCTAssertNil(model.preparedExport)
+            XCTAssertNil(model.exportPhase)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+            XCTAssertEqual(try sources.map { try Data(contentsOf: $0) }, originals)
+        }
+        XCTAssertEqual(4, try store.artifacts(recordingID: XCTUnwrap(model.recentRecordings.first?.id)).count)
+    }
+
+    @MainActor
+    func testUnusedBrokenSourceCannotFailSelectedSessionExport() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (store, sources) = try exportSnapshotFixture(root)
+        let originals = try sources.map { try Data(contentsOf: $0) }
+        let manager = ExportSnapshotFileManager(root: root.appendingPathComponent("snapshots"))
+        let model = AppViewModel(store: store, uiTesting: true, exportFileManager: manager)
+        try await awaitHistoryForTesting(model)
+        for kind in [ExportKind.diagnosticLog, .rawFragments, .packetDump, .channelCsv] {
+            manager.reset()
+            manager.failingName = kind == .diagnosticLog || kind == .rawFragments ? "packets.bin" : "raw_fragments.binlog"
+            model.prepareExport(kind)
+            await waitForSessionExport(model)
+            recordSnapshotEvidence("unused-broken-\(kind.rawValue)", manager: manager)
+            XCTAssertNotNil(model.preparedExport, model.errorMessage ?? "Unused source broke export")
+            XCTAssertFalse(manager.attempts.contains(try XCTUnwrap(manager.failingName)))
+            XCTAssertEqual(manager.successes, 1)
+            model.clearPreparedExport()
+            XCTAssertEqual(try sources.map { try Data(contentsOf: $0) }, originals)
+        }
+    }
+
+    @MainActor
+    func testSnapshotSecondCopyFailureRemovesOnlyOwnedDirectoryAndCanRetry() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (_, sources) = try exportSnapshotFixture(root)
+        let originals = try sources.map { try Data(contentsOf: $0) }
+        let manager = ExportSnapshotFileManager(root: root.appendingPathComponent("snapshots"))
+        let sentinel = manager.temporaryDirectory.appendingPathComponent("WoonaExport-sentinel")
+        try FileManager.default.createDirectory(at: sentinel, withIntermediateDirectories: true)
+        let sentinelFile = sentinel.appendingPathComponent("untouched")
+        try Data("sentinel".utf8).write(to: sentinelFile)
+        let model = AppViewModel(store: nil, uiTesting: true, exportFileManager: manager)
+        manager.failingAttempt = 2
+        XCTAssertThrowsError(try model.snapshotExportArtifacts(packetFile: sources[0], rawFile: sources[1], logFile: sources[2])) {
+            XCTAssertEqual(($0 as NSError).domain, ExportSnapshotFileManager.failure.domain)
+            XCTAssertEqual(($0 as NSError).code, ExportSnapshotFileManager.failure.code)
+        }
+        recordSnapshotEvidence("second-copy-failure", manager: manager)
+        XCTAssertEqual(manager.attempts, ["packets.bin", "raw_fragments.binlog"])
+        XCTAssertEqual(manager.successes, 1)
+        XCTAssertEqual(manager.logicalBytes, Int64(originals[0].count))
+        XCTAssertEqual(manager.created.count, 1)
+        XCTAssertEqual(manager.survivingDirectories.count, 0, "Failed snapshot must not orphan its directory")
+        XCTAssertEqual(manager.removed, manager.created, "Only the newly owned directory may be removed")
+        XCTAssertEqual(try sources.map { try Data(contentsOf: $0) }, originals)
+        XCTAssertEqual(try Data(contentsOf: sentinelFile), Data("sentinel".utf8))
+        manager.reset()
+        let retry = try model.snapshotExportArtifacts(packetFile: sources[0], rawFile: sources[1], logFile: sources[2])
+        XCTAssertEqual(manager.successes, 3, "Direct multi-input helper remains supported")
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(retry.packetFile)), originals[0])
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(retry.rawFile)), originals[1])
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(retry.logFile)), originals[2])
+        try FileManager.default.removeItem(at: retry.directory)
+        XCTAssertEqual(try Data(contentsOf: sentinelFile), Data("sentinel".utf8))
+    }
+
+    @MainActor
+    func testSelectedCopyFailureResetsExportAndRetryOwnsItsSnapshot() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (store, sources) = try exportSnapshotFixture(root)
+        let originals = try sources.map { try Data(contentsOf: $0) }
+        let manager = ExportSnapshotFileManager(root: root.appendingPathComponent("snapshots"))
+        let model = AppViewModel(store: store, uiTesting: true, exportFileManager: manager)
+        try await awaitHistoryForTesting(model)
+        manager.failingName = "diagnostics.log"
+        model.prepareExport(.diagnosticLog)
+        await waitForSessionExport(model)
+        recordSnapshotEvidence("selected-copy-failure", manager: manager)
+        XCTAssertNil(model.preparedExport)
+        XCTAssertNil(model.exportPhase)
+        XCTAssertTrue(model.errorMessage?.contains("Failed to prepare") == true)
+        XCTAssertEqual(manager.survivingDirectories.count, 0)
+        XCTAssertEqual(try sources.map { try Data(contentsOf: $0) }, originals)
+        manager.reset()
+        model.prepareExport(.diagnosticLog)
+        await waitForSessionExport(model)
+        let output = try XCTUnwrap(model.preparedExport?.urls.first)
+        XCTAssertEqual(manager.attempts, ["diagnostics.log"])
+        XCTAssertEqual(try Data(contentsOf: output), originals[2])
+        model.clearPreparedExport()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.deletingLastPathComponent().path))
+    }
+
+    @MainActor
+    func testMissingSelectedSourceDoesNotExportUnrelatedFilesAndCanRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (store, sources) = try exportSnapshotFixture(root)
+        let log = try Data(contentsOf: sources[2])
+        try FileManager.default.removeItem(at: sources[2])
+        let manager = ExportSnapshotFileManager(root: root.appendingPathComponent("snapshots"))
+        let model = AppViewModel(store: store, uiTesting: true, exportFileManager: manager)
+        try await awaitHistoryForTesting(model)
+        model.prepareExport(.diagnosticLog)
+        await waitForSessionExport(model)
+        recordSnapshotEvidence("missing-selected", manager: manager)
+        XCTAssertNil(model.preparedExport)
+        XCTAssertNil(model.exportPhase)
+        XCTAssertTrue(manager.attempts.isEmpty)
+        XCTAssertEqual(manager.survivingDirectories.count, 0)
+        try log.write(to: sources[2])
+        manager.reset()
+        model.prepareExport(.diagnosticLog)
+        await waitForSessionExport(model)
+        let output = try XCTUnwrap(model.preparedExport?.urls.first)
+        XCTAssertEqual(try Data(contentsOf: output), log)
+        model.clearPreparedExport()
+    }
+
+    @MainActor
+    func testCurrentCaptureSnapshotFlushesAndDoesNotFollowLaterWrites() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root.appendingPathComponent("store"))
+        let profile = try store.saveProfile(completeDog())
+        let recording = try store.createRecording(profile: profile, source: "replay", questionnaire: completeSession())
+        let manager = ExportSnapshotFileManager(root: root.appendingPathComponent("snapshots"))
+        let model = AppViewModel(store: store, uiTesting: true, exportFileManager: manager)
+        try await awaitHistoryForTesting(model)
+        model.installActiveCaptureForTesting(recording, startedMonotonicNs: HostClock.nowNanoseconds())
+        await model.beginCaptureDiagnosticsForTesting()
+        let first = makeTestPacket(counter: 101, timerMillis: 50, measurementCount: 1,
+            blocks: [makeSensorBlock(sensorType: 2, channelSamples: [[10, 20]])])
+        let second = makeTestPacket(counter: 102, timerMillis: 60, measurementCount: 1,
+            blocks: [makeSensorBlock(sensorType: 2, channelSamples: [[30, 40]])])
+        model.submitPacketFragmentForTesting(first)
+        // Wait for actor admission, not a writer flush: this small packet remains buffered.
+        for _ in 0..<600 {
+            if await model.currentPacketFileForTesting() != nil { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        model.prepareExport(.packetDump)
+        await waitForSessionExport(model)
+        guard let output = model.preparedExport?.urls.first else {
+            await model.finishCaptureProcessingForTesting()
+            XCTFail(model.errorMessage ?? "No current-capture snapshot")
+            return
+        }
+        let frozenBytes = try? Data(contentsOf: output)
+        model.submitPacketFragmentForTesting(second)
+        await model.finishCaptureProcessingForTesting()
+        let frozen = try XCTUnwrap(frozenBytes)
+        XCTAssertEqual(frozen, Data(first), "Export must flush accepted bytes before copying")
+        XCTAssertEqual(try Data(contentsOf: output), frozen, "Later writes must not mutate the share snapshot")
+        let currentURL = await model.currentPacketFileForTesting()
+        let current = try XCTUnwrap(currentURL)
+        XCTAssertEqual(try Data(contentsOf: current), Data(first + second))
+        recordSnapshotEvidence("current-capture-flush", manager: manager)
+        XCTAssertEqual(manager.successes, 1)
+        model.clearPreparedExport()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        let stillOpen = await model.hasOpenOutputFilesForTesting()
+        XCTAssertFalse(stillOpen, "Fixture must explicitly drain/close its writers")
+    }
+
+    @MainActor
+    func testSnapshotDirectoryCreationFailureDoesNotRemoveUnownedPaths() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let blocker = root.appendingPathComponent("not-a-directory")
+        let bytes = Data("unowned-file".utf8)
+        try bytes.write(to: blocker)
+        let manager = ExportSnapshotFileManager(root: blocker)
+        let model = AppViewModel(store: nil, uiTesting: true, exportFileManager: manager)
+        XCTAssertThrowsError(try model.snapshotExportArtifacts(packetFile: nil, rawFile: nil, logFile: nil))
+        XCTAssertTrue(manager.created.isEmpty)
+        XCTAssertTrue(manager.attempts.isEmpty)
+        XCTAssertTrue(manager.removed.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: blocker), bytes)
+    }
+
+    @MainActor
+    private func waitForSessionExport(_ model: AppViewModel) async {
+        for _ in 0..<600 where model.preparedExport == nil && model.exportPhase != nil {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(model.preparedExport != nil || model.exportPhase == nil, "Export did not finish")
+    }
+
+    private func exportSnapshotFixture(_ root: URL) throws -> (WoonaStore, [URL]) {
+        let store = try WoonaStore(rootDirectory: root.appendingPathComponent("store"))
+        let profile = try store.saveProfile(completeDog())
+        let recording = try store.createRecording(profile: profile, source: "replay", questionnaire: completeSession())
+        let packet = Data(makeTestPacket(counter: 1, timerMillis: 50, measurementCount: 1,
+            blocks: [makeSensorBlock(sensorType: 2, channelSamples: [[10, 20]])]))
+        let names = ["packets.bin", "raw_fragments.binlog", "diagnostics.log"]
+        let data = [packet, Data(repeating: 0x5a, count: 4096), Data("snapshot diagnostics\n".utf8)]
+        let files = try zip(names, data).enumerated().map { index, pair -> (String, URL, String, String) in
+            let source = root.appendingPathComponent(pair.0)
+            try pair.1.write(to: source)
+            return (["packet", "raw", "diagnostic"][index], source, pair.0, "application/octet-stream")
+        }
+        try store.finalize(recording: recording, status: "completed", files: files, syncJSON: Data("{}".utf8))
+        let archive = try store.recordingArchive(recordingID: recording.id)
+        return (store, try names.map { name in try XCTUnwrap(archive.files.first { $0.url.lastPathComponent == name }?.url) })
+    }
+
+    private func recordSnapshotEvidence(_ label: String, manager: ExportSnapshotFileManager, contents: [String] = []) {
+        let evidence: [String: Any] = ["case": label, "attempts": manager.attempts,
+            "attemptedLogicalBytes": manager.attemptedBytes, "successfulCopies": manager.successes,
+            "successfulLogicalBytes": manager.logicalBytes, "createdDirectories": manager.created.map(\.lastPathComponent),
+            "survivingDirectories": manager.survivingDirectories.count, "contents": contents]
+        let data = try! JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
+        let text = String(decoding: data, as: UTF8.self)
+        print("WOONA_SNAPSHOT_EVIDENCE \(text)")
+        let attachment = XCTAttachment(string: text)
+        attachment.name = "snapshot-\(label)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testRecordingArchiveRejectsEmptyAndChangedFilesAndReportsMissingFiles() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2944,6 +3204,50 @@ final class WoonaDataTests: XCTestCase {
         session.respirationStatus = "not_measured"
         session.bodyTemperatureStatus = "not_measured"
         return session
+    }
+}
+
+/// Real Foundation copies with deterministic failure injection, confined to synthetic fixtures.
+private final class ExportSnapshotFileManager: FileManager, @unchecked Sendable {
+    static let failure = NSError(domain: "WoonaSnapshotTest", code: 72)
+    private let root: URL
+    var failingAttempt: Int?
+    var failingName: String?
+    private(set) var attempts: [String] = []
+    private(set) var attemptedBytes: Int64 = 0
+    private(set) var successes = 0
+    private(set) var logicalBytes: Int64 = 0
+    private(set) var created: [URL] = []
+    private(set) var removed: [URL] = []
+    override var temporaryDirectory: URL { root }
+    var survivingDirectories: [URL] { created.filter { FileManager.default.fileExists(atPath: $0.path) } }
+
+    init(root: URL) { self.root = root; super.init() }
+
+    func reset() {
+        attempts = []; attemptedBytes = 0; successes = 0; logicalBytes = 0
+        created = []; removed = []; failingAttempt = nil; failingName = nil
+    }
+
+    override func createDirectory(at url: URL, withIntermediateDirectories createIntermediates: Bool,
+                                  attributes: [FileAttributeKey: Any]? = nil) throws {
+        try super.createDirectory(at: url, withIntermediateDirectories: createIntermediates, attributes: attributes)
+        if url.lastPathComponent.hasPrefix("WoonaExport-") { created.append(url) }
+    }
+
+    override func copyItem(at source: URL, to target: URL) throws {
+        attempts.append(source.lastPathComponent)
+        let size = (try attributesOfItem(atPath: source.path)[.size] as? NSNumber)?.int64Value ?? 0
+        attemptedBytes += size
+        if attempts.count == failingAttempt || source.lastPathComponent == failingName { throw Self.failure }
+        try super.copyItem(at: source, to: target)
+        successes += 1
+        logicalBytes += size
+    }
+
+    override func removeItem(at url: URL) throws {
+        removed.append(url)
+        try super.removeItem(at: url)
     }
 }
 

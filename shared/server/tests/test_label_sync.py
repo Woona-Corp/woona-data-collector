@@ -93,3 +93,85 @@ class ManagedTaskMetadataTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'identity conflicts'):
             managed_task_patch({'data': {'recording_id': 'one'}, 'meta': {}},
                                {'data': {'recording_id': 'two'}, 'meta': {}})
+
+
+class SyncListReuseTest(unittest.TestCase):
+    def run_cycle(self, *, initial=None, refreshed=None, detail=None, expected=None):
+        from copy import deepcopy
+        from urllib.parse import parse_qs, urlsplit
+        from server import label_sync
+        self.expected = expected if expected is not None else [
+            {'data': {'source_id': f'woona:{i}', 'recording_id': str(i), 'session': 'new'}, 'meta': {}}
+            for i in range(201)]
+        initial = initial if initial is not None else [dict(deepcopy(t), id=i + 1) for i, t in enumerate(self.expected)]
+        refreshed = refreshed if refreshed is not None else initial
+        walks, calls = [], []
+        real_paged = label_sync.paged
+        def paged(path):
+            walks.append(path)
+            return real_paged(path)
+        def request(method, path, payload=None, **kwargs):
+            calls.append((method, path, payload))
+            if method == 'GET' and path.startswith('/api/tasks?'):
+                page = int(parse_qs(urlsplit(path).query)['page'][0])
+                rows = initial if len(walks) == 1 else refreshed
+                return {'tasks': deepcopy(rows[(page - 1) * 100:page * 100]), 'total': len(rows)}
+            if method == 'GET':
+                return deepcopy(detail)
+            return None
+        self.walks, self.calls = walks, calls
+        with patch.object(label_sync, 'active_project', return_value={'id': 21, 'label_config': '<View><Video frameRate="24"/></View>'}), \
+             patch.object(label_sync, 'ensure_storage'), patch.object(label_sync, 'app_tasks', return_value=self.expected), \
+             patch.object(label_sync, 'paged', side_effect=paged), patch.object(label_sync, 'request_json', side_effect=request), \
+             patch.dict('os.environ', {'DATABASE_URL': 'unused-hermetic'}):
+            return label_sync._sync_unlocked()
+
+    def test_idle_uses_one_full_paginated_walk(self):
+        self.assertEqual(self.run_cycle(), {'activity': (201, 201)})
+        self.assertEqual(len(self.walks), 1)
+        self.assertEqual(len(self.calls), 3)
+        self.assertTrue(all(method == 'GET' and '/api/tasks?' in path for method, path, _ in self.calls))
+
+    def test_import_refreshes_and_incomplete_import_still_fails(self):
+        candidate = {'data': {'source_id': 'woona:one'}, 'meta': {}}
+        current = dict(candidate, id=1)
+        self.assertEqual(self.run_cycle(initial=[], refreshed=[current], expected=[candidate]), {'activity': (1, 1)})
+        self.assertEqual(len(self.walks), 2)
+        self.assertEqual([method for method, _, _ in self.calls], ['GET', 'POST', 'GET'])
+        self.assertIn('annotation_coordinates', self.calls[1][2][0]['meta'])
+        with self.assertRaisesRegex(RuntimeError, 'import not verified'):
+            self.run_cycle(initial=[], refreshed=[], expected=[candidate])
+        self.assertEqual(len(self.walks), 2)
+
+    def test_duplicate_source_with_distinct_task_ids_still_fails(self):
+        with self.assertRaisesRegex(RuntimeError, 'duplicate source IDs'):
+            self.run_cycle(initial=[{'id': 1, 'data': {'source_id': 'woona:one'}, 'meta': {}},
+                                    {'id': 2, 'data': {'source_id': 'woona:one'}, 'meta': {}}],
+                           expected=[{'data': {'source_id': 'woona:one'}, 'meta': {}}])
+
+    def test_fresh_detail_before_patch_preserves_concurrent_fields(self):
+        candidate = {'data': {'source_id': 'woona:one', 'recording_id': 'one', 'session': 'new'}, 'meta': {}}
+        listed = {'id': 7, 'data': {'source_id': 'woona:one', 'recording_id': 'one', 'session': 'old'}, 'meta': {}}
+        detail = {'id': 7, 'data': {**listed['data'], 'custom': 'latest'},
+                  'meta': {'review': 'latest', 'annotation_coordinates': {'frame_rate': 24}},
+                  'annotations': [{'id': 33, 'result': ['latest']}], 'is_labeled': True}
+        self.run_cycle(initial=[listed], expected=[candidate], detail=detail)
+        self.assertEqual([method for method, _, _ in self.calls], ['GET', 'GET', 'PATCH'])
+        payload = self.calls[-1][2]
+        self.assertEqual(payload['data']['custom'], 'latest')
+        self.assertEqual(payload['meta'], detail['meta'])
+        self.assertNotIn('annotations', payload)
+        self.assertEqual(detail['data']['session'], 'old')
+
+    def test_fresh_detail_identity_conflicts_prevent_mutation(self):
+        from copy import deepcopy
+        candidate = {'data': {'source_id': 'woona:one', 'recording_id': 'one', 'dog_id': 'dog',
+                              'dog_profile_version_id': 'profile', 'session': 'new'}, 'meta': {}}
+        listed = {'id': 7, 'data': {**candidate['data'], 'session': 'old'}, 'meta': {}}
+        for key in ('source_id', 'recording_id', 'dog_id', 'dog_profile_version_id'):
+            with self.subTest(key=key):
+                detail = deepcopy(listed)
+                detail['data'][key] = 'conflicting'
+                with self.assertRaisesRegex(RuntimeError, 'identity conflicts'):
+                    self.run_cycle(initial=[listed], expected=[candidate], detail=detail)
+                self.assertFalse(any(method == 'PATCH' for method, _, _ in self.calls))

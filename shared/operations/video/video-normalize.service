@@ -1,0 +1,15 @@
+[Unit]
+Description=Woona verified CFR30 working videos
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/woona-current-fps30/shared
+ExecStart=/usr/bin/python3 -m server.video_normalization --root /srv/woona/storage --prepare /srv/woona/storage/derived/video-presentations.json --threads 3
+Nice=15
+CPUAffinity=1 2 3
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=infinity
+UMask=0022

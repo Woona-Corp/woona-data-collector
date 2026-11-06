@@ -1,0 +1,10 @@
+[Unit]
+Description=Prepare newly uploaded Woona videos for Label Studio
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=60s
+Unit=video-normalize.service
+
+[Install]
+WantedBy=timers.target

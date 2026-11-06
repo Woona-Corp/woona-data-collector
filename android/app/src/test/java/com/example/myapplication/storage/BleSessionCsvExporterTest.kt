@@ -35,7 +35,15 @@ class BleSessionCsvExporterTest {
     @Test fun export_rejectsMismatchedTimelineCounter() = rejectTimeline(rows = 2, counterOffset = 1)
     @Test fun export_rejectsMismatchedTimelinePacketLength() = rejectTimeline(rows = 2, byteOffset = 1)
 
-    private fun rejectTimeline(rows: Int, tail: Int = 0, counterOffset: Int = 0, byteOffset: Int = 0) {
+    @Test fun export_rejectsMismatchedTimelineDeviceTimer() = rejectTimeline(rows = 2, timerOffset = 1)
+
+    private fun rejectTimeline(
+        rows: Int,
+        tail: Int = 0,
+        counterOffset: Int = 0,
+        byteOffset: Int = 0,
+        timerOffset: Int = 0,
+    ) {
         val directory = Files.createTempDirectory("timeline-cardinality").toFile()
         try {
             val bytes = (0..1).map { index -> packet(index + 9, index + 50,
@@ -48,7 +56,7 @@ class BleSessionCsvExporterTest {
                     repeat(rows) { index ->
                         output.writeLong(index.toLong())
                         output.writeLong((index + 9 + counterOffset).toLong())
-                        output.writeLong((index + 50).toLong())
+                        output.writeLong((index + 50 + timerOffset).toLong())
                         output.writeLong(2000)
                         output.writeLong(9000000000)
                         output.writeInt(bytes[0].size + byteOffset)
@@ -59,6 +67,122 @@ class BleSessionCsvExporterTest {
             org.junit.Assert.assertThrows(Exception::class.java) {
                 exporter.export(packets, 1000, directory.resolve("channel.csv"), timeline)
             }
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun export_duplicateBlocksAndEmptyPacketsKeepFallbackGolden() = duplicateAndEmptyGolden(false)
+
+    @Test
+    fun export_duplicateBlocksAndEmptyPacketsKeepTimelineGolden() = duplicateAndEmptyGolden(true)
+
+    private fun duplicateAndEmptyGolden(withTimeline: Boolean) {
+        val directory = Files.createTempDirectory("csv-duplicate-empty").toFile()
+        try {
+            val timers = listOf(500, 50, 800, 51)
+            val blocks = listOf(
+                listOf(sensorBlock(255, listOf(emptyList()))),
+                listOf(
+                    sensorBlock(2, listOf(listOf(10, 20), listOf(30, 40))),
+                    sensorBlock(2, listOf(listOf(50))),
+                ),
+                listOf(sensorBlock(254, listOf(emptyList()))),
+                listOf(sensorBlock(4, listOf(listOf(-1)))),
+            )
+            val packets = directory.resolve("packets.bin")
+            val timeline = BlePacketTimelineFileStore(directory)
+            packets.outputStream().use { output ->
+                timers.forEachIndexed { index, timer ->
+                    val bytes = packet(index, timer, blocks[index])
+                    output.write(bytes)
+                    timeline.append(index.toLong(), index.toLong(), timer.toLong(),
+                        2000L + index * 100, 9_000_000_000L + index * 100_000_000L, bytes.size)
+                }
+            }
+            timeline.close()
+            val target = directory.resolve("out.csv")
+            exporter.export(packets, 1000, target,
+                directory.resolve("packet_timeline.bin").takeIf { withTimeline })
+            val header = "estimated_utc,host_monotonic_ns,device_timer_millis,sample_timer_millis," +
+                "axl_sensor_2_ch_1,axl_sensor_2_ch_2,mic_sensor_4_ch_1\n"
+            val rows = if (withTimeline) {
+                "time-2100,9100000000,50,50,10,30,\n" +
+                    "time-2101,9101000000,50,51,20,40,\n" +
+                    "time-2102,9102000000,50,52,50,,\n" +
+                    "time-2302,9302000000,51,53,,,-1\n"
+            } else {
+                "time-1000,,50,50,10,30,\n" +
+                    "time-1001,,50,51,20,40,\n" +
+                    "time-1002,,50,52,50,,\n" +
+                    "time-1003,,51,53,,,-1\n"
+            }
+            assertEquals(header + rows, target.readText())
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun export_preservesAll256TypesAndLateChannel255() {
+        val directory = Files.createTempDirectory("csv-all-types").toFile()
+        try {
+            val packets = directory.resolve("packets.bin")
+            packets.outputStream().use { output ->
+                for (type in 0..255) {
+                    val channels = if (type == 255) 255 else 1
+                    output.write(packet(type, 50 + type,
+                        listOf(sensorBlock(type, List(channels) { listOf(type - it) }))))
+                }
+            }
+            val target = directory.resolve("out.csv")
+            exporter.export(packets, 1000, target)
+            val columns = (0..255).flatMap { type ->
+                (1..if (type == 255) 255 else 1).map { channel -> type to channel }
+            }
+            val expected = buildString {
+                append("estimated_utc,host_monotonic_ns,device_timer_millis,sample_timer_millis")
+                columns.forEach { (type, channel) ->
+                    val prefix = when (type) { 1 -> "t"; 2 -> "axl"; 3 -> "gir"; 4 -> "mic"; else -> "unknown" }
+                    append(",$prefix" + "_sensor_${type}_ch_$channel")
+                }
+                append('\n')
+                for (type in 0..255) {
+                    append("time-${1000 + type},,${50 + type},${50 + type}")
+                    columns.forEach { (columnType, channel) ->
+                        append(',')
+                        if (columnType == type) append(type - channel + 1)
+                    }
+                    append('\n')
+                }
+            }
+            assertEquals(expected, target.readText())
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun export_emptyDumpWritesOnlyHeader() {
+        val directory = Files.createTempDirectory("csv-empty").toFile()
+        try {
+            val packets = directory.resolve("packets.bin").apply { writeBytes(byteArrayOf()) }
+            val target = directory.resolve("out.csv")
+            exporter.export(packets, 1000, target)
+            assertEquals("estimated_utc,host_monotonic_ns,device_timer_millis,sample_timer_millis\n", target.readText())
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun export_propagatesWriterErrorsWithoutOverwritingParent() {
+        val directory = Files.createTempDirectory("csv-write-error").toFile()
+        try {
+            val packets = directory.resolve("packets.bin").apply {
+                writeBytes(packet(9, 50, listOf(sensorBlock(2, listOf(listOf(10))))))
+            }
+            val directoryTarget = directory.resolve("target-directory").apply { mkdirs() }
+            val fileParent = directory.resolve("file-parent").apply { writeText("sentinel") }
+            for (target in listOf(directoryTarget, fileParent.resolve("out.csv"))) {
+                org.junit.Assert.assertThrows(java.io.IOException::class.java) {
+                    exporter.export(packets, 1000, target)
+                }
+            }
+            assertEquals("sentinel", fileParent.readText())
         } finally { directory.deleteRecursively() }
     }
 

@@ -72,7 +72,24 @@ def stalled_reason(status: str, code: str | None, acknowledged: int, expected: i
             f"The transfer stopped at {acknowledged} of {expected} bytes with no progress for over {STALE_AFTER_SECONDS // 60} minutes. Resume it on the source device from the acknowledged server offset; the accepted bytes are preserved.")
 
 
-def artifact_status(row, storage_root: Path, now=None) -> dict:
+def stored_file_observation(row, storage_root: Path) -> tuple[bool, str | None]:
+    """Fresh final-file availability, independent of verification and receipts."""
+    relative = row.get('server_relative_path')
+    path = (storage_root / relative).resolve() if relative else None
+    try:
+        info = path.stat() if path is not None and storage_root in path.parents else None
+        if info is None or not stat.S_ISREG(info.st_mode):
+            return False, 'stored_file_missing'
+        if info.st_size != row['expected_size_bytes']:
+            return False, 'stored_file_size_mismatch'
+        return True, None
+    except FileNotFoundError:
+        return False, 'stored_file_missing'
+    except OSError:
+        return False, 'stored_file_unreadable'
+
+
+def artifact_status(row, storage_root: Path, now=None, *, file_observation=None) -> dict:
     """HEAD-compatible acknowledged offset, without hashing large files on every poll."""
     expected = row['expected_size_bytes']
     acknowledged = min(max(row['stored_size_bytes'], 0), expected)
@@ -83,20 +100,10 @@ def artifact_status(row, storage_root: Path, now=None) -> dict:
     derived = False
     if status == 'available':
         retryable, action = False, 'none'
-        relative = row.get('server_relative_path')
-        path = (storage_root / relative).resolve() if relative else None
-        try:
-            info = path.stat() if path is not None and storage_root in path.parents else None
-            if info is None or not stat.S_ISREG(info.st_mode):
-                code = 'stored_file_missing'
-            elif info.st_size != expected:
-                code = 'stored_file_size_mismatch'
-            else:
-                verified = row.get('verified_at') is not None
-        except FileNotFoundError:
-            code = 'stored_file_missing'
-        except OSError:
-            code = 'stored_file_unreadable'
+        available, physical_error = (file_observation if file_observation is not None
+                                     else stored_file_observation(row, storage_root))
+        code = physical_error or code
+        verified = available and row.get('verified_at') is not None
         if not verified:
             code = code or 'artifact_verification_missing'
             message = 'The server cannot confirm the previously verified file. Preserve local data and contact support.'
@@ -134,14 +141,17 @@ def artifact_status(row, storage_root: Path, now=None) -> dict:
     }
 
 
-def recording_status(recording, artifact_rows, storage_root: Path, *, now=None) -> dict:
+def recording_status(recording, artifact_rows, storage_root: Path, *, now=None, file_observations=None) -> dict:
     storage_root = storage_root.resolve()
     now = now or datetime.now(timezone.utc)
     # Retired artifacts remain part of the frozen capture receipt, but are not
     # displayed or required for progress. Keeping both views on the same rows
     # prevents an administrative retirement from looking like disk corruption.
     visible_rows = [row for row in artifact_rows if row.get('is_active', True)]
-    artifacts = [artifact_status(row, storage_root, now) for row in visible_rows]
+    # Only the dashboard supplies observations owned by this same request.
+    artifacts = [artifact_status(row, storage_root, now,
+                 file_observation=file_observations.get(row['id']) if file_observations is not None else None)
+                 for row in visible_rows]
     capture_files = [item for item in artifacts if item['partOfCaptureReceipt']]
     total_bytes = sum(item['sizeBytes'] for item in capture_files)
     uploaded = sum(item['uploadedBytes'] for item in capture_files)

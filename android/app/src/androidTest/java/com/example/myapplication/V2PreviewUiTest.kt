@@ -65,6 +65,7 @@ class V2PreviewUiTest {
             }
         }
         compose.runOnIdle { assertEquals(0, disconnects) }
+        UiStopTrace.v2("V2.firstDisconnect", compose)
         compose.onNodeWithText("DISCONNECT").performClick()
         compose.onNodeWithText("Disconnecting may stop an SD-card recording. Continue?").assertIsDisplayed()
         compose.onNodeWithText("Cancel").performClick()

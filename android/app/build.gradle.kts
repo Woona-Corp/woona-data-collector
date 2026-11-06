@@ -33,8 +33,8 @@ android {
         applicationId = "com.woona.drivetest"
         minSdk = 31
         targetSdk = 36
-        versionCode = 18
-        versionName = "1.5.5"
+        versionCode = 19
+        versionName = "1.5.6"
 
         buildConfigField("String", "WOONA_SERVER_BASE_URL", woonaServerBaseUrl.get().asBuildConfigString())
         buildConfigField("String", "WOONA_SERVER_TOKEN", woonaServerToken.get().asBuildConfigString())
@@ -104,7 +104,6 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
 
 

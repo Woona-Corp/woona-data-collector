@@ -380,11 +380,14 @@ final class AppViewModel: ObservableObject {
     private let questionnaireClientFactory: ((String?) throws -> WoonaServerClient)?
     private let syncClientFactory: ((String?) throws -> WoonaServerClient)?
     private let serverTokenWriter: ((String) throws -> Void)?
+    private let exportFileManager: FileManager
 
     init(store: WoonaStore? = try? WoonaStore(), uiTesting: Bool = false,
          questionnaireClientFactory: ((String?) throws -> WoonaServerClient)? = nil,
          syncClientFactory: ((String?) throws -> WoonaServerClient)? = nil,
-         serverTokenWriter: ((String) throws -> Void)? = nil) {
+         serverTokenWriter: ((String) throws -> Void)? = nil,
+         exportFileManager: FileManager = .default) {
+        self.exportFileManager = exportFileManager
         self.questionnaireClientFactory = questionnaireClientFactory
         self.syncClientFactory = syncClientFactory
         self.serverTokenWriter = serverTokenWriter
@@ -1443,9 +1446,9 @@ final class AppViewModel: ObservableObject {
                 let currentRaw = await packetProcessor.currentRawFile()
                 let currentLog = await packetProcessor.currentLogFile()
                 let snapshot = try snapshotExportArtifacts(
-                    packetFile: saved == nil ? currentPacket : saved?.files.first { $0.url.lastPathComponent == "packets.bin" }?.url,
-                    rawFile: saved == nil ? currentRaw : saved?.files.first { $0.url.lastPathComponent == "raw_fragments.binlog" }?.url,
-                    logFile: saved == nil ? currentLog : saved?.files.first { $0.url.lastPathComponent == "diagnostics.log" }?.url
+                    packetFile: kind == .packetDump || kind == .channelCsv ? (saved == nil ? currentPacket : saved?.files.first { $0.url.lastPathComponent == "packets.bin" }?.url) : nil,
+                    rawFile: kind == .rawFragments ? (saved == nil ? currentRaw : saved?.files.first { $0.url.lastPathComponent == "raw_fragments.binlog" }?.url) : nil,
+                    logFile: kind == .diagnosticLog ? (saved == nil ? currentLog : saved?.files.first { $0.url.lastPathComponent == "diagnostics.log" }?.url) : nil
                 )
                 preparedExportSnapshotDirectory = snapshot.directory
 
@@ -2391,18 +2394,23 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func snapshotExportArtifacts(packetFile: URL?, rawFile: URL?, logFile: URL?) throws -> ExportArtifactSnapshot {
-        let fileManager = FileManager.default
+    func snapshotExportArtifacts(packetFile: URL?, rawFile: URL?, logFile: URL?) throws -> ExportArtifactSnapshot {
+        let fileManager = exportFileManager
         let directory = fileManager.temporaryDirectory
             .appendingPathComponent("WoonaExport-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        return ExportArtifactSnapshot(
-            directory: directory,
-            packetFile: try copyExportArtifact(packetFile, to: directory, fileManager: fileManager),
-            rawFile: try copyExportArtifact(rawFile, to: directory, fileManager: fileManager),
-            logFile: try copyExportArtifact(logFile, to: directory, fileManager: fileManager)
-        )
+        do {
+            return ExportArtifactSnapshot(
+                directory: directory,
+                packetFile: try copyExportArtifact(packetFile, to: directory, fileManager: fileManager),
+                rawFile: try copyExportArtifact(rawFile, to: directory, fileManager: fileManager),
+                logFile: try copyExportArtifact(logFile, to: directory, fileManager: fileManager)
+            )
+        } catch {
+            try? fileManager.removeItem(at: directory)
+            throw error
+        }
     }
 
     private func copyExportArtifact(_ source: URL?, to directory: URL, fileManager: FileManager) throws -> URL? {
@@ -2496,7 +2504,7 @@ final class AppViewModel: ObservableObject {
     }
 }
 
-private struct ExportArtifactSnapshot {
+struct ExportArtifactSnapshot {
     let directory: URL
     let packetFile: URL?
     let rawFile: URL?

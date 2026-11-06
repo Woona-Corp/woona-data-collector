@@ -116,7 +116,11 @@ class QaUiViewportMatrixTest(private val landscape: Boolean, private val font: F
             action(cancel, false)
             action(if (ru) "Проверить и сохранить" else "Validate and save", false)
             screenshot("notes-ime")
+        } catch (primary: Throwable) {
+            UiStopTrace.primary("QA[$landscape,$font,$language]", primary)
+            throw primary
         } finally {
+            UiStopTrace.beforeClose("QA[$landscape,$font,$language]")
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             automation.serviceInfo = automation.serviceInfo.apply { this.flags = flags }
             compose.activity.restoreTestOrientation(orientation)
