@@ -469,7 +469,7 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.segmentedControls.buttons["Channel 2"].isSelected)
     }
     private func attachScreen(_ name: String, fullDevice: Bool = false) {
-        let screenshot = XCTAttachment(screenshot: fullDevice ? XCUIDevice.shared.screenshot() : app.screenshot())
+        let screenshot = XCTAttachment(screenshot: fullDevice ? XCUIScreen.main.screenshot() : app.screenshot())
         screenshot.name = name
         screenshot.lifetime = .keepAlways
         add(screenshot)
