@@ -687,6 +687,10 @@ class DeviceFeatureController(
     )
 
     fun createCsvShareIntent(context: Context): Intent? {
+        if (!canShareCsvFile()) {
+            showErrorOnMainThread(appTextResolver.getString(R.string.export_finish_capture_first))
+            return null
+        }
         return try {
             showExportPhaseOnMainThread(ExportPhase.PREPARING_SNAPSHOTS)
             val snapshot = ensureExportSnapshot() ?: return null
