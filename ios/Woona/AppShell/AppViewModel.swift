@@ -362,6 +362,9 @@ final class AppViewModel: ObservableObject {
     private var cameraStartTask: Task<Void, Never>?
     private var captureStartedMonotonicNs: UInt64?
     private var captureStoppedTiming: CaptureStoppedTiming?
+    // Own the first Stop snapshot (including a nil camera result) until durable
+    // completion. Retrying metadata finalization must not stop/promote again.
+    private var captureStoppedRecordingID: UUID?
     private var captureErrorCode: String?
     private var captureErrorMessage: String?
     private var captureSessionZeroAtUTC: String?
@@ -922,6 +925,7 @@ final class AppViewModel: ObservableObject {
         cameraGeneration = cameraRecorder.generationFence.advance()
         captureStartedMonotonicNs = nil
         captureStoppedTiming = nil
+        captureStoppedRecordingID = nil
         isCaptureReady = false
         isRecording = false
         isCameraDegraded = false
@@ -966,6 +970,7 @@ final class AppViewModel: ObservableObject {
         activeRecording = try store.createRecording(profile: profile, source: "replay", questionnaire: questionnaire)
         captureStartedMonotonicNs = nil
         captureStoppedTiming = nil
+        captureStoppedRecordingID = nil
         cameraCaptureInfo = nil
         captureErrorCode = nil
         captureErrorMessage = nil
@@ -1010,7 +1015,16 @@ final class AppViewModel: ObservableObject {
         // Freeze acquisition timing before camera finish/copies/hashing. Permission
         // callbacks are not cancellable: invalidate admission, then drain the camera
         // queue in stopRecording instead of awaiting an unbounded permission prompt.
-        captureStoppedTiming = CaptureStoppedTiming(endedAt: Date(), startedMonotonicNs: captureStartedMonotonicNs, stoppedMonotonicNs: HostClock.nowNanoseconds())
+        let firstStop = captureStoppedRecordingID != recording.id
+        if firstStop {
+            var stoppedAt = Date()
+            var stoppedMonotonicNs = HostClock.nowNanoseconds()
+#if DEBUG
+            if let clock = captureStopClockForTesting { (stoppedAt, stoppedMonotonicNs) = clock() }
+#endif
+            captureStoppedTiming = CaptureStoppedTiming(endedAt: stoppedAt, startedMonotonicNs: captureStartedMonotonicNs, stoppedMonotonicNs: stoppedMonotonicNs)
+            captureStoppedRecordingID = recording.id
+        }
         cameraRecorder.generationFence.advance()
         cameraGeneration = nil
         cameraPrepareTask?.cancel(); cameraPrepareTask = nil
@@ -1027,9 +1041,14 @@ final class AppViewModel: ObservableObject {
         statusText = "Finalizing"
         captureStopTask = Task {
             defer { captureStopTask = nil; captureFinalizationBackgroundTime.end() }
-            if recording.videoRequested {
+            if recording.videoRequested, firstStop {
                 do {
+#if DEBUG
+                    if let stop = cameraStopForTesting { cameraCaptureInfo = try await stop() }
+                    else { cameraCaptureInfo = try await cameraRecorder.stopRecording() }
+#else
                     cameraCaptureInfo = try await cameraRecorder.stopRecording()
+#endif
                     if cameraCaptureInfo == nil, captureStartedMonotonicNs != nil, !isCameraDegraded {
                         handleCameraFailure("Camera stopped before validated video was available")
                     }
@@ -1123,6 +1142,23 @@ final class AppViewModel: ObservableObject {
     }
 
 #if DEBUG
+    var cameraStopForTesting: (() async throws -> CameraCaptureInfo?)?
+    var captureStopClockForTesting: (() -> (Date, UInt64))?
+
+    func installActiveCaptureForTesting(_ recording: WoonaRecording, startedMonotonicNs: UInt64) {
+        precondition(activeRecording == nil && !captureStopInProgress)
+        activeRecording = recording
+        captureStartedMonotonicNs = startedMonotonicNs
+        captureStoppedTiming = nil
+        captureStoppedRecordingID = nil
+        cameraCaptureInfo = nil
+        captureErrorCode = nil
+        captureErrorMessage = nil
+        isRecording = true
+    }
+
+    func waitForCaptureStopForTesting() async { await captureStopTask?.value }
+
     func installSyntheticV2ChartFixtureForTesting(timestampBaseUs: UInt64 = 12_000_000) {
         var value = V2PreviewSnapshot()
         value.stage = .running; value.selectedMask = 127; value.decodedBlocks = 100
@@ -1934,6 +1970,9 @@ final class AppViewModel: ObservableObject {
             let finalStatus = captureErrorCode == "storage_failed" || (requestedStatus == "completed" && packetsReceived == 0) ? "failed" : requestedStatus
             let finalization = try await CaptureFinalizer.run(root: store.rootDirectory, recordingID: recording.id, status: finalStatus, files: files, syncJSON: data, timing: captureStoppedTiming)
             activeRecording = nil
+            captureStoppedRecordingID = nil
+            captureStoppedTiming = nil
+            cameraCaptureInfo = nil
             hasPreparedActiveCapture = false
             isCaptureReady = false
             isRecording = false

@@ -5,6 +5,7 @@ final class OverviewParityTests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing"]
         if name.contains("testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions") {
@@ -26,6 +27,10 @@ final class OverviewParityTests: XCTestCase {
         if app.launchArguments.contains("--ui-testing-v2-charts") { return }
         // The account field can render before the animal controls are actionable.
         // Check the actual control instead of treating field existence as readiness.
+        // At accessibility XXXL the animal actions are below the initial
+        // viewport (CI: New dog y=1026 on an 874-point portrait screen).
+        // Scrolling is required; waiting alone cannot make it hittable.
+        for _ in 0..<12 where !app.buttons["dog.new"].isHittable { app.swipeUp() }
         let newDogReady = XCTNSPredicateExpectation(
             predicate: NSPredicate { object, _ in
                 guard let button = object as? XCUIElement else { return false }
@@ -51,6 +56,7 @@ final class OverviewParityTests: XCTestCase {
         token.tap(); token.typeText("synthetic-memory-only-token")
         XCUIDevice.shared.orientation = .landscapeRight
         XCTAssertTrue(app.buttons["server.save"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "Landscape actions must remain reachable with the software keyboard open")
         XCTAssertTrue(app.buttons["server.save"].isHittable)
         XCTAssertTrue(app.buttons["server.cancel"].isHittable)
         XCTAssertGreaterThan(app.buttons["server.save"].frame.height, 20)
