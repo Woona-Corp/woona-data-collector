@@ -1,5 +1,40 @@
 # Woona mobile release notes
 
+## Android 1.5.5 / iOS 1.5.5
+
+- iOS: fence camera preparation/start/stop ownership, validate completed video
+  before admitting it as a recording artifact, and retain the first Stop's
+  timing and validated video through a local finalization retry.
+- Harden packet boundary handling and artifact validation. Android session
+  CSV export rejects mismatched or damaged timelines rather than reporting a
+  successful export; original source files are retained. Session ZIP manifests
+  correctly escape control characters in metadata.
+- Keep unsaved server URL/token edits in memory only, and clear them when the
+  editor is dismissed. Improve compact-screen, landscape and large-text
+  questionnaire/settings controls without changing saved questionnaire formats.
+- Android: explicitly exclude app data from cloud backup and device transfer;
+  no backup service is enabled. Validate only active heart-questionnaire details
+  while retaining inactive draft text when an answer is changed back.
+- Compatible server hardening bounds upload admission and Label Studio summary
+  waits, and preserves retryable recording imports. Storage, wire and API formats
+  and schema revision `0009` remain unchanged. Deploy and verify the compatible
+  server before distributing these clients.
+
+### Release verification and limits
+
+- Prior regression evidence: Android 332 JVM tests passed; clean API 31 emulator
+  instrumentation had 220 passed and 8 explicit skips. iOS native CI had 321 unit
+  and 17 UI tests passed; a later stronger landscape case also passed. Candidate
+  PR CI must verify the versioned source separately; these are not delivery or
+  physical-device acceptance claims.
+- Real BLE, camera/MP4 quality, background capture and hardware synchronization
+  still require target sensors and physical phones. Existing storage-failure and
+  historical-upload limitations below continue to apply.
+- Android signed delivery and iOS TestFlight upload are separate release gates.
+  iOS is for the existing internal TestFlight group only; Apple processing and
+  group availability must be verified after upload. No invitations, external
+  testing or App Store submission are included.
+
 ## Android 1.5.2 / iOS 1.5.3
 
 Changes since the Android 1.4.0 stable release and the 1.5.x internal builds:
