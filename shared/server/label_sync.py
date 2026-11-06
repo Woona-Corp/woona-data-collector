@@ -238,7 +238,8 @@ def _sync_unlocked() -> dict[str, tuple[int, int]]:
     project_id = project["id"]
     ensure_storage(project_id)
     expected = app_tasks(os.environ["DATABASE_URL"])
-    current = {row["data"].get("source_id") for row in paged(f"/api/tasks?project={project_id}")}
+    rows = paged(f"/api/tasks?project={project_id}")
+    current = {row["data"].get("source_id") for row in rows}
     missing = [item for item in expected if item["data"]["source_id"] not in current]
     for item in missing:
         item['meta']['annotation_coordinates'] = {
@@ -247,7 +248,8 @@ def _sync_unlocked() -> dict[str, tuple[int, int]]:
         }
     for offset in range(0, len(missing), 50):
         request_json("POST", f"/api/projects/{project_id}/import", missing[offset:offset + 50])
-    rows = paged(f"/api/tasks?project={project_id}")
+    if missing:
+        rows = paged(f"/api/tasks?project={project_id}")
     by_source = {row['data'].get('source_id'): row for row in rows}
     for candidate in expected:
         current = by_source.get(candidate['data']['source_id'])

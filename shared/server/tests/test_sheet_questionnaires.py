@@ -44,8 +44,9 @@ class SheetContractTest(unittest.TestCase):
         with patch("server.label_sync.active_project", return_value=project), patch("server.label_sync.ensure_storage"), \
                 patch.dict("os.environ", {"DATABASE_URL": "unused"}), \
                 patch("server.label_sync.app_tasks", return_value=[task]), \
-                patch("server.label_sync.paged", side_effect=[[], [task], [task], [task]]), \
+                patch("server.label_sync.paged", side_effect=[[], [task], [task]]) as pages, \
                 patch("server.label_sync.request_json") as request:
             self.assertEqual(_sync_unlocked(), {"activity": (1, 1)})
             self.assertEqual(_sync_unlocked(), {"activity": (1, 1)})
             request.assert_called_once_with("POST", "/api/projects/21/import", [task])
+            self.assertEqual(pages.call_count, 3, 'Import refresh plus one idle walk')

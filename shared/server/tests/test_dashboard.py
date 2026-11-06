@@ -144,14 +144,14 @@ class DashboardPhysicalObservationTest(unittest.TestCase):
         engine = MagicMock()
         engine.connect.return_value.__enter__.return_value = connection
         app = ModuleType('server.app')
-        app.STORAGE_ROOT, app.engine = self.root, engine
+        app.__dict__.update(STORAGE_ROOT=self.root, engine=engine)
         fake_app = patch.dict(sys.modules, {'server.app': app})
         fake_app.start()
         self.addCleanup(fake_app.stop)
         dashboard.clear_label_summary_cache()
         self.addCleanup(dashboard.clear_label_summary_cache)
 
-    def artifact(self, recording, identity, *, kind='video', status='available', relative=None):
+    def artifact(self, recording, identity, *, kind: str | None = 'video', status='available', relative=None) -> dict:
         import hashlib
         import json
         row = dict(id=recording, started_at=self.now, ingest_status='complete',
@@ -274,6 +274,7 @@ class DashboardPhysicalObservationTest(unittest.TestCase):
             for endpoint in ('/dashboard', '/dashboard/data'):
                 with patch.object(self.dashboard, 'urlopen', side_effect=lambda *a, **k: io.BytesIO(b'{"permissions":[]}')):
                     self.assertEqual(client.get(endpoint, headers=headers).status_code, 403)
+                from email.message import Message
                 from urllib.error import HTTPError
-                with patch.object(self.dashboard, 'urlopen', side_effect=HTTPError('synthetic', 401, 'denied', {}, None)):
+                with patch.object(self.dashboard, 'urlopen', side_effect=HTTPError('synthetic', 401, 'denied', Message(), None)):
                     self.assertEqual(client.get(endpoint, headers=headers).status_code, 401)
