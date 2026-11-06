@@ -16,6 +16,7 @@ services:
       LABEL_STUDIO_URL: http://label_studio:8080
       LABEL_STUDIO_HOST_HEADER: cool-trams.digital
       LABEL_PROJECT_ID: ${LABEL_PROJECT_ID:-21}
+      LABEL_TARGET_FRAME_RATE: "30"
       LABEL_STUDIO_API_TOKEN: ${LABEL_API_TOKEN:?set LABEL_API_TOKEN}
 
   label_postgres:
@@ -81,6 +82,7 @@ services:
       LABEL_STUDIO_URL: http://label_studio:8080
       LABEL_STUDIO_HOST_HEADER: cool-trams.digital
       LABEL_PROJECT_ID: ${LABEL_PROJECT_ID:-21}
+      LABEL_TARGET_FRAME_RATE: "30"
       LABEL_STUDIO_API_TOKEN: ${LABEL_API_TOKEN:?set LABEL_API_TOKEN}
     depends_on:
       postgres:

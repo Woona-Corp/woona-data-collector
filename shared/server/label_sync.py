@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
 from server.eligibility import activity_exclusion_reasons
-from server.video_presentation import presentation_for_video
+from server.video_presentation import presentation_for_video, is_cfr30, FRAME_RATE
 
 def file_url(relative: str) -> str:
     return "/data/local-files/?d=" + quote(relative, safe="/")
@@ -238,6 +238,9 @@ def _sync_unlocked() -> dict[str, tuple[int, int]]:
     project_id = project["id"]
     ensure_storage(project_id)
     expected = app_tasks(os.environ["DATABASE_URL"])
+    # New tasks enter a CFR30 project only after their working video is verified.
+    if project.get('frame_rate') == FRAME_RATE:
+        expected = [item for item in expected if is_cfr30(item.get('meta', {}).get('video_presentation'))]
     rows = paged(f"/api/tasks?project={project_id}")
     current = {row["data"].get("source_id") for row in rows}
     missing = [item for item in expected if item["data"]["source_id"] not in current]
@@ -302,7 +305,15 @@ def active_project(*, fetch=None) -> dict:
     videos = root.findall(".//Video")
     if len(timelines) != 1 or len(videos) != 1 or videos[0].get("value") != "$video" or timelines[0].get("toName") != videos[0].get("name"):
         raise ValueError("Expected the existing single video timeline project")
-    return {**project, "timeline_name": timelines[0].get("name"),
+    rate = videos[0].get('frameRate', videos[0].get('framerate', '24'))
+    fps = float(rate) if not rate.startswith('$') else None
+    if fps is not None and (not math.isfinite(fps) or fps <= 0):
+        raise ValueError('Invalid annotation frame rate')
+    target = os.environ.get('LABEL_TARGET_FRAME_RATE')
+    if target is not None and (float(target) != FRAME_RATE or fps != FRAME_RATE):
+        raise ValueError('Label Studio must use the migrated fixed 30 fps timeline')
+    return {**project, "frame_rate": fps,
+            "timeline_name": timelines[0].get("name"),
             "labels": [label.attrib["value"] for label in timelines[0].findall("Label")]}
 
 

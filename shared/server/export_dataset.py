@@ -9,6 +9,7 @@ from xml.etree import ElementTree
 
 from server.label_sync import app_tasks, request_json, annotation_frame_rate as frame_rate
 from server.alignment import verified_alignment, sensor_intervals
+from server.video_presentation import is_cfr30, FRAME_RATE
 
 
 def segments(task, project):
@@ -62,6 +63,9 @@ def build_dataset(canonical, tasks, inventory, project, mode='video'):
         proof = verified_alignment(sync, row['artifacts'])
         if mode == 'ble' and not proof:
             reasons.append('verified_video_ble_calibration_required')
+        if candidate and task and frame_rate(project, task) == FRAME_RATE:
+            if not is_cfr30(candidate.get('meta', {}).get('video_presentation')):
+                reasons.append('verified_cfr30_video_required')
         if reasons:
             excluded.append({'recording_id': rid, 'reasons': reasons}); continue
         spans = segments(task, project)
@@ -101,6 +105,8 @@ def build_dataset(canonical, tasks, inventory, project, mode='video'):
         if mode == 'ble':
             for span in records[-1]['segments']:
                 span['sensor_intervals'] = sensor_intervals(span,proof)
+                if records[-1].get('video_presentation', {}).get('transform') == 'cfr30':
+                    span['presentation_time_error_seconds'] = records[-1]['video_presentation']['time_mapping']['max_error_seconds']
     video_hashes = [a['sha256'] for r in records for a in r['artifacts'] if a['artifact_type'] == 'video']
     if len(video_hashes) != len(set(video_hashes)):
         raise ValueError('Duplicate video bytes across selected recordings; review provenance')

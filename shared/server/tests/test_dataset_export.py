@@ -40,6 +40,18 @@ class DatasetExportTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'FPS changed'):
             segments(task, project)
         del task['meta']['annotation_coordinates']
+        # A 30 fps label grid alone is not proof of a real CFR working video.
+        config30 = {'label_config': project['label_config'].replace('24', '30')}
+        self.assertEqual(build_dataset([canonical], [task], inventory, config30)['excluded'][0]['reasons'],
+                         ['verified_cfr30_video_required'])
+        proof = {'transform':'cfr30','frame_rate':30,'frame_count':90,'duration_seconds':3,
+                 'source_duration_seconds':3,'grid_error_seconds':0,'video_start_seconds':0,
+                 'time_mapping':{'scale':1,'offset_seconds':0,'max_error_seconds':1/30},
+                 'source_sha256':'video','sha256':'derived'}
+        canonical['meta']['video_presentation'] = task['meta']['video_presentation'] = proof
+        migrated = build_dataset([canonical], [task], inventory, config30)['records'][0]
+        self.assertEqual(migrated['annotation_frame_rate'], 30)
+        self.assertEqual(next(a['sha256'] for a in migrated['artifacts'] if a['artifact_type'] == 'video'), 'video')
         task['data']['dog_id'] = 'other-dog'
         with self.assertRaisesRegex(ValueError, 'identity mismatch'):
             build_dataset([canonical], [task], inventory, project)
