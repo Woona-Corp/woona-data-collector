@@ -109,6 +109,7 @@ jobs:
             android/app/build/reports/tests/
             android/app/build/reports/androidTests/
             android/app/build/outputs/androidTest-results/
+            android/app/build/outputs/managed_device_android_test_additional_output/
             android/app/build/reports/lint-results-debug.*
             android/app/build/outputs/apk/debug/
             android/app/build/outputs/apk/androidTest/debug/
@@ -133,6 +134,7 @@ jobs:
           (cd android && ./gradlew assembleRelease --no-daemon --console=plain)
           certs="$("$ANDROID_SDK_ROOT/build-tools/36.1.0/apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk)"
           grep -Fq 'cf308a3b4d025e871bf30225ce1d1c3499f0fcd9d557f8a8ac5f5c414b381fa2' <<< "$certs"
+          test "$(stat -c %s android/app/build/outputs/apk/release/app-release.apk)" -le 23276117
           cp android/app/build/outputs/apk/release/app-release.apk release-assets/Woona-Android-release.apk
           (cd release-assets && sha256sum *.apk > SHA256SUMS-android.txt)
       - name: Prepare debug APK
@@ -297,6 +299,11 @@ jobs:
             --expected-source-id "$WOONA_SOURCE_ID" --expected-image-digest "$image_id"
       - name: Test server and API
         run: |
+          python3 --version
+          ffmpeg -version
+          ffprobe -version
+          sha256sum "$(command -v ffmpeg)" "$(command -v ffprobe)"
+          python3 -m unittest -v server.tests.test_video_normalization
           mkdir -p ../test-run/ci-storage
           chmod 777 ../test-run/ci-storage
           docker compose -p woona-ci up -d --no-build --wait
@@ -305,7 +312,18 @@ jobs:
             --no-cache-dir --index-url https://pypi.org/simple --require-hashes --only-binary=:all: \
             -r /app/server/requirements-test.lock
           docker compose -p woona-ci exec -T api python -m pip check
-          docker compose -p woona-ci exec -T api python -m unittest discover -v -s server/tests
+          docker compose -p woona-ci exec -T api python -c '
+          import sys, unittest
+          print("Mandatory host media ran above; image excludes only test_video_normalization")
+          def image_cases(suite):
+              for case in suite:
+                  if isinstance(case, unittest.TestSuite):
+                      yield from image_cases(case)
+                  elif case.__class__.__module__ != "test_video_normalization":
+                      yield case
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(image_cases(unittest.defaultTestLoader.discover("server/tests"))))
+          sys.exit(not result.wasSuccessful())
+          '
       - name: Retain candidate provenance metadata
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
