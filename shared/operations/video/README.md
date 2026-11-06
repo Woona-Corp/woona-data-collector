@@ -86,6 +86,8 @@ registry publication failure before replacement leaves the previous reference an
 bytes intact. Successful publication flushes affected directories. Per-recording
 successes/failures are not a batch transaction. Retain old derivatives, originals,
 registry and migration journal; this change grants no cleanup authority.
+Existing tasks retain previous derivative URLs after regeneration and fail closed on a new URL.
+Switching them needs a separately reviewed provenance-checked transition, not arbitrary URL acceptance.
 
 The rational unit tests do not prove real Label Studio Django/PostgreSQL transaction
 or recovery behavior. Before any future apply/rollback require a pinned isolated

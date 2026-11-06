@@ -207,44 +207,49 @@ def normalize_one(root, row, registry, *, threads=3, preset='ultrafast', crf=18)
                 '-c:a', 'copy', '-t', str(target_duration), '-avoid_negative_ts', 'disabled',
                 '-metadata:s:v:0', 'rotate=0', '-movflags', '+faststart', str(pending)]
     started = time.monotonic()
-    subprocess.run(command, check=True, timeout=3600)
-    out_metadata, out_video, out_duration, out_start = probe(pending)
-    out_audio = [s for s in out_metadata['streams'] if s['codec_type'] == 'audio']
-    if len(out_audio) != len(audio) or any(
-            original['codec_name'] != converted['codec_name']
-            or abs(float(original.get('start_time', 0)) - float(converted.get('start_time', 0))) > .001
-            for original, converted in zip(audio, out_audio)):
-        raise ValueError('Audio streams or initial timing changed')
-    grid = packet_grid(pending, out_video)
-    if (not grid['cfr30'] or grid['frames'] != frames or abs(out_start) > 1e-6
-            or abs(out_duration - target_duration) > 1e-4
-            or not -1e-4 <= out_duration - duration <= 1 / FPS + 1e-4):
-        raise ValueError('CFR output failed complete timestamp/duration verification')
-    # Packet inspection does not decode H.264. The encode itself decoded the complete source;
-    # a separate full decode validates the finalized output before registry admission.
-    subprocess.run(['nice', '-n', '15', 'ffmpeg', '-v', 'error', '-xerror', '-threads', str(threads),
-                    '-i', str(pending), '-map', '0:v:0', '-fps_mode', 'passthrough', '-f', 'null', '-'], check=True, timeout=3600)
-    if sha256(source) != row['sha256']:
-        raise ValueError('Source changed during normalization')
-    item = dict(source_artifact_id=str(row['id']), source_sha256=row['sha256'],
-                source_relative_path=row['server_relative_path'],
-                relative_path=output.relative_to(root).as_posix(), sha256=sha256(pending),
-                size_bytes=pending.stat().st_size, transform='cfr30', frame_rate=FPS,
-                frame_count=frames, source_duration_seconds=duration, duration_seconds=out_duration,
-                time_mapping={'scale': 1, 'offset_seconds': 0, 'max_error_seconds': sampling_error},
-                grid_error_seconds=grid['grid_error_seconds'], source_rotation_override=rotation,
-                video_start_seconds=out_start, audio_streams=len(audio),
-                discarded_empty_audio_streams=sum(s['codec_type'] == 'audio' for s in metadata['streams']) - len(audio),
-                encoder=encoder_recipe(preset, crf),
-                verified_at_utc=datetime.now(timezone.utc).isoformat(),
-                processing_seconds=time.monotonic()-started)
-    with pending.open('rb') as stream:
-        os.fsync(stream.fileno())
-    os.link(pending, output)  # Never overwrite bytes referenced by an active registry.
-    pending.unlink()
-    fsync_directory(output.parent)
-    progress.unlink(missing_ok=True)
-    return item
+    try:
+        subprocess.run(command, check=True, timeout=3600)
+        out_metadata, out_video, out_duration, out_start = probe(pending)
+        out_audio = [s for s in out_metadata['streams'] if s['codec_type'] == 'audio']
+        if len(out_audio) != len(audio) or any(
+                original['codec_name'] != converted['codec_name']
+                or abs(float(original.get('start_time', 0)) - float(converted.get('start_time', 0))) > .001
+                for original, converted in zip(audio, out_audio)):
+            raise ValueError('Audio streams or initial timing changed')
+        grid = packet_grid(pending, out_video)
+        if (not grid['cfr30'] or grid['frames'] != frames or abs(out_start) > 1e-6
+                or abs(out_duration - target_duration) > 1e-4
+                or not -1e-4 <= out_duration - duration <= 1 / FPS + 1e-4):
+            raise ValueError('CFR output failed complete timestamp/duration verification')
+        # Packet inspection does not decode H.264. The encode itself decoded the complete source;
+        # a separate full decode validates the finalized output before registry admission.
+        subprocess.run(['nice', '-n', '15', 'ffmpeg', '-v', 'error', '-xerror', '-threads', str(threads),
+                        '-i', str(pending), '-map', '0:v:0', '-fps_mode', 'passthrough', '-f', 'null', '-'], check=True, timeout=3600)
+        if sha256(source) != row['sha256']:
+            raise ValueError('Source changed during normalization')
+        item = dict(source_artifact_id=str(row['id']), source_sha256=row['sha256'],
+                    source_relative_path=row['server_relative_path'],
+                    relative_path=output.relative_to(root).as_posix(), sha256=sha256(pending),
+                    size_bytes=pending.stat().st_size, transform='cfr30', frame_rate=FPS,
+                    frame_count=frames, source_duration_seconds=duration, duration_seconds=out_duration,
+                    time_mapping={'scale': 1, 'offset_seconds': 0, 'max_error_seconds': sampling_error},
+                    grid_error_seconds=grid['grid_error_seconds'], source_rotation_override=rotation,
+                    video_start_seconds=out_start, audio_streams=len(audio),
+                    discarded_empty_audio_streams=sum(s['codec_type'] == 'audio' for s in metadata['streams']) - len(audio),
+                    encoder=encoder_recipe(preset, crf),
+                    verified_at_utc=datetime.now(timezone.utc).isoformat(),
+                    processing_seconds=time.monotonic()-started)
+        with pending.open('rb') as stream:
+            os.fsync(stream.fileno())
+        os.link(pending, output)  # Never overwrite bytes referenced by an active registry.
+        pending.unlink()
+        fsync_directory(output.parent)
+        return item
+    finally:
+        try:
+            pending.unlink(missing_ok=True)
+        finally:
+            progress.unlink(missing_ok=True)
 
 
 def prepare(root, rows, registry_path, *, threads=3, preset='ultrafast', crf=18):
@@ -267,8 +272,6 @@ def prepare(root, rows, registry_path, *, threads=3, preset='ultrafast', crf=18)
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 failed.append(row['recording_id'])
                 print(json.dumps({'recording_id': row['recording_id'], 'error': str(error)}), flush=True)
-                for suffix in ('.pending.mp4', '.pending.progress'):
-                    (Path(root) / 'derived' / 'cfr30' / (str(uuid.UUID(row['recording_id'])) + suffix)).unlink(missing_ok=True)
                 continue
             registry['entries'][str(row['recording_id'])] = item
             atomic_json(registry_path, registry)

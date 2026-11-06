@@ -158,3 +158,33 @@ class NormalizationSafetyTest(unittest.TestCase):
             self.assertNotEqual(changed['relative_path'], item['relative_path'])
             self.assertEqual(sha256(root/changed['relative_path']), changed['sha256'])
             self.assertGreaterEqual(fsync.call_count, 4)
+
+    def test_encoder_failure_cleans_only_this_uuid_pending_and_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            row = self.source(root, 'regular')
+            registry_path = root/'derived/video-presentations.json'
+            registry = prepare(root, [row], registry_path, threads=1)
+            old = root/registry['entries'][row['recording_id']]['relative_path']
+            siblings = [old.parent/(row['recording_id']+suffix) for suffix in ('.pending.mp4', '.pending.progress')]
+            for path in siblings:
+                path.write_bytes(b'unrelated prior pending sentinel')
+            preserved = {p: p.read_bytes() for p in [root/'source.mp4', old, registry_path, *siblings]}
+            owned = []
+            real_run = subprocess.run
+            def encoder_failure(command, *args, **kwargs):
+                if '-progress' in command:
+                    owned.extend([Path(command[-1]), Path(command[command.index('-progress')+1])])
+                    for path in owned:
+                        path.write_bytes(b'this invocation created before encoder failure')
+                    print(json.dumps({'fixture': 'fps30-followup02-uuid-owner-v1', 'owned': [p.name for p in owned]}))
+                    raise subprocess.CalledProcessError(1, command)
+                return real_run(command, *args, **kwargs)
+            with patch('server.video_normalization.subprocess.run', side_effect=encoder_failure):
+                with self.assertRaisesRegex(ValueError, '1 recordings'):
+                    prepare(root, [row], registry_path, threads=1, crf=19)
+            self.assertEqual(len(owned), 2)
+            self.assertTrue(owned[0].name.startswith(row['recording_id']+'-'))
+            self.assertFalse(any(path.exists() for path in owned), 'Only actual UUID-owned pending files must be removed')
+            for path, content in preserved.items():
+                self.assertEqual(path.read_bytes(), content, str(path))
