@@ -1446,9 +1446,9 @@ final class AppViewModel: ObservableObject {
                 let currentRaw = await packetProcessor.currentRawFile()
                 let currentLog = await packetProcessor.currentLogFile()
                 let snapshot = try snapshotExportArtifacts(
-                    packetFile: saved == nil ? currentPacket : saved?.files.first { $0.url.lastPathComponent == "packets.bin" }?.url,
-                    rawFile: saved == nil ? currentRaw : saved?.files.first { $0.url.lastPathComponent == "raw_fragments.binlog" }?.url,
-                    logFile: saved == nil ? currentLog : saved?.files.first { $0.url.lastPathComponent == "diagnostics.log" }?.url
+                    packetFile: kind == .packetDump || kind == .channelCsv ? (saved == nil ? currentPacket : saved?.files.first { $0.url.lastPathComponent == "packets.bin" }?.url) : nil,
+                    rawFile: kind == .rawFragments ? (saved == nil ? currentRaw : saved?.files.first { $0.url.lastPathComponent == "raw_fragments.binlog" }?.url) : nil,
+                    logFile: kind == .diagnosticLog ? (saved == nil ? currentLog : saved?.files.first { $0.url.lastPathComponent == "diagnostics.log" }?.url) : nil
                 )
                 preparedExportSnapshotDirectory = snapshot.directory
 
@@ -2400,12 +2400,17 @@ final class AppViewModel: ObservableObject {
             .appendingPathComponent("WoonaExport-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        return ExportArtifactSnapshot(
-            directory: directory,
-            packetFile: try copyExportArtifact(packetFile, to: directory, fileManager: fileManager),
-            rawFile: try copyExportArtifact(rawFile, to: directory, fileManager: fileManager),
-            logFile: try copyExportArtifact(logFile, to: directory, fileManager: fileManager)
-        )
+        do {
+            return ExportArtifactSnapshot(
+                directory: directory,
+                packetFile: try copyExportArtifact(packetFile, to: directory, fileManager: fileManager),
+                rawFile: try copyExportArtifact(rawFile, to: directory, fileManager: fileManager),
+                logFile: try copyExportArtifact(logFile, to: directory, fileManager: fileManager)
+            )
+        } catch {
+            try? fileManager.removeItem(at: directory)
+            throw error
+        }
     }
 
     private func copyExportArtifact(_ source: URL?, to directory: URL, fileManager: FileManager) throws -> URL? {
