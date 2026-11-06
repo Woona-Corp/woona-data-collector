@@ -2753,6 +2753,69 @@ final class WoonaDataTests: XCTestCase {
     }
 
     @MainActor
+    func testCurrentCaptureSnapshotFlushesAndDoesNotFollowLaterWrites() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root.appendingPathComponent("store"))
+        let profile = try store.saveProfile(completeDog())
+        let recording = try store.createRecording(profile: profile, source: "replay", questionnaire: completeSession())
+        let manager = ExportSnapshotFileManager(root: root.appendingPathComponent("snapshots"))
+        let model = AppViewModel(store: store, uiTesting: true, exportFileManager: manager)
+        try await awaitHistoryForTesting(model)
+        model.installActiveCaptureForTesting(recording, startedMonotonicNs: HostClock.nowNanoseconds())
+        await model.beginCaptureDiagnosticsForTesting()
+        let first = makeTestPacket(counter: 101, timerMillis: 50, measurementCount: 1,
+            blocks: [makeSensorBlock(sensorType: 2, channelSamples: [[10, 20]])])
+        let second = makeTestPacket(counter: 102, timerMillis: 60, measurementCount: 1,
+            blocks: [makeSensorBlock(sensorType: 2, channelSamples: [[30, 40]])])
+        model.submitPacketFragmentForTesting(first)
+        // Wait for actor admission, not a writer flush: this small packet remains buffered.
+        for _ in 0..<600 {
+            if await model.currentPacketFileForTesting() != nil { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        model.prepareExport(.packetDump)
+        await waitForSessionExport(model)
+        guard let output = model.preparedExport?.urls.first else {
+            await model.finishCaptureProcessingForTesting()
+            XCTFail(model.errorMessage ?? "No current-capture snapshot")
+            return
+        }
+        let frozenBytes = try? Data(contentsOf: output)
+        model.submitPacketFragmentForTesting(second)
+        await model.finishCaptureProcessingForTesting()
+        let frozen = try XCTUnwrap(frozenBytes)
+        XCTAssertEqual(frozen, Data(first), "Export must flush accepted bytes before copying")
+        XCTAssertEqual(try Data(contentsOf: output), frozen, "Later writes must not mutate the share snapshot")
+        let currentURL = await model.currentPacketFileForTesting()
+        let current = try XCTUnwrap(currentURL)
+        XCTAssertEqual(try Data(contentsOf: current), Data(first + second))
+        recordSnapshotEvidence("current-capture-flush", manager: manager)
+        XCTAssertEqual(manager.successes, 1)
+        model.clearPreparedExport()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        let stillOpen = await model.hasOpenOutputFilesForTesting()
+        XCTAssertFalse(stillOpen, "Fixture must explicitly drain/close its writers")
+    }
+
+    @MainActor
+    func testSnapshotDirectoryCreationFailureDoesNotRemoveUnownedPaths() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let blocker = root.appendingPathComponent("not-a-directory")
+        let bytes = Data("unowned-file".utf8)
+        try bytes.write(to: blocker)
+        let manager = ExportSnapshotFileManager(root: blocker)
+        let model = AppViewModel(store: nil, uiTesting: true, exportFileManager: manager)
+        XCTAssertThrowsError(try model.snapshotExportArtifacts(packetFile: nil, rawFile: nil, logFile: nil))
+        XCTAssertTrue(manager.created.isEmpty)
+        XCTAssertTrue(manager.attempts.isEmpty)
+        XCTAssertTrue(manager.removed.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: blocker), bytes)
+    }
+
+    @MainActor
     private func waitForSessionExport(_ model: AppViewModel) async {
         for _ in 0..<600 where model.preparedExport == nil && model.exportPhase != nil {
             try? await Task.sleep(nanoseconds: 50_000_000)
