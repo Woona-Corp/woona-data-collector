@@ -180,7 +180,26 @@ class DirectoryImportApiTest(unittest.TestCase):
                 {'id': uuid.UUID(plan['recordingId'])}).scalar_one(), 0)
         verify_directory_plan(plan)
 
-    def test_conflicting_temporary_copy_is_preserved_without_publication(self):
+    def test_interrupted_copy_rolls_back_then_exact_plan_imports_idempotently(self):
+        from server.app import engine, STORAGE_ROOT
+        import errno
+        plan = inspect_directory(self.source, self.review)
+        before = {p.name: p.read_bytes() for p in self.source.iterdir()}
+        def full_disk(source, output, length):
+            output.write(source.read(1))
+            raise OSError(errno.ENOSPC, 'synthetic full disk')
+        with patch('server.archive_import.shutil.copyfileobj', side_effect=full_disk):
+            with self.assertRaises(OSError):
+                apply_plan(engine, STORAGE_ROOT, plan)
+        with engine.connect() as c:
+            self.assertEqual(c.execute(text('SELECT count(*) FROM recordings WHERE id=:id'),
+                {'id': uuid.UUID(plan['recordingId'])}).scalar_one(), 0)
+        self.assertEqual(apply_plan(engine, STORAGE_ROOT, plan)['state'], 'imported')
+        self.assertEqual(apply_plan(engine, STORAGE_ROOT, plan)['state'], 'already_imported')
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.source.iterdir()})
+        verify_directory_plan(plan)
+
+    def test_conflicting_temporary_copy_is_preserved_with_independent_retry(self):
         from server.app import engine, STORAGE_ROOT
         plan = inspect_directory(self.source, self.review)
         target = (STORAGE_ROOT / 'recordings' / plan['dogId'] / '2026-10-05'
@@ -188,11 +207,11 @@ class DirectoryImportApiTest(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_suffix(target.suffix + '.import-part')
         partial.write_bytes(b'preserve conflicting bytes')
-        with self.assertRaisesRegex(ValueError, 'copy failed integrity'):
-            apply_plan(engine, STORAGE_ROOT, plan)
+        self.assertEqual(apply_plan(engine, STORAGE_ROOT, plan)['state'], 'imported')
+        self.assertEqual(apply_plan(engine, STORAGE_ROOT, plan)['state'], 'already_imported')
         self.assertEqual(partial.read_bytes(), b'preserve conflicting bytes')
-        self.assertFalse(target.exists())
+        self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), plan['artifacts'][0]['sha256'])
         with engine.connect() as c:
             self.assertEqual(c.execute(text('SELECT count(*) FROM recordings WHERE id=:id'),
-                {'id': uuid.UUID(plan['recordingId'])}).scalar_one(), 0)
+                {'id': uuid.UUID(plan['recordingId'])}).scalar_one(), 1)
         verify_directory_plan(plan)

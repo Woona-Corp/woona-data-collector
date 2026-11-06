@@ -9,7 +9,9 @@ import logging
 import math
 import os
 import time
+import threading
 from collections import defaultdict
+from typing import Any, Callable
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
@@ -101,7 +103,62 @@ def app_tasks(database_url: str) -> list[dict]:
     return result
 
 
-def request_json(method: str, path: str, payload=None):
+# One optional-deadline read may own network I/O in this process, including after
+# its caller has timed out. Do not release this gate from the waiting caller:
+# urllib cannot cancel DNS/header/body reads reliably. Legacy sync calls stay
+# synchronous and do not participate in this dashboard-only capacity limit.
+_deadline_request_gate = threading.Lock()
+
+
+def request_json(method: str, path: str, payload=None, *, timeout: float = 60,
+                 maximum_bytes: int | None = None, deadline: float | None = None,
+                 consume_bytes: Callable[[int], None] | None = None) -> Any:
+    if deadline is None:
+        return _request_json(method, path, payload, timeout=timeout,
+                             maximum_bytes=maximum_bytes, consume_bytes=consume_bytes)
+    # Optional deadlines are for dashboard reads only: an abandoned worker must
+    # never perform a provider mutation after the caller has returned.
+    if method != 'GET' or payload is not None:
+        raise ValueError('Label Studio optional deadlines support GET reads only')
+    if time.monotonic() >= deadline:
+        raise RuntimeError('Label Studio whole-refresh deadline exhausted')
+    if not _deadline_request_gate.acquire(blocking=False):
+        raise RuntimeError('Label Studio deadline read is already in progress')
+    done = threading.Event()
+    result = []
+    errors = []
+
+    def read():
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('Label Studio whole-refresh deadline exhausted')
+            result.append(_request_json(method, path, payload, timeout=min(timeout, remaining),
+                                        maximum_bytes=maximum_bytes, deadline=deadline,
+                                        consume_bytes=consume_bytes))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            # The I/O context has actually closed before capacity is reusable.
+            _deadline_request_gate.release()
+            done.set()
+
+    worker = threading.Thread(target=read, name='label-studio-deadline', daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        _deadline_request_gate.release()
+        raise
+    if not done.wait(max(0.0, deadline - time.monotonic())) or time.monotonic() >= deadline:
+        raise RuntimeError('Label Studio whole-refresh deadline exhausted')
+    if errors:
+        raise errors[0]
+    return result[0]
+
+
+def _request_json(method: str, path: str, payload=None, *, timeout: float = 60,
+                  maximum_bytes: int | None = None, deadline: float | None = None,
+                  consume_bytes: Callable[[int], None] | None = None) -> Any:
     base = os.environ["LABEL_STUDIO_URL"].rstrip("/")
     data = json.dumps(payload).encode() if payload is not None else None
     request = Request(base + path, data=data, method=method, headers={
@@ -109,8 +166,25 @@ def request_json(method: str, path: str, payload=None):
         "Authorization": "Token " + os.environ["LABEL_STUDIO_API_TOKEN"],
         "Content-Type": "application/json",
     })
-    with urlopen(request, timeout=60) as response:
-        body = response.read()
+    with urlopen(request, timeout=timeout) as response:
+        if deadline is None:
+            body = response.read() if maximum_bytes is None else response.read(maximum_bytes + 1)
+            if consume_bytes is not None:
+                consume_bytes(len(body))
+        else:
+            body = bytearray()
+            while maximum_bytes is None or len(body) <= maximum_bytes:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Label Studio whole-refresh deadline exhausted')
+                limit = 64 * 1024 if maximum_bytes is None else min(64 * 1024, maximum_bytes + 1 - len(body))
+                chunk = response.read1(limit)
+                if not chunk:
+                    break
+                if consume_bytes is not None:
+                    consume_bytes(len(chunk))
+                body.extend(chunk)
+        if maximum_bytes is not None and len(body) > maximum_bytes:
+            raise RuntimeError('Label Studio response exceeds the dashboard budget')
         return json.loads(body) if body else None
 
 
@@ -216,9 +290,11 @@ def managed_task_patch(candidate: dict, current: dict) -> dict | None:
     return {'data': data, 'meta': meta}
 
 
-def active_project() -> dict:
+def active_project(*, fetch=None) -> dict:
     """Use the user's project and read its labels; never create/reconfigure it."""
-    project = request_json("GET", f'/api/projects/{int(os.environ.get("LABEL_PROJECT_ID", "21"))}/')
+    project = (fetch or request_json)("GET", f'/api/projects/{int(os.environ.get("LABEL_PROJECT_ID", "21"))}/')
+    if not isinstance(project, dict) or not isinstance(project.get('label_config'), str):
+        raise ValueError('Invalid Label Studio project response')
     root = ElementTree.fromstring(project["label_config"])
     timelines = root.findall(".//TimelineLabels")
     videos = root.findall(".//Video")

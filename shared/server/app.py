@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import errno
 import json
@@ -52,6 +53,9 @@ DEVICE_LABEL = os.getenv("WOONA_DEVICE_LABEL", "Local device")
 DEBUG_TOKEN = os.getenv("WOONA_DEBUG_TOKEN", LOCAL_ONLY_TOKEN)
 ALLOW_LEGACY_MIGRATION = os.getenv("WOONA_ALLOW_LEGACY_MIGRATION", "false").lower() == "true"
 MAX_CHUNK_BYTES = 16 * 1024 * 1024
+# Per-process cap includes reading, queued workers and durable writes (64 MiB
+# chunk payload maximum). Fail fast rather than retaining unbounded bodies.
+upload_slots = threading.BoundedSemaphore(4)
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 100 * 1024 * 1024 * 1024
 ARTIFACT_RULES = {
@@ -1262,32 +1266,35 @@ async def patch_artifact(
     length = int(content_length)
     if length < 1 or length > MAX_CHUNK_BYTES:
         raise HTTPException(413, detail={"code": "chunk_size_invalid"})
-    body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > MAX_CHUNK_BYTES:
-            raise HTTPException(413, detail={"code": "chunk_too_large"})
-    if len(body) != length:
-        raise HTTPException(400, detail={"code": "content_length_mismatch"})
-    # Keep the lock, transaction, reconciliation, fsync and commit on ONE worker.
-    # No acknowledgement may escape before that entire durable section finishes.
-    request_id = getattr(request.state, "request_id", "")
-    log_event(
-        "chunk_received",
-        level=logging.DEBUG,
-        requestId=request_id,
-        artifactId=str(artifact_id),
-        uploadOffset=upload_offset,
-        bytes=length,
-    )
-    return await run_in_threadpool(
-        persist_artifact_chunk,
-        artifact_id,
-        device_id,
-        upload_offset,
-        body,
-        request_id,
-    )
+    if not upload_slots.acquire(blocking=False):
+        raise HTTPException(503, detail={"code": "upload_busy"}, headers={"Retry-After": "1"})
+    worker = None
+    try:
+        body = bytearray()
+        async for chunk in request.stream():
+            # Check before copying, including a dishonest Content-Length.
+            if len(body) + len(chunk) > MAX_CHUNK_BYTES:
+                raise HTTPException(413, detail={"code": "chunk_too_large"})
+            body.extend(chunk)
+        if len(body) != length:
+            raise HTTPException(400, detail={"code": "content_length_mismatch"})
+        # Keep the whole durable transaction on ONE worker. A disconnected or
+        # cancelled caller must not free admission while its write still runs.
+        request_id = getattr(request.state, "request_id", "")
+        log_event("chunk_received", level=logging.DEBUG, requestId=request_id,
+                  artifactId=str(artifact_id), uploadOffset=upload_offset, bytes=length)
+        worker = asyncio.create_task(run_in_threadpool(
+            persist_artifact_chunk, artifact_id, device_id, upload_offset, body, request_id))
+        def finished(task):
+            upload_slots.release()
+            # Retrieve an exception even if the HTTP caller has gone away.
+            if not task.cancelled():
+                task.exception()
+        worker.add_done_callback(finished)
+        return await asyncio.shield(worker)
+    finally:
+        if worker is None:
+            upload_slots.release()
 
 
 STORAGE_FAILURE_CODES = frozenset({"storage_full", "storage_unavailable", "storage_space_low"})
