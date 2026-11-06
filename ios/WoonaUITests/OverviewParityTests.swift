@@ -57,11 +57,30 @@ final class OverviewParityTests: XCTestCase {
         XCUIDevice.shared.orientation = .landscapeRight
         XCTAssertTrue(app.buttons["server.save"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "Landscape actions must remain reachable with the software keyboard open")
+        let editorApp: XCUIApplication = app
+        let stableActions = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let window = editorApp.frame
+            let keyboard = editorApp.keyboards.firstMatch.frame
+            let save = editorApp.buttons["server.save"]
+            let cancel = editorApp.buttons["server.cancel"]
+            return window.width > window.height && keyboard.width > keyboard.height &&
+                save.isHittable && cancel.isHittable &&
+                window.contains(save.frame) && window.contains(cancel.frame) &&
+                save.frame.maxY <= keyboard.minY && cancel.frame.maxY <= keyboard.minY
+        }, object: nil)
+        let stableResult = XCTWaiter.wait(for: [stableActions], timeout: 10)
+        // App-cropped screenshots during rotation can be clipped/black. Preserve
+        // the actual device frame and native hierarchy, not only click success.
+        attachScreen("ServerEditor-Landscape-Keyboard-Draft", fullDevice: true)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "ServerEditor-Landscape-Keyboard-NativeBounds"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        XCTAssertEqual(stableResult, .completed, "Both actions must be fully on-screen above the real landscape keyboard")
         XCTAssertTrue(app.buttons["server.save"].isHittable)
         XCTAssertTrue(app.buttons["server.cancel"].isHittable)
         XCTAssertGreaterThan(app.buttons["server.save"].frame.height, 20)
         XCTAssertEqual(url.value as? String, "not-a-valid-server-url")
-        attachScreen("ServerEditor-Landscape-Keyboard-Draft")
         // Validation is local: malformed URL cannot persist or initiate requests.
         app.buttons["server.save"].tap()
         XCTAssertTrue(app.navigationBars["Server connection"].exists)
@@ -449,8 +468,8 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.buttons["chart.fullscreen.open"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.segmentedControls.buttons["Channel 2"].isSelected)
     }
-    private func attachScreen(_ name: String) {
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
+    private func attachScreen(_ name: String, fullDevice: Bool = false) {
+        let screenshot = XCTAttachment(screenshot: fullDevice ? XCUIDevice.shared.screenshot() : app.screenshot())
         screenshot.name = name
         screenshot.lifetime = .keepAlways
         add(screenshot)
