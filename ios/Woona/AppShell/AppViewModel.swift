@@ -380,11 +380,14 @@ final class AppViewModel: ObservableObject {
     private let questionnaireClientFactory: ((String?) throws -> WoonaServerClient)?
     private let syncClientFactory: ((String?) throws -> WoonaServerClient)?
     private let serverTokenWriter: ((String) throws -> Void)?
+    private let exportFileManager: FileManager
 
     init(store: WoonaStore? = try? WoonaStore(), uiTesting: Bool = false,
          questionnaireClientFactory: ((String?) throws -> WoonaServerClient)? = nil,
          syncClientFactory: ((String?) throws -> WoonaServerClient)? = nil,
-         serverTokenWriter: ((String) throws -> Void)? = nil) {
+         serverTokenWriter: ((String) throws -> Void)? = nil,
+         exportFileManager: FileManager = .default) {
+        self.exportFileManager = exportFileManager
         self.questionnaireClientFactory = questionnaireClientFactory
         self.syncClientFactory = syncClientFactory
         self.serverTokenWriter = serverTokenWriter
@@ -2391,8 +2394,8 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func snapshotExportArtifacts(packetFile: URL?, rawFile: URL?, logFile: URL?) throws -> ExportArtifactSnapshot {
-        let fileManager = FileManager.default
+    func snapshotExportArtifacts(packetFile: URL?, rawFile: URL?, logFile: URL?) throws -> ExportArtifactSnapshot {
+        let fileManager = exportFileManager
         let directory = fileManager.temporaryDirectory
             .appendingPathComponent("WoonaExport-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -2496,7 +2499,7 @@ final class AppViewModel: ObservableObject {
     }
 }
 
-private struct ExportArtifactSnapshot {
+struct ExportArtifactSnapshot {
     let directory: URL
     let packetFile: URL?
     let rawFile: URL?
