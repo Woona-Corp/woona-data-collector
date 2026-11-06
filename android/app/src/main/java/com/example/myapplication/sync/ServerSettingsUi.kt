@@ -1,5 +1,9 @@
 package com.example.myapplication.sync
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,6 +21,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogWindowProvider
+import android.view.WindowManager
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -31,28 +40,39 @@ fun ServerSettingsDialog(
     onDisconnect: (() -> Unit)? = null,
     canSave: Boolean = true,
     canDisconnect: Boolean = true,
+    draft: ServerConnectionDraft = remember(current.baseUrl) { ServerConnectionDraft(current.baseUrl) },
 ) {
-    var baseUrl by remember(current.baseUrl) { mutableStateOf(current.baseUrl) }
-    var token by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmingDisconnect by remember { mutableStateOf(false) }
-    Dialog(onDismissRequest = onDismiss) {
-        Surface {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(decorFitsSystemWindows = true)) {
+        val view = LocalView.current
+        DisposableEffect(view) {
+            (view.parent as? DialogWindowProvider)?.window?.apply {
+                setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+            }
+            onDispose {}
+        }
+        Surface(modifier = Modifier.fillMaxSize()) {
             Column(
                 modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                Column(
+                    modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
                 Text(if (language == AppLanguage.RUSSIAN) "Подключение сервера" else "Server connection")
                 OutlinedTextField(
-                    value = baseUrl,
-                    onValueChange = { baseUrl = it },
+                    value = draft.baseUrl,
+                    onValueChange = { draft.baseUrl = it },
                     label = { Text("Server URL") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
-                    value = token,
-                    onValueChange = { token = it },
+                    value = draft.token,
+                    onValueChange = { draft.token = it },
                     label = {
                         Text(
                             if (language == AppLanguage.RUSSIAN) {
@@ -72,21 +92,24 @@ fun ServerSettingsDialog(
                 if (current.isConfigured && onDisconnect != null) TextButton(onClick = { confirmingDisconnect = true }, enabled = canDisconnect) {
                     Text(if (language == AppLanguage.RUSSIAN) "Отключить сервер и удалить токен" else "Disconnect server and remove token")
                 }
+                }
+                // Actions stay outside the focused field's scroll/bring-into-view
+                // region, so IME focus cannot immediately scroll them away again.
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
+                    TextButton(onClick = onDismiss, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
                         Text(if (language == AppLanguage.RUSSIAN) "Отмена" else "Cancel")
                     }
                     Button(
                         enabled = canSave,
                         onClick = {
                             error = runCatching {
-                                require(token.isNotBlank()) {
+                                require(draft.token.isNotBlank()) {
                                     if (language == AppLanguage.RUSSIAN) "Введите токен" else "Enter token"
                                 }
-                                onSave(baseUrl, token)
-                            }.exceptionOrNull()?.toString()
+                                onSave(draft.baseUrl, draft.token)
+                            }.exceptionOrNull()?.let { it.message ?: it.toString() }
                         },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     ) {
                         Text(if (language == AppLanguage.RUSSIAN) "Сохранить" else "Save")
                     }

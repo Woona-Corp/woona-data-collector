@@ -8,6 +8,12 @@ import org.junit.Test
 
 class PacketAssemblerTest {
     @Test
+    fun completedPacket_isFramingOnlyWithoutDiscardedDecodedSamples() {
+        assertTrue("Only validation owns decoded samples",
+            CompletedPacket::class.java.declaredFields.none { it.name == "sensorBlocks" })
+    }
+
+    @Test
     fun append_emitsPacketWhenWholePacketArrives() {
         val assembler = PacketAssembler()
         val packet = testPacket(counter = 7)
@@ -18,7 +24,6 @@ class PacketAssemblerTest {
         val completed = packets.single() as PacketAssemblyResult.Completed
         assertArrayEquals(packet, completed.packet.bytes)
         assertEquals(7L, completed.packet.counter)
-        assertTrue(completed.packet.sensorBlocks.isEmpty())
     }
 
     @Test
@@ -84,7 +89,7 @@ class PacketAssemblerTest {
     }
 
     @Test
-    fun append_parsesSensorBlocksIntoCompletedPacket() {
+    fun append_preservesSensorBlockBytesForValidation() {
         val assembler = PacketAssembler()
         val packet = testPacket(
             counter = 12,
@@ -102,7 +107,9 @@ class PacketAssemblerTest {
 
         val completedPacket = (assembler.append(packet).single() as PacketAssemblyResult.Completed).packet
 
-        assertEquals(listOf(30f, 40f), completedPacket.channelSamples(sensorType = 2, channel = 2))
+        assertArrayEquals(packet, completedPacket.bytes)
+        val validated = PacketValidator().validate(completedPacket.bytes) as PacketValidationResult.Accepted
+        assertEquals(listOf(30f, 40f), validated.packet.channelSamples(sensorType = 2, channel = 2))
     }
 
     @Test

@@ -55,6 +55,8 @@ android {
 
     buildTypes {
         release {
+            // Local debug convenience properties must never become distributed credentials.
+            buildConfigField("String", "WOONA_SERVER_TOKEN", "\"\"")
             isMinifyEnabled = false
             if (hasAndroidSigningConfig) {
                 signingConfig = signingConfigs.getByName("release")

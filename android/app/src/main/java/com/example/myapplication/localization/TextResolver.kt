@@ -14,7 +14,7 @@ object EnglishTextResolver : TextResolver {
         vararg formatArgs: Any,
     ): String {
         val template = when (resId) {
-            R.string.permissions_required -> "Permissions are required!"
+            R.string.permissions_required -> "Bluetooth permission is required to find and connect to sensors. Allow Nearby devices in Android Settings, then retry the search."
             R.string.replay_file_empty -> "Replay file is empty"
             R.string.replay_file_invalid -> "Replay file is not a valid packet dump"
             R.string.replay_interrupted -> "Replay interrupted"

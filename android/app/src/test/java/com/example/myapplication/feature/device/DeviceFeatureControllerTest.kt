@@ -18,6 +18,17 @@ import java.io.File
 import java.util.zip.ZipFile
 
 class DeviceFeatureControllerTest {
+    @Test fun successfulRestoreClearsOnlyItsObsoleteFailure() {
+        val controller = createController()
+        controller.showRestoreErrorOnMainThread("Restore failed", java.io.IOException("503"))
+        controller.clearResolvedRestoreError()
+        assertEquals(null, controller.uiState.errorMessage)
+        controller.showRestoreErrorOnMainThread("Restore failed", java.io.IOException("503"))
+        controller.showErrorOnMainThread("Camera failed")
+        controller.clearResolvedRestoreError()
+        assertEquals("Camera failed", controller.uiState.errorMessage)
+    }
+
     @Test
     fun busyDeviceIsNotDisconnectedWhenAppGoesIntoBackground() {
         val ble = FakeBleSessionController()

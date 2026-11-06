@@ -10,6 +10,59 @@ class BleSessionCsvExporterTest {
     )
 
     @Test
+    fun timelineReader_distinguishesCleanEofFromEveryTruncatedRecord() {
+        val directory = Files.createTempDirectory("timeline-eof").toFile()
+        try {
+            val file = directory.resolve("timeline.bin")
+            file.writeBytes("BLETIME1".toByteArray())
+            BlePacketTimelineReader(file).use { assertEquals(null, it.next()) }
+            for (size in 1..43) {
+                file.writeBytes("BLETIME1".toByteArray() + ByteArray(size))
+                org.junit.Assert.assertThrows("partial bytes=$size", java.io.EOFException::class.java) {
+                    BlePacketTimelineReader(file).use { it.next() }
+                }
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test fun export_rejectsTimelineEndingAtWholeRowBoundary() = rejectTimeline(rows = 1)
+    @Test fun export_rejectsHeaderOnlyTimeline() = rejectTimeline(rows = 0)
+    @Test fun export_rejectsOneByteFinalRow() = rejectTimeline(rows = 1, tail = 1)
+    @Test fun export_rejects43ByteFinalRow() = rejectTimeline(rows = 1, tail = 43)
+    @Test fun export_rejectsExtraTimelineRow() = rejectTimeline(rows = 3)
+    @Test fun export_rejectsExtraPartialTimelineRow() = rejectTimeline(rows = 2, tail = 1)
+    @Test fun export_rejectsMissingSuppliedTimeline() = rejectTimeline(rows = -1)
+    @Test fun export_rejectsMismatchedTimelineCounter() = rejectTimeline(rows = 2, counterOffset = 1)
+    @Test fun export_rejectsMismatchedTimelinePacketLength() = rejectTimeline(rows = 2, byteOffset = 1)
+
+    private fun rejectTimeline(rows: Int, tail: Int = 0, counterOffset: Int = 0, byteOffset: Int = 0) {
+        val directory = Files.createTempDirectory("timeline-cardinality").toFile()
+        try {
+            val bytes = (0..1).map { index -> packet(index + 9, index + 50,
+                listOf(sensorBlock(2, listOf(listOf(10))))) }
+            val packets = directory.resolve("packets.bin").apply { writeBytes(bytes[0] + bytes[1]) }
+            val timeline = directory.resolve("packet_timeline.bin")
+            if (rows >= 0) {
+                java.io.DataOutputStream(timeline.outputStream()).use { output ->
+                    output.writeBytes("BLETIME1")
+                    repeat(rows) { index ->
+                        output.writeLong(index.toLong())
+                        output.writeLong((index + 9 + counterOffset).toLong())
+                        output.writeLong((index + 50).toLong())
+                        output.writeLong(2000)
+                        output.writeLong(9000000000)
+                        output.writeInt(bytes[0].size + byteOffset)
+                    }
+                    output.write(ByteArray(tail))
+                }
+            }
+            org.junit.Assert.assertThrows(Exception::class.java) {
+                exporter.export(packets, 1000, directory.resolve("channel.csv"), timeline)
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
     fun export_writesTimeColumnAndOneColumnPerChannel() {
         val directory = Files.createTempDirectory("ble-session-csv").toFile()
         val packetFile = directory.resolve("capture.bin").apply {

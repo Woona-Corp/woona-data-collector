@@ -667,6 +667,10 @@ class DeviceUiStateHolder {
         uiState = uiState.copy(errorMessage = message)
     }
 
+    fun clearErrorIfMatches(expected: String) {
+        if (uiState.errorMessage == expected) uiState = uiState.copy(errorMessage = null)
+    }
+
     fun showExportProgress(phase: ExportPhase) {
         uiState = uiState.copy(exportPhase = phase)
     }

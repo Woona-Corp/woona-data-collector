@@ -38,8 +38,14 @@ data class HeartQuestionnaire(
             if (referenceBpm == null || !referenceBpm.isFinite() || referenceBpm <= 0) errors["referenceBpm"] = "Введите положительную ЧСС"
             if (runCatching { Instant.parse(referenceMeasuredAtUtc) }.isFailure) errors["referenceMeasuredAtUtc"] = "Введите время UTC, например 2026-10-05T12:00:00Z"
         }
-        listOf(knownHeartConditionDetails, heartRelevantMedicationDetails, referenceArtifact).forEach {
-            if (it != null && it.length > 2000) errors["details"] = "Максимум 2000 символов"
+        // Validate only details serialized for the selected answer. Retain inactive
+        // draft text so changing an answer back does not discard the operator's work.
+        val activeDetails = linkedMapOf<String, String?>()
+        if (answers["knownHeartCondition"] == "yes") activeDetails["knownHeartConditionDetails"] = knownHeartConditionDetails
+        if (answers["heartRelevantMedication"] == "yes") activeDetails["heartRelevantMedicationDetails"] = heartRelevantMedicationDetails
+        if (answers["referenceMethod"] in setOf("ecg", "polar_rr")) activeDetails["referenceArtifact"] = referenceArtifact
+        activeDetails.forEach { (key, value) ->
+            if (value != null && value.length > 2000) errors[key] = "Максимум 2000 символов"
         }
         return QuestionnaireValidation(errors)
     }

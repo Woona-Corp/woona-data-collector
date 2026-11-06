@@ -141,6 +141,13 @@ class MainActivity : ComponentActivity() {
     private var retirementNetworkError: String? = null
     private var isServerRestoreInProgress = false
     private var isServerSettingsVisible by mutableStateOf(false)
+    private val serverSettingsDraft by lazy {
+        androidx.lifecycle.ViewModelProvider(this)[com.example.myapplication.sync.ServerSettingsDraftViewModel::class.java]
+    }
+    private fun dismissServerSettings() {
+        serverSettingsDraft.dismiss()
+        isServerSettingsVisible = false
+    }
     private var isDogQuestionnaireVisible by mutableStateOf(false)
     private var editingProfile by mutableStateOf<DogProfile?>(null)
     private var isSessionQuestionnaireVisible by mutableStateOf(false)
@@ -665,7 +672,8 @@ class MainActivity : ComponentActivity() {
                         ServerSettingsDialog(
                             current = serverSettingsStore.get(),
                             language = selectedLanguage,
-                            onDismiss = { isServerSettingsVisible = false },
+                            draft = serverSettingsDraft.open(serverSettingsStore.get().baseUrl),
+                            onDismiss = ::dismissServerSettings,
                             onDisconnect = ::disconnectServer,
                             canSave = serverSyncState.mutationsAllowed,
                             canDisconnect = serverSyncState.connectionEditorAllowed,
@@ -681,7 +689,7 @@ class MainActivity : ComponentActivity() {
                                     wifiOnly = serverSettingsStore.get().wifiOnly,
                                 )
                                 } finally { serverOperationLock.unlock() }
-                                isServerSettingsVisible = false
+                                dismissServerSettings()
                                 woonaDatabase.resetFailedSync()
                                 refreshServerState()
                                 ServerSyncScheduler.enqueuePending(applicationContext)
@@ -1179,7 +1187,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         accountBusy = true
-        isServerSettingsVisible = false
+        dismissServerSettings()
         serverSyncState = serverSyncState.copy(operationMessage = if (selectedLanguage == AppLanguage.RUSSIAN) "Отключаем сервер и останавливаем передачи. Локальные данные сохраняются." else "Disconnecting server and stopping transfers. Local data is preserved.")
         refreshServerState()
         backgroundExecutor.execute {
@@ -1361,6 +1369,7 @@ class MainActivity : ComponentActivity() {
                 refreshServerState()
                 outcome.fold(
                     onSuccess = { (result, warnings) ->
+                        deviceFeatureController.clearResolvedRestoreError()
                         serverSyncState = serverSyncState.copy(operationMessage = com.example.myapplication.sync.restoreWarningsText(warnings, selectedLanguage)
                             ?: if (selectedLanguage == AppLanguage.RUSSIAN) "Восстановление завершено. Серверные удаления проверены." else "Restore completed. Server retirements were checked.")
                         toast(
@@ -1375,7 +1384,7 @@ class MainActivity : ComponentActivity() {
                     },
                     onFailure = { error ->
                         Log.e("SERVER_RESTORE", "Restore failed", error)
-                        deviceFeatureController.showErrorOnMainThread(
+                        deviceFeatureController.showRestoreErrorOnMainThread(
                             if (selectedLanguage == AppLanguage.RUSSIAN) {
                                 "Не удалось восстановить данные"
                             } else {

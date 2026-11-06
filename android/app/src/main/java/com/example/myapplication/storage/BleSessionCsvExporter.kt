@@ -60,17 +60,17 @@ class BleSessionCsvExporter(
         BufferedWriter(FileWriter(targetFile, false), BUFFER_SIZE_BYTES).use { writer ->
             writeHeader(writer, orderedColumns)
             previousSampleTimerMillis = null
-            packetTimelineFile?.takeIf(File::isFile)
-                ?.let(::BlePacketTimelineReader)
+            packetTimelineFile?.let(::BlePacketTimelineReader)
                 .use { timeline ->
                     packetFileParser.forEachPacket(packetFile) { packetBytes ->
                         when (val validation = packetValidator.validate(packetBytes)) {
                             is PacketValidationResult.Accepted -> {
                                 val timelineEntry = timeline?.next()
                                 require(
-                                    timelineEntry == null ||
+                                    timeline == null || timelineEntry != null &&
                                         timelineEntry.counter == validation.packet.counter &&
-                                        timelineEntry.deviceTimerMillis == validation.packet.timerMillis,
+                                        timelineEntry.deviceTimerMillis == validation.packet.timerMillis &&
+                                        timelineEntry.packetBytes == packetBytes.size,
                                 ) { "Packet timeline does not match packet dump" }
                                 val packetRows = buildRows(
                                     sensorBlocks = validation.packet.sensorBlocks,
@@ -118,6 +118,7 @@ class BleSessionCsvExporter(
                             }
                         }
                     }
+                    require(timeline?.next() == null) { "Packet timeline has extra rows" }
                 }
         }
         return targetFile

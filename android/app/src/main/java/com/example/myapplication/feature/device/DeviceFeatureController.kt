@@ -1105,6 +1105,23 @@ class DeviceFeatureController(
         }
     }
 
+    private var restoreError: String? = null
+
+    fun showRestoreErrorOnMainThread(message: String, throwable: Throwable) {
+        runOnUiThread {
+            val rendered = "$message: $throwable"
+            restoreError = rendered
+            uiStateHolder.showError(rendered)
+        }
+    }
+
+    fun clearResolvedRestoreError() {
+        runOnUiThread {
+            restoreError?.let(uiStateHolder::clearErrorIfMatches)
+            restoreError = null
+        }
+    }
+
     fun showErrorOnMainThread(message: String, throwable: Throwable? = null) {
         runOnUiThread {
             uiStateHolder.showError(if (throwable == null) message else "$message: $throwable")
@@ -1789,7 +1806,7 @@ class DeviceFeatureController(
     private fun monotonicMillis(): Long = monotonicNanosProvider() / 1_000_000L
 
     companion object {
-        const val PERMISSION_REQUIRED_MESSAGE = "Permissions are required!"
+        const val PERMISSION_REQUIRED_MESSAGE = "Bluetooth permission is required to find and connect to sensors. Allow Nearby devices in Android Settings, then retry the search."
         private val FINALIZATION_EXECUTOR = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "capture-finalization").apply { isDaemon = true }
         }

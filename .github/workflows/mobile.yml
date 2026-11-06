@@ -93,6 +93,7 @@ jobs:
           ANDROID_INSTRUMENTATION: ${{ inputs.android_instrumentation }}
         run: |
           python3 android/tools/test_setup_android_sdk.py
+          python3 android/tools/test_backup_policy.py
           if [[ "$ANDROID_INSTRUMENTATION" == 'true' ]]; then
             ./android/tools/check.sh full
           else
