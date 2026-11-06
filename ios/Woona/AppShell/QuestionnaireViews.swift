@@ -825,9 +825,15 @@ struct HeartQuestionnaireEditor: View {
                 Text(q("Опишите состояние собаки и условия записи. Анкета не ставит диагноз и не изменяет карточку собаки. Заполните все обязательные вопросы; если ответ неизвестен, выберите «Неизвестно»."))
                 Section(q("1. Сведения о сердце и препаратах")) {
                     choice("1.1. Диагностировал ли ветеринар заболевание сердца или нарушение ритма? *", "knownHeartCondition", $draft.knownHeartCondition)
-                    if draft.knownHeartCondition?.key == "yes" { TextField(q("Какой диагноз? (необязательно)"), text: optional(\.knownHeartConditionDetails)) }
+                    if draft.knownHeartCondition?.key == "yes" {
+                        TextField(q("Какой диагноз? (необязательно)"), text: optional(\.knownHeartConditionDetails))
+                        fieldError("knownHeartConditionDetails")
+                    }
                     choice("1.2. Принимала ли собака препараты, которые могут повлиять на частоту сердечных сокращений (ЧСС)? *", "heartRelevantMedication", $draft.heartRelevantMedication)
-                    if draft.heartRelevantMedication?.key == "yes" { TextField(q("Название препарата и время последнего приёма (необязательно)"), text: optional(\.heartRelevantMedicationDetails)) }
+                    if draft.heartRelevantMedication?.key == "yes" {
+                        TextField(q("Название препарата и время последнего приёма (необязательно)"), text: optional(\.heartRelevantMedicationDetails))
+                        fieldError("heartRelevantMedicationDetails")
+                    }
                     Text(q("Если оператор не знает, не нужно оценивать препарат самостоятельно — выберите «Неизвестно»."))
                 }
                 Section(q("2. Условия записи")) {
@@ -846,6 +852,7 @@ struct HeartQuestionnaireEditor: View {
                     choice("3.1. Есть ли независимое измерение сердцебиения за тот же период? *", "referenceMethod", $draft.referenceMethod)
                     if ["ecg", "polar_rr"].contains(draft.referenceMethod?.key ?? "") {
                         TextField(q("Файл или идентификатор контрольной записи и её временная привязка *"), text: optional(\.referenceArtifact), axis: .vertical)
+                        fieldError("referenceArtifact")
                     }
                     if draft.referenceMethod?.key == "bpm_only" {
                         TextField(q("Измеренная ЧСС, уд/мин *"), text: $bpm).keyboardType(.decimalPad)
@@ -853,7 +860,7 @@ struct HeartQuestionnaireEditor: View {
                     }
                     Text(q("Файл ЭКГ или интервалы с временными метками нужны для проверки отдельных ударов. Одиночное значение ЧСС подходит только для сравнения среднего темпа. По ответам анкеты нельзя делать заключение об аритмии."))
                 }
-                ForEach(errors.keys.sorted(), id: \.self) { key in Text(questionnaireValidationError(errors[key]!, language: language)).foregroundStyle(.red) }
+                ForEach(errors.keys.sorted().filter { !["knownHeartConditionDetails", "heartRelevantMedicationDetails", "referenceArtifact"].contains($0) }, id: \.self) { key in Text(questionnaireValidationError(errors[key]!, language: language)).foregroundStyle(.red) }
             }
             .navigationTitle(q("Анкета по активности и сердцебиению"))
             .toolbar {
@@ -869,6 +876,13 @@ struct HeartQuestionnaireEditor: View {
             }
             .disabled(saveState.isSaving)
             .interactiveDismissDisabled(saveState.isSaving)
+        }
+    }
+    @ViewBuilder
+    private func fieldError(_ key: String) -> some View {
+        if let error = errors[key] {
+            Text(questionnaireValidationError(error, language: language)).foregroundStyle(.red)
+                .accessibilityIdentifier("heart.error." + key)
         }
     }
     private func choice(_ title: String, _ key: String, _ binding: Binding<HeartAnswer?>) -> some View {

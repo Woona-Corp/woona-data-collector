@@ -92,7 +92,7 @@ class SessionArchiveExporter(
         // Declare the exact ZIP member name so every manifest name resolves to a
         // real entry regardless of case or characters replaced by sanitization.
         val fileEntries = files.joinToString(separator = ",\n") { file ->
-            "    {\"name\":\"${jsonEscape(sanitizeZipEntryName(file.name))}\",\"size\":${file.length()}}"
+            "    {\"name\":${CompleteArchiveExporter.json(sanitizeZipEntryName(file.name))},\"size\":${file.length()}}"
         }
         val manifest = buildString {
             append("{\n")
@@ -103,7 +103,7 @@ class SessionArchiveExporter(
             append("  \"profile\": ")
             append(
                 metadata?.let {
-                    "{\"id\":\"${jsonEscape(it.profileId)}\",\"numberOrName\":\"${jsonEscape(it.profileName)}\"," +
+                    "{\"id\":${CompleteArchiveExporter.json(it.profileId)},\"numberOrName\":${CompleteArchiveExporter.json(it.profileName)}," +
                         "\"questionnaire\":${it.profileQuestionnaireJson ?: "null"}}"
                 } ?: "null",
             )
@@ -111,9 +111,9 @@ class SessionArchiveExporter(
             append("  \"recording\": ")
             append(
                 metadata?.let {
-                    "{\"id\":\"${jsonEscape(it.recordingId)}\",\"source\":\"${jsonEscape(it.source)}\"," +
-                        "\"status\":\"${jsonEscape(it.status)}\",\"sessionLabel\":\"${jsonEscape(it.sessionLabel.orEmpty())}\"," +
-                        "\"timezone\":\"${jsonEscape(it.timezone)}\"," +
+                    "{\"id\":${CompleteArchiveExporter.json(it.recordingId)},\"source\":${CompleteArchiveExporter.json(it.source)}," +
+                        "\"status\":${CompleteArchiveExporter.json(it.status)},\"sessionLabel\":${CompleteArchiveExporter.json(it.sessionLabel.orEmpty())}," +
+                        "\"timezone\":${CompleteArchiveExporter.json(it.timezone)}," +
                         "\"questionnaire\":${it.questionnaireJson ?: "null"}}"
                 } ?: "null",
             )
@@ -178,21 +178,6 @@ class SessionArchiveExporter(
             .replace('\\', '_')
             .replace('/', '_')
             .ifBlank { "session_file" }
-    }
-
-    private fun jsonEscape(value: String): String {
-        return buildString {
-            value.forEach { char ->
-                when (char) {
-                    '\\' -> append("\\\\")
-                    '"' -> append("\\\"")
-                    '\n' -> append("\\n")
-                    '\r' -> append("\\r")
-                    '\t' -> append("\\t")
-                    else -> append(char)
-                }
-            }
-        }
     }
 
     private companion object {

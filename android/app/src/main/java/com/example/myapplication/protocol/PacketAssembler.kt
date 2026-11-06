@@ -3,21 +3,7 @@ package com.example.myapplication.protocol
 data class CompletedPacket(
     val bytes: ByteArray,
     val counter: Long,
-    val sensorBlocks: List<SensorBlock>,
-) {
-    fun channelSamples(
-        sensorType: Int,
-        channel: Int,
-    ): List<Float> {
-        if (channel <= 0) return emptyList()
-
-        return sensorBlocks
-            .asSequence()
-            .filter { it.sensorType == sensorType && channel <= it.channelSamples.size }
-            .flatMap { it.channelSamples[channel - 1].asSequence() }
-            .toList()
-    }
-}
+)
 
 data class PacketOverlapDiagnostic(
     val currentCounter: Long?,
@@ -154,7 +140,6 @@ class PacketAssembler(
                 packet = CompletedPacket(
                     bytes = packetBytes,
                     counter = decodeCounter(packetBytes),
-                    sensorBlocks = sensorBlockParser.parse(packetBytes),
                 ),
             )
             shiftLeft(expectedLength)

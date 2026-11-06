@@ -33,8 +33,8 @@ android {
         applicationId = "com.woona.drivetest"
         minSdk = 31
         targetSdk = 36
-        versionCode = 17
-        versionName = "1.5.4"
+        versionCode = 18
+        versionName = "1.5.5"
 
         buildConfigField("String", "WOONA_SERVER_BASE_URL", woonaServerBaseUrl.get().asBuildConfigString())
         buildConfigField("String", "WOONA_SERVER_TOKEN", woonaServerToken.get().asBuildConfigString())
@@ -55,6 +55,8 @@ android {
 
     buildTypes {
         release {
+            // Local debug convenience properties must never become distributed credentials.
+            buildConfigField("String", "WOONA_SERVER_TOKEN", "\"\"")
             isMinifyEnabled = false
             if (hasAndroidSigningConfig) {
                 signingConfig = signingConfigs.getByName("release")

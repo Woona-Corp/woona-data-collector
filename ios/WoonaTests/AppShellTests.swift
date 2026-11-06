@@ -7,6 +7,30 @@ import SwiftUI
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    func testServerConnectionDraftLivesInAppMemoryAcrossViewRecreationAndClearsOnDismissal() {
+        let model = AppViewModel(store: nil, uiTesting: true)
+        model.serverBaseURL = "https://saved.example"
+        model.beginServerConnectionEditing()
+        model.serverConnectionDraft.baseURL = "https://unsaved.example"
+        model.serverConnectionDraft.token = "synthetic-memory-only-token"
+        // SwiftUI can reconstruct either View; neither owns the sensitive draft.
+        _ = SettingsView().environmentObject(model)
+        _ = SettingsView().environmentObject(model)
+        model.beginServerConnectionEditing()
+        XCTAssertTrue(model.serverConnectionDraft.isPresented)
+        XCTAssertEqual(model.serverConnectionDraft.baseURL, "https://unsaved.example")
+        XCTAssertEqual(model.serverConnectionDraft.token, "synthetic-memory-only-token")
+        XCTAssertEqual(model.serverBaseURL, "https://saved.example")
+        XCTAssertEqual(model.serverToken, "")
+        let freshProcessOwner = AppViewModel(store: nil, uiTesting: true)
+        XCTAssertEqual(freshProcessOwner.serverConnectionDraft.token, "")
+        XCTAssertFalse(freshProcessOwner.serverConnectionDraft.isPresented)
+        model.serverConnectionDraft = ServerConnectionDraft() // sheet onDismiss: Cancel/swipe/success
+        model.beginServerConnectionEditing()
+        XCTAssertEqual(model.serverConnectionDraft.baseURL, "https://saved.example")
+        XCTAssertEqual(model.serverConnectionDraft.token, "")
+    }
+
     func testSheetPresentationUsesEnglishWithoutChangingCanonicalQuestionnaireData() throws {
         var dog = DogQuestionnaire()
         dog.schemaVersion = 2; dog.animalId = "presentation-fixture"
@@ -602,6 +626,80 @@ final class AppShellTests: XCTestCase {
             model.refreshRecordingHistory()
             try await waitUntil("retirement fixture queue release") { !model.isHistoryLoading && model.canChangeAccount }
         }
+    }
+
+    func testFinalizationRetryRetainsFirstStopTimingAndValidatedVideoOnlyForItsRecording() async throws {
+        let originalSelection = heartPromptSelectionPreferences()
+        defer { restoreHeartPromptSelectionPreferences(originalSelection) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try makeHeartPromptProfile(store, name: "stop-retry")
+        let model = AppViewModel(store: store, uiTesting: true)
+        defer { cleanupHeartPromptFixture(root, model: model) }
+        try await waitUntil("stop retry fixture startup") { !model.isHistoryLoading }
+        let info = CameraCaptureInfo(requestedMonotonicNs: 1, writerStartedMonotonicNs: 2,
+            firstFrameMonotonicNs: 3, firstFrameCameraTimestampNs: 3, firstFrameCallbackMonotonicNs: 4,
+            firstVideoSamplePtsUs: 0, timestampSource: "fixture", clockQuality: "fixture",
+            width: 1920, height: 1080, frameRate: 30, durationNs: 10_000_000_000)
+        let stoppedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        var clockReads = 0
+        model.captureStopClockForTesting = {
+            clockReads += 1
+            // A retry 30 seconds later must not extend the 10-second acquisition.
+            return (stoppedAt.addingTimeInterval(Double(clockReads - 1) * 30), UInt64(11 + (clockReads - 1) * 30) * 1_000_000_000)
+        }
+        var stops = 0
+        model.cameraStopForTesting = {
+            stops += 1
+            return stops == 1 ? info : nil // an idle recorder on retry has no completion
+        }
+        var answers = SessionQuestionnaire()
+        answers.schemaVersion = 2; answers.videoRequested = true
+        answers.sessionLabel = "Stop retry fixture"; answers.plannedActivities = ["Покой"]
+        let recording = try store.createRecording(profile: profile, source: "live", questionnaire: answers)
+        model.installActiveCaptureForTesting(recording, startedMonotonicNs: 1_000_000_000)
+        let directory = store.directory(for: recording)
+        let bytes = Data("synthetic-validated-completion-policy-fixture".utf8)
+        // Inject only the validated Stop result, not playable-media verification.
+        try bytes.write(to: directory.appendingPathComponent("video.pending.mp4"))
+        try executeHeartPromptSQL(root, "CREATE TRIGGER fail_stop_finalization BEFORE UPDATE OF status ON recordings WHEN NEW.status IN ('completed','failed','interrupted') BEGIN SELECT RAISE(ABORT, 'Injected stop finalization failure'); END")
+        model.stopActiveCapture()
+        await model.waitForCaptureStopForTesting()
+        XCTAssertTrue(model.errorMessage?.contains("Injected stop finalization failure") == true)
+        XCTAssertEqual(model.activeRecording?.id, recording.id)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("video.mp4")), bytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("video.pending.mp4").path))
+        XCTAssertFalse(try store.artifacts(recordingID: recording.id).contains { $0.type == "video" }, "The failed transaction must not have committed artifact metadata")
+        try executeHeartPromptSQL(root, "DROP TRIGGER fail_stop_finalization")
+        model.enterBackground() // same retry funnel as Stop/disconnect
+        await model.waitForCaptureStopForTesting()
+        try await waitForHeartPromptLocalIdle(model)
+        XCTAssertEqual(stops, 1, "Finalization retry must not replace validated completion with an idle Stop result")
+        XCTAssertEqual(clockReads, 1, "Finalization retry must reuse the first frozen acquisition end")
+        let finalized = try XCTUnwrap(store.recording(id: recording.id))
+        XCTAssertEqual(finalized.endedAtUTC, WoonaStore.iso8601(stoppedAt))
+        XCTAssertEqual(try XCTUnwrap(finalized.questionnaire?.durationMinutes), 10.0 / 60, accuracy: 0.000001)
+        let videoArtifacts = try store.artifacts(recordingID: recording.id).filter { $0.type == "video" }
+        XCTAssertEqual(videoArtifacts.count, 1)
+        let video = try XCTUnwrap(videoArtifacts.first)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("video.mp4")), bytes)
+        XCTAssertEqual(video.sha256, try WoonaStore.sha256File(directory.appendingPathComponent("video.mp4")))
+        let sync = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("sync.json"))) as? [String: Any])
+        XCTAssertEqual((sync["videoFirstFrameMonotonicNs"] as? NSNumber)?.uint64Value, info.firstFrameMonotonicNs)
+
+        // A different recording cannot inherit the old validated result, even if
+        // an arbitrary file already has the canonical name in its directory.
+        let next = try store.createRecording(profile: profile, source: "live", questionnaire: answers)
+        model.installActiveCaptureForTesting(next, startedMonotonicNs: 1_000_000_000)
+        let nextVideo = store.directory(for: next).appendingPathComponent("video.mp4")
+        try Data("unvalidated-existing-canonical".utf8).write(to: nextVideo)
+        model.stopActiveCapture()
+        await model.waitForCaptureStopForTesting()
+        try await waitForHeartPromptLocalIdle(model)
+        XCTAssertEqual(stops, 2)
+        XCTAssertEqual(clockReads, 2)
+        XCTAssertFalse(try store.artifacts(recordingID: next.id).contains { $0.type == "video" })
+        XCTAssertEqual(try Data(contentsOf: nextVideo), Data("unvalidated-existing-canonical".utf8))
     }
 
     func testHeartPromptWaitsForDurableFinalizationAndFailedWriteCanBeRetried() async throws {

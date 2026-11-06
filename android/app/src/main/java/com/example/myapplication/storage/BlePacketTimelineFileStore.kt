@@ -3,7 +3,6 @@ package com.example.myapplication.storage
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.io.DataInputStream
-import java.io.EOFException
 import java.io.File
 import java.io.FileOutputStream
 
@@ -97,17 +96,21 @@ class BlePacketTimelineReader(file: File) : AutoCloseable {
         }
     }
 
-    fun next(): PacketTimelineEntry? = try {
-        PacketTimelineEntry(
-            sequence = input.readLong(),
+    fun next(): PacketTimelineEntry? {
+        // Only EOF before the first byte is a clean end. Every remaining field
+        // must be present; DataInputStream propagates EOFException for torn rows.
+        val firstByte = input.read()
+        if (firstByte < 0) return null
+        var sequence = firstByte.toLong()
+        repeat(7) { sequence = (sequence shl 8) or input.readUnsignedByte().toLong() }
+        return PacketTimelineEntry(
+            sequence = sequence,
             counter = input.readLong(),
             deviceTimerMillis = input.readLong(),
             hostWallClockMillis = input.readLong(),
             hostMonotonicNs = input.readLong(),
             packetBytes = input.readInt(),
         )
-    } catch (_: EOFException) {
-        null
     }
 
     override fun close() = input.close()

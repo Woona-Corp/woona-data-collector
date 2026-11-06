@@ -44,8 +44,34 @@ enum CameraRecorderError: LocalizedError {
     }
 }
 
+// Admission is independent of Task cancellation: AVFoundation permission callbacks may
+// resume after Stop. The lock covers only the generation snapshot, never AVFoundation
+// calls. Already-admitted mutations run on the serial camera queue; Stop drains that
+// queue before completion, so invalidation never blocks the main actor on camera work.
+final class CameraGenerationFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+
+    @discardableResult
+    func advance() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        generation &+= 1
+        return generation
+    }
+
+    func withCurrent<T>(_ token: UInt64, _ operation: () throws -> T) throws -> T {
+        lock.lock()
+        let admitted = token == generation
+        lock.unlock()
+        guard admitted else { throw CancellationError() }
+        return try operation()
+    }
+}
+
 final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
-    var onRecordingFailure: (@Sendable (String) -> Void)?
+    var onRecordingFailure: (@Sendable (UInt64, String) -> Void)?
+    let generationFence = CameraGenerationFence()
+    private var writerGeneration: UInt64 = 0
     let session = AVCaptureSession()
     lazy var previewLayer: AVCaptureVideoPreviewLayer = {
         let layer = AVCaptureVideoPreviewLayer(session: session)
@@ -75,18 +101,40 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private var writerFailure: CameraRecorderError?
     private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
 
-    func prepare() async throws {
+    private let permissionCheck: () async throws -> Void
+    private let prepareSessionOverride: (() throws -> Void)?
+    private let afterPreparation: (() async -> Void)?
+
+    init(permissionCheck: @escaping () async throws -> Void = CameraRecorder.authorize,
+         prepareSession: (() throws -> Void)? = nil,
+         afterPreparation: (() async -> Void)? = nil) {
+        self.permissionCheck = permissionCheck
+        self.prepareSessionOverride = prepareSession
+        self.afterPreparation = afterPreparation
+        super.init()
+    }
+
+    static func authorize() async throws {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: break
         case .notDetermined:
             guard await AVCaptureDevice.requestAccess(for: .video) else { throw CameraRecorderError.permissionDenied }
         default: throw CameraRecorderError.permissionDenied
         }
+    }
+
+    func prepare(generation: UInt64) async throws {
+        try await permissionCheck()
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
-                    try self.configureIfNeeded()
-                    if !self.session.isRunning { self.session.startRunning() }
+                    try self.generationFence.withCurrent(generation) {
+                        if let override = self.prepareSessionOverride { try override() }
+                        else {
+                            try self.configureIfNeeded()
+                            if !self.session.isRunning { self.session.startRunning() }
+                        }
+                    }
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)
@@ -95,42 +143,49 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
     }
 
-    func startRecording(to url: URL) async throws -> UInt64 {
-        try await prepare()
+    func startRecording(to url: URL, generation: UInt64) async throws -> UInt64 {
+        try await prepare(generation: generation)
+        if let afterPreparation { await afterPreparation() }
         return try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
-                    try? FileManager.default.removeItem(at: url)
-                    let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
-                    let input = AVAssetWriterInput(
-                        mediaType: .video,
-                        outputSettings: [
-                            AVVideoCodecKey: AVVideoCodecType.h264,
-                            AVVideoWidthKey: self.width,
-                            AVVideoHeightKey: self.height,
-                        ]
-                    )
-                    input.expectsMediaDataInRealTime = true
-                    let angle = self.rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 0
-                    input.transform = CGAffineTransform(rotationAngle: angle * .pi / 180)
-                    guard writer.canAdd(input) else { throw CameraRecorderError.cannotConfigure }
-                    writer.add(input)
-                    self.writer = writer
-                    self.writerInput = input
-                    self.outputURL = url
-                    self.requestedMonotonicNs = HostClock.nowNanoseconds()
-                    self.writerStartedMonotonicNs = nil
-                    self.firstFrameMonotonicNs = nil
-                    self.firstFrameCameraTimestampNs = nil
-                    self.firstFrameCallbackMonotonicNs = nil
-                    self.firstVideoSamplePtsUs = nil
-                    self.firstPresentationTime = nil
-                    self.lastPresentationTime = nil
-                    self.timestampSource = "unknown"
-                    self.clockQuality = "unavailable"
-                    self.writerFailure = nil
-                    self.isRecording = true
-                    continuation.resume(returning: self.requestedMonotonicNs)
+                    let requested = try self.generationFence.withCurrent(generation) {
+                        guard self.writer == nil else { throw CameraRecorderError.writer("Previous writer is still active") }
+                        // A fresh recording directory owns this pending path. Never remove
+                        // historical canonical output or failed bytes from an earlier attempt.
+                        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+                        let input = AVAssetWriterInput(
+                            mediaType: .video,
+                            outputSettings: [
+                                AVVideoCodecKey: AVVideoCodecType.h264,
+                                AVVideoWidthKey: self.width,
+                                AVVideoHeightKey: self.height,
+                            ]
+                        )
+                        input.expectsMediaDataInRealTime = true
+                        let angle = self.rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 0
+                        input.transform = CGAffineTransform(rotationAngle: angle * .pi / 180)
+                        guard writer.canAdd(input) else { throw CameraRecorderError.cannotConfigure }
+                        writer.add(input)
+                        self.writer = writer
+                        self.writerInput = input
+                        self.outputURL = url
+                        self.requestedMonotonicNs = HostClock.nowNanoseconds()
+                        self.writerStartedMonotonicNs = nil
+                        self.firstFrameMonotonicNs = nil
+                        self.firstFrameCameraTimestampNs = nil
+                        self.firstFrameCallbackMonotonicNs = nil
+                        self.firstVideoSamplePtsUs = nil
+                        self.firstPresentationTime = nil
+                        self.lastPresentationTime = nil
+                        self.timestampSource = "unknown"
+                        self.clockQuality = "unavailable"
+                        self.writerFailure = nil
+                        self.writerGeneration = generation
+                        self.isRecording = true
+                        return self.requestedMonotonicNs
+                    }
+                    continuation.resume(returning: requested)
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -139,7 +194,8 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     }
 
     func stopRecording() async throws -> CameraCaptureInfo? {
-        try await withCheckedThrowingContinuation { continuation in
+        generationFence.advance()
+        return try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 guard self.isRecording else {
                     if let writerFailure = self.writerFailure {
@@ -214,7 +270,18 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
     }
 
+    // The info must come from successful stopRecording media validation. Failed
+    // pending bytes stay in the recording directory for complete-data export,
+    // but are never canonical artifacts or discovered by upload.
+    static func promoteCompletedVideo(in directory: URL, info: CameraCaptureInfo?) throws -> URL? {
+        guard info != nil else { return nil }
+        let canonical = directory.appendingPathComponent("video.mp4")
+        try FileManager.default.moveItem(at: directory.appendingPathComponent("video.pending.mp4"), to: canonical)
+        return canonical
+    }
+
     func stopPreview() {
+        generationFence.advance()
         queue.async { if self.session.isRunning { self.session.stopRunning() } }
     }
 
@@ -244,7 +311,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
                 let message = writer.error?.localizedDescription ?? "Video writer failed to start"
                 writerFailure = .writer(message)
                 isRecording = false
-                onRecordingFailure?(message)
+                onRecordingFailure?(writerGeneration, message)
                 return
             }
             writer.startSession(atSourceTime: presentationTime)
@@ -255,7 +322,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             let message = writer.error?.localizedDescription ?? "Video writer rejected a frame"
             writerFailure = .writer(message)
             isRecording = false
-            onRecordingFailure?(message)
+            onRecordingFailure?(writerGeneration, message)
             return
         }
         if firstPresentationTime == nil {

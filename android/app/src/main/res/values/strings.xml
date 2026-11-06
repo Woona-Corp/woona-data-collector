@@ -127,7 +127,7 @@
     <string name="action_send_raw">SEND RAW</string>
     <string name="action_send_log">SEND LOG</string>
 
-    <string name="permissions_required">Permissions are required!</string>
+    <string name="permissions_required">Bluetooth permission is required to find and connect to sensors. Allow Nearby devices in Android Settings, then retry the search.</string>
     <string name="unable_read_bin_file">Failed to read BIN file</string>
     <string name="unable_load_bin_file">Failed to load BIN file</string>
     <string name="replay_file_empty">Replay file is empty</string>

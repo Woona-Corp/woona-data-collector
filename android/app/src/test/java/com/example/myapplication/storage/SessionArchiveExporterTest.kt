@@ -10,6 +10,54 @@ import java.util.zip.ZipFile
 
 class SessionArchiveExporterTest {
     @Test
+    fun export_manifestStrictlyRoundTripsEveryJsonControlCharacter() {
+        val directory = java.nio.file.Files.createTempDirectory("archive-controls").toFile()
+        try {
+            val text = (0..31).map(Int::toChar).joinToString("") + "\"\\/Rex"
+            val source = File(directory, "packets.bin").apply { writeBytes(byteArrayOf(1)) }
+            val archive = SessionArchiveExporter { "controls" }.export(
+                listOf(source), directory, null, 2000,
+                SessionArchiveMetadata(text, text, text, text, text, text, null, null, null, text),
+            )
+            val manifest = ZipFile(archive).use { zip ->
+                zip.getInputStream(zip.getEntry("manifest.json")).bufferedReader().readText()
+            }
+            // A strict JSON string lexer: raw controls are forbidden and all escapes must be valid.
+            val strings = mutableListOf<String>()
+            var index = 0
+            while (index < manifest.length) {
+                if (manifest[index++] != '"') continue
+                val decoded = StringBuilder()
+                while (true) {
+                    val c = manifest[index++]
+                    require(c.code >= 32) { "Unescaped JSON control U+%04X".format(c.code) }
+                    if (c == '"') break
+                    if (c != '\\') decoded.append(c) else {
+                        when (val escaped = manifest[index++]) {
+                            '"', '\\', '/' -> decoded.append(escaped)
+                            'b' -> decoded.append('\b')
+                            'f' -> decoded.append('\u000c')
+                            'n' -> decoded.append('\n')
+                            'r' -> decoded.append('\r')
+                            't' -> decoded.append('\t')
+                            'u' -> {
+                                val hex = manifest.substring(index, index + 4)
+                                require(hex.all { it in "0123456789abcdefABCDEF" })
+                                decoded.append(hex.toInt(16).toChar())
+                                index += 4
+                            }
+                            else -> error("Invalid JSON escape: $escaped")
+                        }
+                    }
+                }
+                strings += decoded.toString()
+            }
+            org.junit.Assert.assertEquals(7, strings.count { it == text })
+            System.getProperty("woona.manifestEvidence")?.let { File(it).writeText(manifest) }
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
     fun exportNameUsesSessionTimeInsteadOfLaterExportTime() {
         val tempDirectory = File(System.getProperty("java.io.tmpdir"), "session-archive-name-${System.nanoTime()}")
             .apply { mkdirs() }

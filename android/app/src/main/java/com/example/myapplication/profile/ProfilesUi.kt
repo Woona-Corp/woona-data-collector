@@ -728,30 +728,32 @@ private fun QuestionnaireDialog(
             dismissOnClickOutside = false,
             // Use native window bounds; Compose 1.7's custom fullscreen measurement can exceed them.
             usePlatformDefaultWidth = true,
-            decorFitsSystemWindows = false,
+            // Let the platform resize the dialog above a regular IME. An
+            // edge-to-edge MATCH_PARENT dialog can be panned as a whole when
+            // a bottom multiline field requests focus, taking pinned actions
+            // off screen even though Compose's local bounds remain unchanged.
+            decorFitsSystemWindows = true,
         ),
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxSize()
-                .safeDrawingPadding()
-                .imePadding(),
+                .fillMaxSize(),
         ) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val view = LocalView.current
             val focusManager = LocalFocusManager.current
             val keyboard = LocalSoftwareKeyboardController.current
             DisposableEffect(view) {
-                (view.parent as? DialogWindowProvider)?.window?.setLayout(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                )
+                (view.parent as? DialogWindowProvider)?.window?.apply {
+                    setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                    setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+                }
                 onDispose {}
             }
             val scrollState = rememberScrollState()
             // On short windows (including IME-resized dialogs) reserve enough
             // space for the form instead of allowing the header to consume it.
-            val compactHeader = maxHeight < 240.dp
+            val compactHeader = maxHeight < 360.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale
             LaunchedEffect(conflict, operationError, externalError) {
                 if (conflict != null || operationError != null || externalError != null) scrollState.scrollTo(0)
             }
@@ -762,8 +764,8 @@ private fun QuestionnaireDialog(
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    Text(questionnaireText(title, language), style = if (compactHeader) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     if (!compactHeader) {
-                        Text(questionnaireText(title, language), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                         Text(questionnaireText(subtitle, language), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
                             tr(
@@ -777,7 +779,7 @@ private fun QuestionnaireDialog(
                             Text(
                                 tr(
                                     language,
-                                    "$errorCount fields need attention",
+                                    if (errorCount == 1) "1 field needs attention" else "$errorCount fields need attention",
                                     "Проверьте поля: $errorCount",
                                 ),
                                 color = MaterialTheme.colorScheme.error,
@@ -787,7 +789,7 @@ private fun QuestionnaireDialog(
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (canDismiss) {
-                            TextButton(onClick = onDismiss, enabled = !isSaving, modifier = Modifier.weight(1f)) {
+                            TextButton(onClick = onDismiss, enabled = !isSaving, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
                                 Text(tr(language, "Cancel", "Отмена"))
                             }
                         }
@@ -805,7 +807,7 @@ private fun QuestionnaireDialog(
                                         "Сохранение не подтверждено. Черновик остаётся открытым; проверьте причину и повторите.") + "\n" + error.toString()
                                 } finally { isSaving = false }
                             }
-                        }, enabled = !isSaving && conflict == null, modifier = Modifier.weight(1f)) {
+                        }, enabled = !isSaving && conflict == null, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
                             Text(tr(language, "Validate and save", "Проверить и сохранить"))
                         }
                     }
@@ -1459,9 +1461,9 @@ fun HeartQuestionnaireDialog(language: AppLanguage, initial: HeartQuestionnaire?
         })) {
         Text(questionnaireText("1. Сведения о сердце и препаратах", language), fontWeight = FontWeight.SemiBold)
         Choice(values, "knownHeartCondition", "1.1. Диагностировал ли ветеринар заболевание сердца или нарушение ритма? *", HEART_OPTIONS.getValue("knownHeartCondition"), errors["knownHeartCondition"])
-        if (values["knownHeartCondition"] == "yes") Field(values, "knownHeartConditionDetails", "Какой диагноз? (необязательно)")
+        if (values["knownHeartCondition"] == "yes") Field(values, "knownHeartConditionDetails", "Какой диагноз? (необязательно)", error = errors["knownHeartConditionDetails"])
         Choice(values, "heartRelevantMedication", "1.2. Принимала ли собака препараты, которые могут повлиять на частоту сердечных сокращений (ЧСС)? *", HEART_OPTIONS.getValue("heartRelevantMedication"), errors["heartRelevantMedication"])
-        if (values["heartRelevantMedication"] == "yes") Field(values, "heartRelevantMedicationDetails", "Название препарата и время последнего приёма (необязательно)")
+        if (values["heartRelevantMedication"] == "yes") Field(values, "heartRelevantMedicationDetails", "Название препарата и время последнего приёма (необязательно)", error = errors["heartRelevantMedicationDetails"])
         Text(questionnaireText("Если оператор не знает, не нужно оценивать препарат самостоятельно — выберите «Неизвестно».", language))
         Text(questionnaireText("2. Условия записи", language), fontWeight = FontWeight.SemiBold)
         Choice(values, "preRecordingState", "2.1. Что собака делала непосредственно перед началом записи? *", HEART_OPTIONS.getValue("preRecordingState"), errors["preRecordingState"])

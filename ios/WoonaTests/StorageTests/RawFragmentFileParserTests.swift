@@ -4,6 +4,45 @@ import XCTest
 final class RawFragmentFileParserTests: XCTestCase {
     private let parser = RawFragmentFileParser()
 
+    func testRejectsOutOfBudgetSignedLengthsBeforeBodyReadForBothVersions() {
+        for isV2 in [false, true] {
+            for length in [Int32.min, -1, 0, Int32(RawFragmentFileParser.maximumFragmentLength + 1), Int32.max] {
+                var header: [UInt8] = []
+                header.appendBigEndianInt64(1); header.appendBigEndianInt64(2)
+                if isV2 { header.appendBigEndianInt64(3) }
+                header.appendBigEndianInt32(length)
+                var reads = 0
+                var offset = 8
+                XCTAssertThrowsError(try parser.readFragment(read: { count in
+                    reads += 1
+                    XCTAssertEqual(reads, 1, "Oversized body must never be requested")
+                    XCTAssertEqual(count, isV2 ? 28 : 20)
+                    return header
+                }, isV2: isV2, offset: &offset)) { error in
+                    XCTAssertEqual(error as? RawFragmentFileParserError, .invalidFragmentLength(length: length, offset: 8))
+                }
+                XCTAssertEqual(reads, 1)
+            }
+        }
+    }
+
+    func testBudgetBoundaryAndLegacyHeadersRemainCompatible() throws {
+        for isV2 in [false, true] {
+            for size in [1, 512, 16_385, RawFragmentFileParser.maximumFragmentLength] {
+                let body = [UInt8](repeating: 0xA5, count: size)
+                var bytes = isV2 ? RawFragmentFileStore.magicHeader : RawFragmentFileStore.legacyMagicHeader
+                bytes.appendBigEndianInt64(7); bytes.appendBigEndianInt64(8)
+                if isV2 { bytes.appendBigEndianInt64(9) }
+                bytes.appendBigEndianInt32(Int32(size)); bytes += body
+                XCTAssertEqual(try parser.splitIntoFragments(bytes), [RawFragmentRecord(sequence: 7, receivedAtMillis: 8, receivedAtMonotonicNs: isV2 ? 9 : nil, bytes: body)])
+                bytes.removeLast()
+                XCTAssertThrowsError(try parser.splitIntoFragments(bytes)) { error in
+                    XCTAssertEqual(error as? RawFragmentFileParserError, .truncatedFragmentBody(offset: 8, expectedLength: size))
+                }
+            }
+        }
+    }
+
     func testSplitIntoFragmentsReturnsStoredRecords() throws {
         let first: [UInt8] = [0x01, 0x02]
         let second: [UInt8] = [0x33, 0x99, 0xAA, 0x55]

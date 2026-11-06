@@ -13,7 +13,7 @@ enum RawFragmentFileParserError: Error, Equatable, LocalizedError {
         case let .truncatedRecordHeader(offset):
             "Truncated raw fragment record header at offset \(offset)"
         case let .invalidFragmentLength(length, offset):
-            "Invalid raw fragment length \(length) at offset \(offset)"
+            "Invalid raw fragment length \(length) at offset \(offset); supported import range is 1...\(RawFragmentFileParser.maximumFragmentLength) bytes"
         case let .truncatedFragmentBody(offset, expectedLength):
             "Truncated raw fragment body at offset \(offset): expected \(expectedLength) bytes"
         }
@@ -35,6 +35,12 @@ struct RawFragmentRecord: Equatable {
 }
 
 struct RawFragmentFileParser {
+    // Raw records are notification/import fragments, NOT 16-KiB sensor packets.
+    // 1 MiB allows coalesced legacy imports far beyond BLE's 512-byte value
+    // limit while bounding the callback reader's single body allocation.
+    // Larger BLERAW1/2 records are deliberately rejected, never silently split.
+    static let maximumFragmentLength = 1_048_576
+
     func hasMagicHeader(_ bytes: [UInt8]) -> Bool {
         bytes.starts(with: RawFragmentFileStore.magicHeader)
             || bytes.starts(with: RawFragmentFileStore.legacyMagicHeader)
@@ -77,7 +83,7 @@ struct RawFragmentFileParser {
             throw RawFragmentFileParserError.truncatedRecordHeader(offset: offset)
         }
         let length = Self.decodeBigEndianInt32(header, at: isV2 ? 24 : 16)
-        guard length > 0 else {
+        guard length > 0, length <= Int32(Self.maximumFragmentLength) else {
             throw RawFragmentFileParserError.invalidFragmentLength(length: length, offset: offset)
         }
         let bytes = try read(Int(length))

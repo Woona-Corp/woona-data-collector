@@ -4,6 +4,8 @@ import html
 import json
 import os
 import stat
+import threading
+import time
 import uuid
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -18,14 +20,23 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
+from starlette.concurrency import run_in_threadpool
 
 from server.eligibility import activity_exclusion_reasons
 from server.sync_status import recording_status
-from server.label_sync import active_project, file_url, paged, request_json
+from server.label_sync import active_project, file_url, request_json
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 KINDS = ("activity",)
 VIDEO_KINDS = KINDS
+LABEL_SUMMARY_TTL_SECONDS = 15
+LABEL_REFRESH_SECONDS = 5
+LABEL_DETAIL_LIMIT = 20
+LABEL_TASK_LIMIT = 10_000
+LABEL_RESPONSE_LIMIT = 2 * 1024 * 1024
+LABEL_REFRESH_BYTES = 16 * 1024 * 1024
+_label_summary_lock = threading.Lock()
+_label_summary_cache: tuple[tuple[str | None, str], float, tuple[list[dict], dict, dict], str] | None = None
 
 
 def available_file(path: Path, expected_size: int) -> bool:
@@ -216,14 +227,141 @@ def summarize(records: list[dict], projects: list[dict], tasks_by_kind: dict, an
             "categories": category, "records": records}
 
 
+def clear_label_summary_cache() -> None:
+    global _label_summary_cache
+    with _label_summary_lock:
+        _label_summary_cache = None
+
+
+def load_label_summary() -> tuple[list[dict], dict, dict, dict]:
+    """One bounded, short-lived LS snapshot, never a cache of file integrity.
+
+    Complete list annotations avoid an N-request detail walk. Older providers
+    get a bounded fallback; an incomplete snapshot is unavailable, not zero.
+    """
+    global _label_summary_cache
+    key = (os.environ.get('LABEL_STUDIO_URL'), os.environ.get('LABEL_PROJECT_ID', '21'))
+    now = time.monotonic()
+    cached = _label_summary_cache
+    if cached is not None and cached[0] == key and now - cached[1] < LABEL_SUMMARY_TTL_SECONDS:
+        return (*cached[2], {'available': True, 'checkedAtUtc': cached[3],
+                            'ageSeconds': max(0, int(now - cached[1])), 'cached': True})
+    if not _label_summary_lock.acquire(blocking=False):
+        raise RuntimeError('Label Studio summary refresh is already in progress')
+    try:
+        # Another caller may have published while this caller acquired the lock.
+        now = time.monotonic()
+        cached = _label_summary_cache
+        if cached is not None and cached[0] == key and now - cached[1] < LABEL_SUMMARY_TTL_SECONDS:
+            return (*cached[2], {'available': True, 'checkedAtUtc': cached[3],
+                                'ageSeconds': max(0, int(now - cached[1])), 'cached': True})
+        deadline = now + LABEL_REFRESH_SECONDS
+        remaining_bytes = LABEL_REFRESH_BYTES
+        requests = 0
+
+        def consume_bytes(count):
+            nonlocal remaining_bytes
+            remaining_bytes -= count
+            if remaining_bytes < 0:
+                raise RuntimeError('Label Studio summary byte budget exhausted')
+
+        def fetch(method, path):
+            nonlocal requests
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or requests >= 128 or remaining_bytes <= 0:
+                raise RuntimeError('Label Studio whole-refresh budget exhausted')
+            requests += 1
+            value = request_json(method, path, timeout=min(3.0, remaining),
+                                 maximum_bytes=min(LABEL_RESPONSE_LIMIT, remaining_bytes),
+                                 deadline=deadline, consume_bytes=consume_bytes)
+            # Retain the decoded-object guard too; aggregate accounting above is
+            # raw bytes consumed before parsing, including whitespace/escapes.
+            size = len(json.dumps(value, ensure_ascii=False).encode())
+            if size > LABEL_RESPONSE_LIMIT:
+                raise RuntimeError('Label Studio summary byte budget exhausted')
+            return value
+
+        project = active_project(fetch=fetch)
+        project = {name: project[name] for name in ('id', 'title', 'timeline_name', 'labels')}
+        tasks, labeled, seen = [], {}, set()
+        page, details = 1, 0
+        while True:
+            body = fetch('GET', '/api/tasks?' + urlencode({'project': project['id'], 'fields': 'all',
+                                                          'page': page, 'page_size': 100}))
+            if isinstance(body, list):
+                if page != 1:
+                    raise RuntimeError('Label Studio pagination changed format')
+                batch, total, more = body, len(body), False
+            elif isinstance(body, dict):
+                batch = body.get('results', body.get('tasks', []))
+                total, more = body.get('total', body.get('count')), bool(body.get('next'))
+                if total is not None and (type(total) is not int or total < 0):
+                    raise RuntimeError('Invalid Label Studio task total')
+            else:
+                raise RuntimeError('Invalid Label Studio task-list response')
+            if not isinstance(batch, list):
+                raise RuntimeError('Invalid Label Studio task page')
+            if len(tasks) + len(batch) > LABEL_TASK_LIMIT or (total is not None and total > LABEL_TASK_LIMIT):
+                raise RuntimeError('Label Studio task summary exceeds its bounded capacity')
+            if not batch and (more or (total is not None and total > len(tasks))):
+                raise RuntimeError('Label Studio pagination stopped before the complete snapshot')
+            for item in batch:
+                if not isinstance(item, dict) or not isinstance(item.get('data', {}), dict):
+                    raise RuntimeError('Invalid Label Studio task')
+                task_id = item['id']
+                source_id = item.get('data', {}).get('source_id')
+                if type(task_id) not in (int, str) or (source_id is not None and not isinstance(source_id, str)):
+                    raise RuntimeError('Invalid Label Studio task identity')
+                if task_id in seen:
+                    raise RuntimeError('Label Studio pagination repeated task IDs')
+                seen.add(task_id)
+                task = {'id': task_id, 'data': {'source_id': source_id},
+                        'is_labeled': bool(item.get('is_labeled'))}
+                tasks.append(task)
+                if task['is_labeled']:
+                    full = item
+                    if 'annotations' not in full:
+                        if details >= LABEL_DETAIL_LIMIT:
+                            raise RuntimeError('Label Studio did not supply a complete bounded annotation summary')
+                        details += 1
+                        full = fetch('GET', f'/api/tasks/{task_id}')
+                    if not isinstance(full, dict) or not isinstance(full.get('annotations'), list):
+                        raise RuntimeError('Labeled task has no complete annotation summary')
+                    # Validate nested external shapes before summarize indexes them.
+                    # Retain only the fields consumed by it, not arbitrary task payloads.
+                    annotations = []
+                    for annotation in full['annotations']:
+                        if not isinstance(annotation, dict) or not isinstance(annotation.get('result', []), list):
+                            raise RuntimeError('Invalid Label Studio annotation')
+                        results = []
+                        for result in annotation.get('result', []):
+                            if not isinstance(result, dict):
+                                raise RuntimeError('Invalid Label Studio annotation result')
+                            if result.get('from_name') != project['timeline_name']:
+                                continue
+                            value = result.get('value', {})
+                            labels = value.get('timelinelabels', []) if isinstance(value, dict) else None
+                            if not isinstance(labels, list) or any(not isinstance(label, str) for label in labels):
+                                raise RuntimeError('Invalid Label Studio timeline labels')
+                            results.append({'from_name': result['from_name'], 'value': {'timelinelabels': labels}})
+                        annotations.append({'was_cancelled': annotation.get('was_cancelled'), 'result': results})
+                    labeled[('activity', task_id)] = {'annotations': annotations}
+            if not more and (total is None or len(tasks) >= total):
+                break
+            page += 1
+        checked_at = datetime.now(ZoneInfo('UTC')).isoformat(timespec='seconds')
+        summary = ([project], {'activity': tasks}, labeled)
+        _label_summary_cache = (key, time.monotonic(), summary, checked_at)
+        return (*summary, {'available': True, 'checkedAtUtc': checked_at, 'ageSeconds': 0, 'cached': False})
+    finally:
+        _label_summary_lock.release()
+
+
 def load_dashboard() -> dict:
+    # Owner explicitly requires a fresh full physical-file pass on every request.
     records, extra = records_from_sources()
     try:
-        projects = [active_project()]
-        tasks = {kind: paged(f'/api/tasks?project={projects[0]["id"]}') for kind in KINDS}
-        labeled = {(kind, t["id"]): request_json("GET", f'/api/tasks/{t["id"]}')
-                   for kind in KINDS for t in tasks[kind] if t.get("is_labeled")}
-        extra['label_service'] = {'available': True}
+        projects, tasks, labeled, extra['label_service'] = load_label_summary()
     except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, KeyError) as error:
         # A labeling outage must not hide transfer/capture diagnostics or imply zero tasks.
         projects = [{'id': int(os.environ.get('LABEL_PROJECT_ID', '21')),
@@ -268,6 +406,10 @@ def render(data: dict, query: str, status: str = "all", ble: str = "all", page: 
             f"исключённые записи в LS {len(reconciliation.get('ineligible_task_sources', []))}. ")
     else:
         diagnostics = data['label_service']['message'] + ' '
+    if data.get('label_service', {}).get('checkedAtUtc'):
+        service = data['label_service']
+        diagnostics += (f"снимок Label Studio: {service['checkedAtUtc']} UTC, возраст {service['ageSeconds']} с "
+                        f"(кэш не более {LABEL_SUMMARY_TTL_SECONDS} с; файлы проверены заново). ")
     diagnostics += (f"Загрузки без прогресса ≥15 минут: {reconciliation.get('stalled_uploads', 0)}; " +
                     f"проблемы целостности: {reconciliation.get('integrity_problems', 0)}. " +
                     'Проверка не видит записи, которые ещё не отправлены с телефонов.')
@@ -527,7 +669,7 @@ form.addEventListener('submit', async event => {
 @router.post("/recordings/{recording_id}/references", dependencies=[Depends(require_label_user), Depends(require_upload_origin)])
 async def dashboard_add_reference(recording_id: uuid.UUID, request: Request):
     from pydantic import ValidationError
-    from server.app import ArtifactPayload, MAX_JSON_BYTES, add_reference, engine
+    from server.app import ArtifactPayload, MAX_JSON_BYTES
     body = await request.body()
     if len(body) > MAX_JSON_BYTES:
         raise HTTPException(413, "Metadata too large")
@@ -535,6 +677,12 @@ async def dashboard_add_reference(recording_id: uuid.UUID, request: Request):
         artifact = ArtifactPayload.model_validate_json(body)
     except ValidationError as error:
         raise HTTPException(422, "Invalid reference metadata") from error
+    return await run_in_threadpool(add_dashboard_reference, recording_id, artifact)
+
+
+def add_dashboard_reference(recording_id, artifact):
+    # Keep all synchronous lookup/persistence on one worker, never the event loop.
+    from server.app import add_reference, engine
     with engine.connect() as connection:
         owner = connection.execute(text("SELECT capture_device_id FROM recordings WHERE id=:id"), {"id": recording_id}).scalar_one_or_none()
     if owner is None:
@@ -554,7 +702,8 @@ async def dashboard_reference_chunk(artifact_id: uuid.UUID, request: Request):
     offset = request.headers.get("upload-offset", "")
     if not offset.isdigit():
         raise HTTPException(422, "Upload-Offset required")
-    return await patch_artifact(artifact_id, request, reference_owner(artifact_id), int(offset))
+    owner = await run_in_threadpool(reference_owner, artifact_id)
+    return await patch_artifact(artifact_id, request, owner, int(offset))
 
 
 @router.post("/artifacts/{artifact_id}/complete", dependencies=[Depends(require_label_user), Depends(require_upload_origin)])

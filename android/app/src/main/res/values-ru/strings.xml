@@ -127,7 +127,7 @@
     <string name="action_send_raw">ОТПРАВИТЬ RAW</string>
     <string name="action_send_log">ОТПРАВИТЬ ЛОГ</string>
 
-    <string name="permissions_required">Нужны разрешения!</string>
+    <string name="permissions_required">Для поиска и подключения датчиков нужно разрешение Bluetooth. Разрешите доступ к устройствам поблизости в настройках Android и повторите поиск.</string>
     <string name="unable_read_bin_file">Не удалось прочитать BIN-файл</string>
     <string name="unable_load_bin_file">Не удалось загрузить BIN-файл</string>
     <string name="replay_file_empty">Файл реплея пуст</string>

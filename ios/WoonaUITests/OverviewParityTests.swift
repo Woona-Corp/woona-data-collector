@@ -5,8 +5,12 @@ final class OverviewParityTests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing"]
+        if name.contains("testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions") {
+            app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        }
         if name.contains("testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls") {
             app.launchArguments.append("--ui-testing-v2-charts")
         }
@@ -23,6 +27,10 @@ final class OverviewParityTests: XCTestCase {
         if app.launchArguments.contains("--ui-testing-v2-charts") { return }
         // The account field can render before the animal controls are actionable.
         // Check the actual control instead of treating field existence as readiness.
+        // At accessibility XXXL the animal actions are below the initial
+        // viewport (CI: New dog y=1026 on an 874-point portrait screen).
+        // Scrolling is required; waiting alone cannot make it hittable.
+        for _ in 0..<12 where !app.buttons["dog.new"].isHittable { app.swipeUp() }
         let newDogReady = XCTNSPredicateExpectation(
             predicate: NSPredicate { object, _ in
                 guard let button = object as? XCUIElement else { return false }
@@ -32,6 +40,57 @@ final class OverviewParityTests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [newDogReady], timeout: 15), .completed,
                        "New dog must become enabled and hittable after launch")
+    }
+
+    func testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        app.buttons["tab.settings"].tap()
+        let configure = app.buttons["server.configure"]
+        for _ in 0..<12 where !configure.isHittable { app.swipeUp() }
+        XCTAssertTrue(configure.isHittable)
+        configure.tap()
+        let url = app.textFields["server.url"]
+        XCTAssertTrue(url.waitForExistence(timeout: 5))
+        url.tap(); url.typeText("not-a-valid-server-url")
+        let token = app.secureTextFields["server.token"]
+        token.tap(); token.typeText("synthetic-memory-only-token")
+        XCUIDevice.shared.orientation = .landscapeRight
+        XCTAssertTrue(app.buttons["server.save"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "Landscape actions must remain reachable with the software keyboard open")
+        let editorApp: XCUIApplication = app
+        let stableActions = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let window = editorApp.frame
+            let keyboard = editorApp.keyboards.firstMatch.frame
+            let save = editorApp.buttons["server.save"]
+            let cancel = editorApp.buttons["server.cancel"]
+            return window.width > window.height && keyboard.width > keyboard.height &&
+                save.isHittable && cancel.isHittable &&
+                window.contains(save.frame) && window.contains(cancel.frame) &&
+                save.frame.maxY <= keyboard.minY && cancel.frame.maxY <= keyboard.minY
+        }, object: nil)
+        let stableResult = XCTWaiter.wait(for: [stableActions], timeout: 10)
+        // App-cropped screenshots during rotation can be clipped/black. Preserve
+        // the actual device frame and native hierarchy, not only click success.
+        attachScreen("ServerEditor-Landscape-Keyboard-Draft", fullDevice: true)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "ServerEditor-Landscape-Keyboard-NativeBounds"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        XCTAssertEqual(stableResult, .completed, "Both actions must be fully on-screen above the real landscape keyboard")
+        XCTAssertTrue(app.buttons["server.save"].isHittable)
+        XCTAssertTrue(app.buttons["server.cancel"].isHittable)
+        XCTAssertGreaterThan(app.buttons["server.save"].frame.height, 20)
+        XCTAssertEqual(url.value as? String, "not-a-valid-server-url")
+        // Validation is local: malformed URL cannot persist or initiate requests.
+        app.buttons["server.save"].tap()
+        XCTAssertTrue(app.navigationBars["Server connection"].exists)
+        XCTAssertEqual(url.value as? String, "not-a-valid-server-url")
+        app.buttons["server.cancel"].tap()
+        XCTAssertTrue(configure.waitForExistence(timeout: 5))
+        configure.tap()
+        XCTAssertTrue(url.waitForExistence(timeout: 5))
+        XCTAssertNotEqual(url.value as? String, "not-a-valid-server-url")
+        app.buttons["server.cancel"].tap()
     }
 
     func testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire() {
@@ -409,8 +468,8 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.buttons["chart.fullscreen.open"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.segmentedControls.buttons["Channel 2"].isSelected)
     }
-    private func attachScreen(_ name: String) {
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
+    private func attachScreen(_ name: String, fullDevice: Bool = false) {
+        let screenshot = XCTAttachment(screenshot: fullDevice ? XCUIScreen.main.screenshot() : app.screenshot())
         screenshot.name = name
         screenshot.lifetime = .keepAlways
         add(screenshot)

@@ -4,6 +4,15 @@ struct CompletedPacket: Equatable {
     let bytes: [UInt8]
     let counter: UInt64
     let sensorBlocks: [SensorBlock]
+    // Only the assembler can mint this evidence; arbitrary blocks are never
+    // accepted as validation. Rejections retain their original diagnostics.
+    fileprivate(set) var validation: PacketValidationResult? = nil
+
+    init(bytes: [UInt8], counter: UInt64, sensorBlocks: [SensorBlock]) {
+        self.bytes = bytes
+        self.counter = counter
+        self.sensorBlocks = sensorBlocks
+    }
 
     func channelSamples(sensorType: Int, channel: Int) -> [Float] {
         guard channel > 0 else { return [] }
@@ -70,7 +79,6 @@ enum PacketAssemblyResult: Equatable {
 final class PacketAssembler {
     private var buffer: [UInt8]
     private var pendingBoundaryCandidate: [UInt8] = []
-    private let sensorBlockParser: SensorBlockParser
     private let packetValidator: PacketValidator
 
     init(
@@ -79,7 +87,6 @@ final class PacketAssembler {
     ) {
         self.buffer = []
         self.buffer.reserveCapacity(initialCapacity)
-        self.sensorBlockParser = sensorBlockParser
         self.packetValidator = PacketValidator(sensorBlockParser: sensorBlockParser)
     }
 
@@ -138,7 +145,8 @@ final class PacketAssembler {
             guard buffer.count >= expectedLength else { return results }
 
             let packetBytes = Array(buffer[0..<expectedLength])
-            switch packetValidator.validate(packetBytes) {
+            let validation = packetValidator.validate(packetBytes)
+            switch validation {
             case .accepted:
                 switch scanForNestedOverlap(
                     before: expectedLength,
@@ -173,15 +181,12 @@ final class PacketAssembler {
                 }
             }
 
-            results.append(
-                .completed(
-                    CompletedPacket(
-                        bytes: packetBytes,
-                        counter: PacketValidator.decodeCounter(packetBytes),
-                        sensorBlocks: sensorBlockParser.parse(packetBytes)
-                    )
-                )
-            )
+            let blocks: [SensorBlock]
+            if case .accepted(let packet) = validation { blocks = packet.sensorBlocks }
+            else { blocks = [] }
+            var completed = CompletedPacket(bytes: packetBytes, counter: PacketValidator.decodeCounter(packetBytes), sensorBlocks: blocks)
+            completed.validation = validation
+            results.append(.completed(completed))
             shiftLeft(expectedLength)
         }
     }

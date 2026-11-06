@@ -5,6 +5,117 @@ import CryptoKit
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    func testActualLiveTimingExcludesPreparationAndFinalizationAndUsesMonotonicElapsed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        var session = SessionQuestionnaire()
+        session.schemaVersion = 2; session.sessionLabel = "timing"
+        session.plannedActivities = ["Аллюр/движение"]
+        session.videoRequested = false
+        let preparing = try store.createRecording(profile: profile, source: "live", questionnaire: session)
+        // Creation can precede Start by five minutes; finalization happens much
+        // later than this frozen stop. No sleeps or Date() derived expectations.
+        let start = try XCTUnwrap(ReferenceMetadata.date(preparing.startedAtUTC)).addingTimeInterval(300)
+        try store.markCaptureStarted(preparing.id, at: start)
+        let recording = try XCTUnwrap(store.recording(id: preparing.id))
+        XCTAssertEqual(recording.startedAtUTC, WoonaStore.iso8601(start))
+        XCTAssertNil(recording.endedAtUTC)
+        XCTAssertThrowsError(try store.markCaptureStarted(preparing.id, at: start.addingTimeInterval(10)))
+        let end = start.addingTimeInterval(10)
+        let timing = CaptureStoppedTiming(endedAt: end, startedMonotonicNs: 300_000_000_000, stoppedMonotonicNs: 310_000_000_000)
+        try store.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8), timing: timing)
+        let saved = try XCTUnwrap(store.recording(id: preparing.id))
+        XCTAssertEqual(saved.endedAtUTC, WoonaStore.iso8601(end))
+        XCTAssertEqual(try XCTUnwrap(saved.questionnaire?.durationMinutes), 10.0 / 60, accuracy: 0.000001)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(identifier: saved.timezone)
+        formatter.dateFormat = "HH:mm"
+        XCTAssertEqual(saved.questionnaire?.startTime, formatter.string(from: start))
+        XCTAssertEqual(saved.questionnaire?.endTime, formatter.string(from: end))
+
+        let jumpedWallClock = CaptureStoppedTiming(endedAt: start.addingTimeInterval(-3600), startedMonotonicNs: 100, stoppedMonotonicNs: 10_000_000_100)
+        XCTAssertEqual(jumpedWallClock.durationSeconds, 10)
+        XCTAssertNil(CaptureStoppedTiming(endedAt: end, startedMonotonicNs: nil, stoppedMonotonicNs: 100).durationSeconds)
+        XCTAssertNil(CaptureStoppedTiming(endedAt: end, startedMonotonicNs: 200, stoppedMonotonicNs: 100).durationSeconds)
+    }
+
+    func testFrozenTimingCrossesLocalMidnightAndDoesNotRewriteReplayQuestionnaire() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        var session = SessionQuestionnaire()
+        session.schemaVersion = 2; session.sessionLabel = "midnight"
+        session.plannedActivities = ["Аллюр/движение"]
+        session.startTime = "09:30"; session.endTime = "09:31"; session.durationMinutes = 1
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone.current
+        let start = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 5, hour: 23, minute: 59, second: 55)))
+        let stop = start.addingTimeInterval(10)
+        let timing = CaptureStoppedTiming(endedAt: stop, startedMonotonicNs: 0, stoppedMonotonicNs: 10_000_000_000)
+        let live = try store.createRecording(profile: profile, source: "live", questionnaire: session)
+        try store.markCaptureStarted(live.id, at: start)
+        try store.finalize(recording: XCTUnwrap(store.recording(id: live.id)), status: "completed", files: [], syncJSON: Data("{}".utf8), timing: timing)
+        let saved = try XCTUnwrap(store.recording(id: live.id))
+        XCTAssertEqual(saved.questionnaire?.sessionDate, "2026-11-05")
+        XCTAssertEqual(saved.questionnaire?.startTime, "23:59")
+        XCTAssertEqual(saved.questionnaire?.endTime, "00:00")
+        XCTAssertEqual(try XCTUnwrap(saved.questionnaire?.durationMinutes), 10.0 / 60, accuracy: 0.000001)
+        let replay = try store.createRecording(profile: profile, source: "replay", questionnaire: session)
+        try store.finalize(recording: replay, status: "completed", files: [], syncJSON: Data("{}".utf8), timing: timing)
+        let imported = try XCTUnwrap(store.recording(id: replay.id))
+        XCTAssertEqual(imported.questionnaire?.startTime, "09:30")
+        XCTAssertEqual(imported.questionnaire?.endTime, "09:31")
+        XCTAssertEqual(imported.questionnaire?.durationMinutes, 1)
+    }
+
+    func testNeverStartedRecoveryStillHasUnknownEndAndPendingVideoIsNotAnArtifact() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        let recording = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+        let pending = store.directory(for: recording).appendingPathComponent("video.pending.mp4")
+        try Data("failed-original-bytes".utf8).write(to: pending)
+        _ = try store.recoverUnfinishedCaptures()
+        let recovered = try XCTUnwrap(store.recording(id: recording.id))
+        XCTAssertNil(recovered.endedAtUTC)
+        XCTAssertEqual(recovered.status, "interrupted")
+        XCTAssertTrue(try store.artifacts(recordingID: recording.id).allSatisfy { $0.type != "video" })
+        XCTAssertEqual(try Data(contentsOf: pending), Data("failed-original-bytes".utf8))
+    }
+
+    func testHeartDetailsValidateOnlyActiveFieldsWithExactKeysAndBoundaries() {
+        var heart = HeartQuestionnaire()
+        for key in ["knownHeartCondition", "heartRelevantMedication", "referenceMethod"] {
+            let no = HeartQuestionnaire.options[key]!.first { $0.key == "no" || $0.key == "none" }!
+            if key == "knownHeartCondition" { heart.knownHeartCondition = no }
+            if key == "heartRelevantMedication" { heart.heartRelevantMedication = no }
+            if key == "referenceMethod" { heart.referenceMethod = no }
+        }
+        heart.preRecordingState = HeartQuestionnaire.options["preRecordingState"]!.last
+        heart.actualActivity = HeartQuestionnaire.options["actualActivity"]!.last
+        heart.acuteHeartRateFactors = [HeartQuestionnaire.options["acuteHeartRateFactors"]!.first!]
+        heart.knownHeartConditionDetails = String(repeating: "a", count: 2001)
+        heart.heartRelevantMedicationDetails = String(repeating: "b", count: 2001)
+        heart.referenceArtifact = String(repeating: "c", count: 2001)
+        XCTAssertTrue(heart.validate().isValid, "Hidden fields cannot block Save")
+        XCTAssertNil(heart.normalized().knownHeartConditionDetails)
+        XCTAssertNil(heart.normalized().heartRelevantMedicationDetails)
+        XCTAssertNil(heart.normalized().referenceArtifact)
+        heart.knownHeartCondition = HeartQuestionnaire.options["knownHeartCondition"]!.first { $0.key == "yes" }
+        heart.heartRelevantMedication = HeartQuestionnaire.options["heartRelevantMedication"]!.first { $0.key == "yes" }
+        heart.referenceMethod = HeartQuestionnaire.options["referenceMethod"]!.first { $0.key == "ecg" }
+        XCTAssertEqual(Set(heart.validate().errors.keys), Set(["knownHeartConditionDetails", "heartRelevantMedicationDetails", "referenceArtifact"]))
+        XCTAssertEqual(questionnaireValidationError(heart.validate().errors["knownHeartConditionDetails"]!, language: .english), "Maximum 2000 characters")
+        heart.knownHeartConditionDetails = String(repeating: "a", count: 2000)
+        heart.heartRelevantMedicationDetails = String(repeating: "b", count: 2000)
+        heart.referenceArtifact = String(repeating: "c", count: 2000)
+        XCTAssertTrue(heart.validate().isValid)
+    }
+
     func testNativeStorageParserConsumesActualIsolatedAPIWireFixture() throws {
         // This file is captured by the server suite from real synthetic HTTP
         // responses, rather than generated from the Swift DTO under test.

@@ -106,6 +106,13 @@ final class AppViewModel: ObservableObject {
     private var retirementCheckGeneration: UUID?
     @Published private(set) var isRecording = false
     @Published private(set) var isCameraDegraded = false
+    @Published var serverConnectionDraft = ServerConnectionDraft()
+
+    func beginServerConnectionEditing() {
+        guard !serverConnectionDraft.isPresented else { return }
+        serverConnectionDraft = ServerConnectionDraft(isPresented: true, baseURL: serverBaseURL)
+    }
+
     @Published var serverBaseURL = "" { didSet { if oldValue != serverBaseURL { resetServerStorageCheck() } } }
     @Published var serverToken = "" { didSet { if oldValue != serverToken { resetServerStorageCheck() } } }
     @Published var serverWifiOnly = true { didSet { if oldValue != serverWifiOnly { resetServerStorageCheck() } } }
@@ -350,6 +357,14 @@ final class AppViewModel: ObservableObject {
     private var finishCaptureProcessingTaskID: UInt64 = 0
     private var preparedExportSnapshotDirectory: URL?
     private var cameraCaptureInfo: CameraCaptureInfo?
+    private var cameraGeneration: UInt64?
+    private var cameraPrepareTask: Task<Void, Never>?
+    private var cameraStartTask: Task<Void, Never>?
+    private var captureStartedMonotonicNs: UInt64?
+    private var captureStoppedTiming: CaptureStoppedTiming?
+    // Own the first Stop snapshot (including a nil camera result) until durable
+    // completion. Retrying metadata finalization must not stop/promote again.
+    private var captureStoppedRecordingID: UUID?
     private var captureErrorCode: String?
     private var captureErrorMessage: String?
     private var captureSessionZeroAtUTC: String?
@@ -392,8 +407,11 @@ final class AppViewModel: ObservableObject {
             serverToken = ""
             serverBaseURL = ""
         }
-        cameraRecorder.onRecordingFailure = { [weak self] message in
-            Task { @MainActor in self?.handleCameraFailure(message) }
+        cameraRecorder.onRecordingFailure = { [weak self] generation, message in
+            Task { @MainActor in
+                guard let self, self.cameraGeneration == generation, !self.captureStopInProgress else { return }
+                self.handleCameraFailure(message)
+            }
         }
         if uiTesting, let store {
             do {
@@ -904,6 +922,10 @@ final class AppViewModel: ObservableObject {
             throw WoonaStoreError.invalidData("Выберите или создайте карточку животного / Select or create an animal profile")
         }
         activeRecording = try store.createRecording(profile: profile, source: "live", questionnaire: questionnaire)
+        cameraGeneration = cameraRecorder.generationFence.advance()
+        captureStartedMonotonicNs = nil
+        captureStoppedTiming = nil
+        captureStoppedRecordingID = nil
         isCaptureReady = false
         isRecording = false
         isCameraDegraded = false
@@ -946,6 +968,9 @@ final class AppViewModel: ObservableObject {
             throw WoonaStoreError.invalidData("Выберите или создайте карточку животного / Select or create an animal profile")
         }
         activeRecording = try store.createRecording(profile: profile, source: "replay", questionnaire: questionnaire)
+        captureStartedMonotonicNs = nil
+        captureStoppedTiming = nil
+        captureStoppedRecordingID = nil
         cameraCaptureInfo = nil
         captureErrorCode = nil
         captureErrorMessage = nil
@@ -959,18 +984,26 @@ final class AppViewModel: ObservableObject {
     func startActiveCapture() {
         guard isCaptureReady, !isRecording, !captureStopInProgress,
               let recording = activeRecording, let store else { return }
-        do { try store.markRecording(recording.id, status: "recording") }
+        let startedAt = Date()
+        let startedMonotonicNs = HostClock.nowNanoseconds()
+        do {
+            try store.markCaptureStarted(recording.id, at: startedAt)
+            activeRecording = try store.recording(id: recording.id)
+        }
         catch { showError("Failed to start recording", error: error); return }
+        captureStartedMonotonicNs = startedMonotonicNs
         isRecording = true
         statusText = "Recording"
         setCaptureClockAnchor()
         packetIngressGate.start()
         guard recording.videoRequested else { return }
         guard !isCameraDegraded else { return }
-        let output = store.directory(for: recording).appendingPathComponent("video.mp4")
-        Task {
-            do { _ = try await cameraRecorder.startRecording(to: output) }
+        guard let generation = cameraGeneration else { return }
+        let output = store.directory(for: recording).appendingPathComponent("video.pending.mp4")
+        cameraStartTask = Task {
+            do { _ = try await cameraRecorder.startRecording(to: output, generation: generation) }
             catch {
+                guard cameraGeneration == generation, activeRecording?.id == recording.id, !captureStopInProgress else { return }
                 handleCameraFailure(error.localizedDescription)
             }
         }
@@ -979,6 +1012,23 @@ final class AppViewModel: ObservableObject {
     func stopActiveCapture(status: String = "completed") {
         guard let recording = activeRecording, !captureStopInProgress else { return }
         captureStopInProgress = true
+        // Freeze acquisition timing before camera finish/copies/hashing. Permission
+        // callbacks are not cancellable: invalidate admission, then drain the camera
+        // queue in stopRecording instead of awaiting an unbounded permission prompt.
+        let firstStop = captureStoppedRecordingID != recording.id
+        if firstStop {
+            var stoppedAt = Date()
+            var stoppedMonotonicNs = HostClock.nowNanoseconds()
+#if DEBUG
+            if let clock = captureStopClockForTesting { (stoppedAt, stoppedMonotonicNs) = clock() }
+#endif
+            captureStoppedTiming = CaptureStoppedTiming(endedAt: stoppedAt, startedMonotonicNs: captureStartedMonotonicNs, stoppedMonotonicNs: stoppedMonotonicNs)
+            captureStoppedRecordingID = recording.id
+        }
+        cameraRecorder.generationFence.advance()
+        cameraGeneration = nil
+        cameraPrepareTask?.cancel(); cameraPrepareTask = nil
+        cameraStartTask?.cancel(); cameraStartTask = nil
         captureFinalizationBackgroundTime.begin { [weak self] in
             guard let self else { return }
             self.captureStopTask?.cancel()
@@ -991,9 +1041,23 @@ final class AppViewModel: ObservableObject {
         statusText = "Finalizing"
         captureStopTask = Task {
             defer { captureStopTask = nil; captureFinalizationBackgroundTime.end() }
-            if recording.videoRequested {
-                do { cameraCaptureInfo = try await cameraRecorder.stopRecording() }
+            if recording.videoRequested, firstStop {
+                do {
+#if DEBUG
+                    if let stop = cameraStopForTesting { cameraCaptureInfo = try await stop() }
+                    else { cameraCaptureInfo = try await cameraRecorder.stopRecording() }
+#else
+                    cameraCaptureInfo = try await cameraRecorder.stopRecording()
+#endif
+                    if cameraCaptureInfo == nil, captureStartedMonotonicNs != nil, !isCameraDegraded {
+                        handleCameraFailure("Camera stopped before validated video was available")
+                    }
+                    if let directory = store?.directory(for: recording) {
+                        _ = try CameraRecorder.promoteCompletedVideo(in: directory, info: cameraCaptureInfo)
+                    }
+                }
                 catch {
+                    cameraCaptureInfo = nil
                     handleCameraFailure(error.localizedDescription)
                 }
             }
@@ -1078,6 +1142,23 @@ final class AppViewModel: ObservableObject {
     }
 
 #if DEBUG
+    var cameraStopForTesting: (() async throws -> CameraCaptureInfo?)?
+    var captureStopClockForTesting: (() -> (Date, UInt64))?
+
+    func installActiveCaptureForTesting(_ recording: WoonaRecording, startedMonotonicNs: UInt64) {
+        precondition(activeRecording == nil && !captureStopInProgress)
+        activeRecording = recording
+        captureStartedMonotonicNs = startedMonotonicNs
+        captureStoppedTiming = nil
+        captureStoppedRecordingID = nil
+        cameraCaptureInfo = nil
+        captureErrorCode = nil
+        captureErrorMessage = nil
+        isRecording = true
+    }
+
+    func waitForCaptureStopForTesting() async { await captureStopTask?.value }
+
     func installSyntheticV2ChartFixtureForTesting(timestampBaseUs: UInt64 = 12_000_000) {
         var value = V2PreviewSnapshot()
         value.stage = .running; value.selectedMask = 127; value.decodedBlocks = 100
@@ -1843,7 +1924,7 @@ final class AppViewModel: ObservableObject {
         if let rawFile { files.append(("raw", rawFile, "raw_fragments.binlog", "application/octet-stream")) }
         if let logFile { files.append(("diagnostic", logFile, "diagnostics.log", "text/plain")) }
         let video = store.directory(for: recording).appendingPathComponent("video.mp4")
-        if FileManager.default.fileExists(atPath: video.path) {
+        if cameraCaptureInfo != nil, FileManager.default.fileExists(atPath: video.path) {
             files.append(("video", video, "video.mp4", "video/mp4"))
         }
         let acceptedTiming = await packetProcessor.acceptedPacketTiming()
@@ -1887,8 +1968,11 @@ final class AppViewModel: ObservableObject {
         do {
             let data = try JSONSerialization.data(withJSONObject: sync, options: [.sortedKeys, .withoutEscapingSlashes])
             let finalStatus = captureErrorCode == "storage_failed" || (requestedStatus == "completed" && packetsReceived == 0) ? "failed" : requestedStatus
-            let finalization = try await CaptureFinalizer.run(root: store.rootDirectory, recordingID: recording.id, status: finalStatus, files: files, syncJSON: data)
+            let finalization = try await CaptureFinalizer.run(root: store.rootDirectory, recordingID: recording.id, status: finalStatus, files: files, syncJSON: data, timing: captureStoppedTiming)
             activeRecording = nil
+            captureStoppedRecordingID = nil
+            captureStoppedTiming = nil
+            cameraCaptureInfo = nil
             hasPreparedActiveCapture = false
             isCaptureReady = false
             isRecording = false
@@ -2013,14 +2097,17 @@ final class AppViewModel: ObservableObject {
                 else { self.appendBleDiagnostic(message, packetProcessor: processor) }
             },
             onCaptureReady: { [weak self] in
-                guard let self else { return }
+                guard let self, self.activeRecording != nil, !self.captureStopInProgress else { return }
                 self.isCaptureReady = true
                 self.statusText = "Ready"
                 self.appendBleDiagnostic("BLE capture ready", packetProcessor: processor)
-                if self.activeRecording?.videoRequested == true {
-                    Task {
-                        do { try await self.cameraRecorder.prepare() }
+                if self.activeRecording?.videoRequested == true,
+                   let generation = self.cameraGeneration, let recordingID = self.activeRecording?.id {
+                    self.cameraPrepareTask?.cancel()
+                    self.cameraPrepareTask = Task {
+                        do { try await self.cameraRecorder.prepare(generation: generation) }
                         catch {
+                            guard self.cameraGeneration == generation, self.activeRecording?.id == recordingID, !self.captureStopInProgress else { return }
                             self.handleCameraFailure(error.localizedDescription)
                         }
                     }
