@@ -655,6 +655,7 @@ final class AppShellTests: XCTestCase {
         }
         var answers = SessionQuestionnaire()
         answers.schemaVersion = 2; answers.videoRequested = true
+        answers.sessionLabel = "Stop retry fixture"; answers.plannedActivities = ["Покой"]
         let recording = try store.createRecording(profile: profile, source: "live", questionnaire: answers)
         model.installActiveCaptureForTesting(recording, startedMonotonicNs: 1_000_000_000)
         let directory = store.directory(for: recording)
