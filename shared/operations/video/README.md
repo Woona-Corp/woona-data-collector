@@ -17,15 +17,22 @@ The final duration rounds up by less than one frame.
 Every output's presentation timestamps, frame count and duration are checked, then
 the complete output is decoded and both source/output hashes checked before atomic
 admission to registry schema 2. Entries bind source artifact ID/SHA-256, derivative
-path/hash/size, frame count/rate and an identity time mapping with at most 1/30 s
-sampling error. Full source hashes are checked during encoding; periodic scans
-reuse a verified entry by immutable identity and file size. Dataset export checks
+path/hash/size, frame count/rate and an identity time mapping. New outputs bound
+source-image timestamp selection using every inspected source PTS and the encoder's
+`fps round=near` rule; unsupported gaps exceeding 1/30 s are rejected. Output CFR
+alone is not this proof, nor is timestamp selection pixel/content identity or
+hardware synchronization. Historical entries remain provenance, not re-certified
+encoder truth. Full source hashes are checked during encoding; cached reuse and
+read-only admission stream-check derivative hashes against the DB source anchor.
+Dataset export checks
 full source and derivative hashes again. `--audit /private/path/report.json` checks
 every original presentation timestamp without changing files.
 
-The maintained `operations/video/video-normalize.service` and timer run on the
-four-core production host, using three CPUs and low priority. Install them only
-after migration and point `/opt/woona-current-fps30` at the reviewed source export.
+The maintained `operations/video/video-normalize.service` and timer are host-only,
+using three CPUs and low priority. The owner reports migration complete; this
+source integration does not authorize migration replay, timer installation/start,
+manual scans, or repointing existing jobs. Host source updates require a separate
+explicit live gate; an API/worker image update does not update the host job.
 This is video processing; scheduled/full/off-host backups remain disabled under
 the owner’s decision of 27 October 2026. Encoding errors
 appear in the service journal and do not admit the failed video. The next scan
@@ -74,7 +81,13 @@ previous images. Rollback refuses to overwrite rows edited after migration. Do
 not attempt inverse rounding. Historical schema-1 orientation entries remain
 readable for rollback, but cannot enter a new 30 fps labeling task.
 
-After verifying the LS configuration, tasks, coordinates, exports and image
-provenance, remove temporary scripts, pending files and unreferenced orientation
-copies. Retain the maintained commands, registry, migration journal and originals.
-A label does not prove complete coverage or dataset quality admission.
+New media is fsynced and published under a unique path before registry replacement;
+registry publication failure before replacement leaves the previous reference and
+bytes intact. Successful publication flushes affected directories. Per-recording
+successes/failures are not a batch transaction. Retain old derivatives, originals,
+registry and migration journal; this change grants no cleanup authority.
+
+The rational unit tests do not prove real Label Studio Django/PostgreSQL transaction
+or recovery behavior. Before any future apply/rollback require a pinned isolated
+real-LS fixture and separate authority; do not replay the owner-completed migration
+for this source integration. A label does not prove coverage or dataset quality.

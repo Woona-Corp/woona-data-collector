@@ -286,6 +286,12 @@ def managed_task_patch(candidate: dict, current: dict) -> dict | None:
             meta[key] = candidate['meta'][key]
     presentation = candidate['meta'].get('video_presentation')
     if presentation:
+        if is_cfr30(presentation):
+            coordinates = meta.get('annotation_coordinates')
+            if (not isinstance(coordinates, dict) or type(coordinates.get('frame_rate')) not in (int, float)
+                    or coordinates['frame_rate'] != FRAME_RATE or type(coordinates.get('frame_origin')) is not int
+                    or coordinates['frame_origin'] != 1 or coordinates.get('end_inclusive') is not True):
+                raise RuntimeError('Existing task requires migrated 30 fps annotation coordinates')
         if data.get('video') not in (candidate['data']['original_video'], candidate['data']['video']):
             raise RuntimeError('Presentation change conflicts with current task video')
         data.update(original_video=candidate['data']['original_video'], video=candidate['data']['video'])

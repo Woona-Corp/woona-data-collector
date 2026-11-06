@@ -90,3 +90,82 @@ class CfrPresentationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'migrated fixed 30'):
                 active_project(fetch=lambda *args:{'label_config':config})
             self.assertEqual(active_project(fetch=lambda *args:{'label_config':config.replace('24','30')})['frame_rate'],30)
+
+
+class CfrAdmissionSafetyTest(unittest.TestCase):
+    def proof(self):
+        import hashlib
+        return dict(transform='cfr30', frame_rate=30, frame_count=30, duration_seconds=1,
+            source_duration_seconds=1, grid_error_seconds=0, video_start_seconds=0,
+            time_mapping={'scale': 1, 'offset_seconds': 0, 'max_error_seconds': 1/30},
+            source_artifact_id='artifact', source_sha256='a'*64, source_relative_path='source.mp4',
+            relative_path='derived/cfr30/clip.mp4', size_bytes=5,
+            sha256=hashlib.sha256(b'video').hexdigest(), verified_at_utc='2026-11-06T00:00:00+00:00',
+            encoder={'codec': 'libx264', 'preset': 'ultrafast', 'crf': 18, 'maxrate_kbps': 12000})
+
+    def test_schema2_checks_actual_derivative_and_malformed_binding_read_only(self):
+        from copy import deepcopy
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / 'derived/cfr30/clip.mp4'
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b'video')
+            registry = root / 'derived/video-presentations.json'
+            original = self.proof()
+            def read(item):
+                registry.write_text(json.dumps({'schema_version': 2, 'entries': {'r': item}}))
+                snapshot = registry.read_bytes()
+                with patch.object(Path, 'write_text', side_effect=AssertionError('read path wrote registry')):
+                    result = presentation_for_video('r', 'artifact', 'a'*64, root)
+                self.assertEqual(registry.read_bytes(), snapshot)
+                return result
+            self.assertEqual(read(original), original)
+            media.write_bytes(b'other')
+            with self.assertRaisesRegex(ValueError, 'checksum|changed'):
+                read(original)
+            media.write_bytes(b'video')
+            for field, value in [('sha256', 'bad'), ('source_artifact_id', 'other'),
+                    ('source_sha256', 'b'*64), ('relative_path', '../outside.mp4'),
+                    ('relative_path', 5), ('size_bytes', True), ('time_mapping', []),
+                    ('source_relative_path', '/absolute'), ('verified_at_utc', None)]:
+                with self.subTest(field=field, value=value):
+                    item = deepcopy(original)
+                    item[field] = value
+                    with self.assertRaises(ValueError):
+                        read(item)
+
+    def test_migrated_task_noop_and_fresh_coordinate_conflict_prevent_patch(self):
+        from copy import deepcopy
+        from server.label_sync import managed_task_patch
+        candidate = {'data': {'source_id': 'woona:r', 'video': '/derived', 'original_video': '/original'},
+                     'meta': {'video_presentation': self.proof()}}
+        current = deepcopy(candidate)
+        current.update(id=7, annotations=[{'id': 8, 'result': ['keep']}])
+        current['data']['custom'] = 'keep'
+        current['meta'].update(review='keep', annotation_coordinates={
+            'frame_rate': 30, 'frame_origin': 1, 'end_inclusive': True})
+        self.assertIsNone(managed_task_patch(candidate, current))
+        project = {'id': 21, 'frame_rate': 30}
+        for coordinates in [None, [], {}, {'frame_rate': 24, 'frame_origin': 1, 'end_inclusive': True},
+                {'frame_rate': 30, 'frame_origin': 0, 'end_inclusive': True},
+                {'frame_rate': 30, 'frame_origin': 1, 'end_inclusive': False}]:
+            with self.subTest(coordinates=coordinates):
+                broken = deepcopy(current)
+                broken['meta']['annotation_coordinates'] = coordinates
+                with self.assertRaisesRegex(RuntimeError, 'coordinate'):
+                    managed_task_patch(candidate, broken)
+                listed = deepcopy(current)
+                listed['data']['video'] = '/original'
+                with patch('server.label_sync.active_project', return_value=project), \
+                     patch('server.label_sync.ensure_storage'), \
+                     patch('server.label_sync.app_tasks', return_value=[candidate]), \
+                     patch('server.label_sync.paged', return_value=[listed]), \
+                     patch('server.label_sync.request_json', return_value=broken) as api, \
+                     patch.dict('os.environ', {'DATABASE_URL': 'unused'}):
+                    with self.assertRaisesRegex(RuntimeError, 'coordinate'):
+                        _sync_unlocked()
+                    self.assertEqual([c.args[0] for c in api.call_args_list], ['GET'])
+        conflict = deepcopy(current)
+        conflict['data']['source_id'] = 'other'
+        with self.assertRaisesRegex(RuntimeError, 'identity'):
+            managed_task_patch(candidate, conflict)

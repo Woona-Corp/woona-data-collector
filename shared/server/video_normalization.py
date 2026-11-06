@@ -30,10 +30,7 @@ def encoder_recipe(preset, crf):
 
 
 def prepared(root, row, item, preset, crf):
-    """Cheap periodic admission: immutable source identity plus verified output stat.
-
-    Full hashes are checked when encoding/reusing a file and again by dataset export.
-    """
+    """DB source identity/size anchor; stream-check the actual cached derivative."""
     if not is_cfr30(item):
         return False
     if (item.get('source_artifact_id') != str(row['id']) or item.get('source_sha256') != row['sha256']
@@ -44,7 +41,7 @@ def prepared(root, row, item, preset, crf):
         output = local_file(root, item['relative_path'])
         return (output.is_relative_to(Path(root).resolve() / 'derived' / 'cfr30')
                 and source.stat().st_size == row['expected_size_bytes']
-                and output.stat().st_size == item['size_bytes'])
+                and output.stat().st_size == item['size_bytes'] and sha256(output) == item['sha256'])
     except (OSError, ValueError, KeyError):
         return False
 
@@ -109,6 +106,33 @@ def discover(container):
     return rows
 
 
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def source_sampling_error(source, video, frames):
+    """Model fps round=near source-PTS selection, not pixel/content equivalence."""
+    result = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                             '-show_entries', 'frame=best_effort_timestamp', '-of', 'csv=p=0', str(source)],
+                            capture_output=True, text=True, timeout=180, check=True)
+    tb = Fraction(video['time_base'])
+    pts = sorted(int(line.split(',')[0]) * tb for line in result.stdout.splitlines() if line.split(',')[0].strip())
+    if not pts or pts[0] != 0 or len(pts) != len(set(pts)):
+        raise ValueError('Unsupported source timing for identity mapping')
+    selected, error = 0, Fraction(0)
+    for tick in range(frames):
+        while selected + 1 < len(pts) and int(pts[selected + 1] * FPS + Fraction(1, 2)) <= tick:
+            selected += 1
+        error = max(error, abs(Fraction(tick, FPS) - pts[selected]))
+    if error > Fraction(1, FPS):
+        raise ValueError('Source sampling error exceeds one CFR frame')
+    return float(error)
+
+
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +142,7 @@ def atomic_json(path, value):
         f.flush()
         os.fsync(f.fileno())
     pending.replace(path)
+    fsync_directory(path.parent)
 
 
 def audit(root, rows, output):
@@ -154,15 +179,22 @@ def normalize_one(root, row, registry, *, threads=3, preset='ultrafast', crf=18)
     metadata, video, duration, start = probe(source)
     if abs(start) > 1e-4:
         raise ValueError('Nonzero first video offset needs an explicit time mapping')
-    output = root / 'derived' / 'cfr30' / (recording + '.mp4')
-    output.parent.mkdir(parents=True, exist_ok=True)
-    pending = output.with_suffix('.pending.mp4')
     frames = math.ceil(duration * FPS - 1e-6)
+    subprocess.run(['nice', '-n', '15', 'ffmpeg', '-v', 'error', '-xerror', '-err_detect', 'explode',
+                    '-threads', str(threads), '-i', str(source), '-map', '0:v:0', '-f', 'null', '-'],
+                   check=True, timeout=3600)
+    sampling_error = source_sampling_error(source, video, frames)
+    output = root / 'derived' / 'cfr30' / (recording + '-' + uuid.uuid4().hex + '.mp4')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fsync_directory(root)
+    fsync_directory(output.parent.parent)
+    pending = output.with_suffix('.pending.mp4')
     target_duration = frames / FPS
     if shutil.disk_usage(root).free < 10_000_000_000 + target_duration * 1_500_000:
         raise ValueError('Insufficient free space for a verified working copy')
     progress = pending.with_suffix('.progress')
-    command = ['nice', '-n', '15', 'ffmpeg', '-v', 'error', '-nostdin', '-y', '-threads', str(threads)]
+    command = ['nice', '-n', '15', 'ffmpeg', '-v', 'error', '-xerror', '-err_detect', 'explode',
+               '-nostdin', '-y', '-filter_threads', str(threads), '-threads', str(threads)]
     if rotation is not None:
         command += ['-noautorotate', '-display_rotation', str(rotation)]
     command += ['-copyts', '-start_at_zero', '-i', str(source), '-map', '0:v:0']
@@ -175,7 +207,7 @@ def normalize_one(root, row, registry, *, threads=3, preset='ultrafast', crf=18)
                 '-c:a', 'copy', '-t', str(target_duration), '-avoid_negative_ts', 'disabled',
                 '-metadata:s:v:0', 'rotate=0', '-movflags', '+faststart', str(pending)]
     started = time.monotonic()
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, timeout=3600)
     out_metadata, out_video, out_duration, out_start = probe(pending)
     out_audio = [s for s in out_metadata['streams'] if s['codec_type'] == 'audio']
     if len(out_audio) != len(audio) or any(
@@ -191,7 +223,7 @@ def normalize_one(root, row, registry, *, threads=3, preset='ultrafast', crf=18)
     # Packet inspection does not decode H.264. The encode itself decoded the complete source;
     # a separate full decode validates the finalized output before registry admission.
     subprocess.run(['nice', '-n', '15', 'ffmpeg', '-v', 'error', '-xerror', '-threads', str(threads),
-                    '-i', str(pending), '-map', '0:v:0', '-fps_mode', 'passthrough', '-f', 'null', '-'], check=True)
+                    '-i', str(pending), '-map', '0:v:0', '-fps_mode', 'passthrough', '-f', 'null', '-'], check=True, timeout=3600)
     if sha256(source) != row['sha256']:
         raise ValueError('Source changed during normalization')
     item = dict(source_artifact_id=str(row['id']), source_sha256=row['sha256'],
@@ -199,14 +231,18 @@ def normalize_one(root, row, registry, *, threads=3, preset='ultrafast', crf=18)
                 relative_path=output.relative_to(root).as_posix(), sha256=sha256(pending),
                 size_bytes=pending.stat().st_size, transform='cfr30', frame_rate=FPS,
                 frame_count=frames, source_duration_seconds=duration, duration_seconds=out_duration,
-                time_mapping={'scale': 1, 'offset_seconds': 0, 'max_error_seconds': 1 / FPS},
+                time_mapping={'scale': 1, 'offset_seconds': 0, 'max_error_seconds': sampling_error},
                 grid_error_seconds=grid['grid_error_seconds'], source_rotation_override=rotation,
                 video_start_seconds=out_start, audio_streams=len(audio),
                 discarded_empty_audio_streams=sum(s['codec_type'] == 'audio' for s in metadata['streams']) - len(audio),
                 encoder=encoder_recipe(preset, crf),
                 verified_at_utc=datetime.now(timezone.utc).isoformat(),
                 processing_seconds=time.monotonic()-started)
-    pending.replace(output)
+    with pending.open('rb') as stream:
+        os.fsync(stream.fileno())
+    os.link(pending, output)  # Never overwrite bytes referenced by an active registry.
+    pending.unlink()
+    fsync_directory(output.parent)
     progress.unlink(missing_ok=True)
     return item
 
@@ -215,6 +251,7 @@ def prepare(root, rows, registry_path, *, threads=3, preset='ultrafast', crf=18)
     registry_path = Path(registry_path)
     lock = Path(root) / 'derived' / 'video-normalization.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
+    fsync_directory(lock.parent.parent)
     with lock.open('w') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         registry = json.loads(registry_path.read_text()) if registry_path.exists() else {'schema_version': 2, 'entries': {}}

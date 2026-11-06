@@ -1,7 +1,9 @@
 """Verified working videos, separate from immutable capture artifacts."""
+import hashlib
 import json
 import math
 import os
+from datetime import datetime
 from pathlib import Path
 
 
@@ -21,7 +23,7 @@ def is_cfr30(item):
     if not all(type(v) in (int, float) and math.isfinite(v) for v in numbers):
         return False
     return (item.get('frame_rate') == FRAME_RATE and type(item.get('frame_count')) is int
-            and item['frame_count'] > 0
+            and item['frame_count'] > 0 and item['source_duration_seconds'] > 0
             and abs(item['duration_seconds'] - item['frame_count'] / FRAME_RATE) <= 1e-4
             and -1e-4 <= item['duration_seconds'] - item['source_duration_seconds'] <= 1 / FRAME_RATE + 1e-4
             and 0 <= item['grid_error_seconds'] <= 1e-6 and abs(item['video_start_seconds']) <= 1e-6
@@ -35,16 +37,47 @@ def presentation_for_video(recording_id, artifact_id, source_sha256, storage=Non
     if not manifest.is_file():
         return None
     data = json.loads(manifest.read_text())
-    if data.get('schema_version') not in (1, 2):
+    if (not isinstance(data, dict) or type(data.get('schema_version')) is not int
+            or data['schema_version'] not in (1, 2) or not isinstance(data.get('entries'), dict)):
         raise ValueError('Unsupported video presentation registry')
     item = data['entries'].get(str(recording_id))
     if item is None:
         return None
-    original_matches = item['source_artifact_id'] == str(artifact_id) and item['source_sha256'] == source_sha256
+    if not isinstance(item, dict):
+        raise ValueError('Malformed video presentation')
+    original_matches = item.get('source_artifact_id') == str(artifact_id) and item.get('source_sha256') == source_sha256
     legacy_verified = item.get('timestamps_identical') is True and item.get('payload_identical') is True
     if not original_matches or not (is_cfr30(item) or legacy_verified and item.get('transform') is None):
         raise ValueError('Video presentation is not bound to the original artifact or not verified')
-    path = (root / item['relative_path']).resolve()
-    if not path.is_relative_to(root / 'derived') or not path.is_file() or path.stat().st_size != item['size_bytes']:
+    cfr = item.get('transform') == 'cfr30'
+    if cfr:
+        for key in ('source_sha256', 'sha256'):
+            value = item.get(key)
+            if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+                raise ValueError('Malformed video presentation checksum')
+        source = item.get('source_relative_path')
+        encoder = item.get('encoder')
+        if (data['schema_version'] != 2 or type(item.get('size_bytes')) is not int or item['size_bytes'] <= 0
+                or not isinstance(source, str) or not source or Path(source).is_absolute() or '..' in Path(source).parts
+                or not isinstance(encoder, dict) or encoder.get('codec') != 'libx264'
+                or encoder.get('preset') not in ('ultrafast', 'superfast', 'veryfast', 'fast')
+                or type(encoder.get('crf')) is not int or not 0 <= encoder['crf'] <= 30
+                or encoder.get('maxrate_kbps') != 12000):
+            raise ValueError('Malformed video presentation proof')
+        try:
+            if datetime.fromisoformat(item['verified_at_utc']).tzinfo is None:
+                raise ValueError('Missing verification timezone')
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError('Malformed video presentation verification time') from error
+    relative = item.get('relative_path')
+    if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
         raise ValueError('Video presentation file missing or changed')
+    path = (root / relative).resolve()
+    boundary = root / 'derived' / 'cfr30' if cfr else root / 'derived'
+    if not path.is_relative_to(boundary) or not path.is_file() or path.stat().st_size != item.get('size_bytes'):
+        raise ValueError('Video presentation file missing or changed')
+    if cfr:
+        with path.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != item['sha256']:
+                raise ValueError('Video presentation checksum changed')
     return dict(item)

@@ -59,3 +59,29 @@ class DatasetExportTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CfrDatasetIdentityTest(unittest.TestCase):
+    def test_original_alignment_hash_and_presentation_error_remain_separate(self):
+        config = '<View><Video name="video" frameRate="30"/><TimelineLabels name="labels" toName="video"><Label value="Шаг"/></TimelineLabels></View>'
+        proof = dict(transform='cfr30', frame_rate=30, frame_count=30, duration_seconds=1,
+            source_duration_seconds=1, grid_error_seconds=0, video_start_seconds=0,
+            time_mapping={'scale': 1, 'offset_seconds': 0, 'max_error_seconds': 1/30})
+        task = {'id': 1, 'data': {'recording_id': 'r', 'dog_id': 'd', 'dog_profile_version_id': 'v', 'video': '/derived'},
+            'meta': {'video_presentation': proof, 'dog_questionnaire': {}, 'session_questionnaire': {},
+                     'annotation_coordinates': {'frame_rate': 30, 'frame_origin': 1, 'end_inclusive': True}},
+            'annotations': [{'id': 2, 'result': [{'id': 'a', 'type': 'timelinelabels', 'from_name': 'labels', 'to_name': 'video',
+                'value': {'ranges': [{'start': 1, 'end': 30}], 'timelinelabels': ['Шаг']}}]}]}
+        files = [{'artifact_type': k, 'storage_status': 'available', 'sha256': k} for k in ['packet', 'packet_timeline', 'raw', 'diagnostic', 'sync', 'video']]
+        alignment = dict(status='verified', method='shared_clock', clock_basis_confirmed=True, latency_bound_measured=True,
+            offset_seconds=0, scale=1, max_error_seconds=.2, packet_sha256='packet', packet_timeline_sha256='packet_timeline', video_sha256='video')
+        inventory = {'r': {'ingest_status': 'complete', 'capture_status': 'completed', 'sync': {'alignment': alignment}, 'artifacts': files}}
+        result = build_dataset([deepcopy(task)], [task], inventory, {'label_config': config}, 'ble')['records'][0]
+        self.assertEqual(result['alignment']['video_sha256'], 'video')
+        self.assertEqual(result['video_presentation']['download_url'], '/derived')
+        self.assertEqual(result['segments'][0]['presentation_time_error_seconds'], 1/30)
+        self.assertEqual(result['segments'][0]['sensor_intervals'][0]['max_error_seconds'], .2)
+        changed = deepcopy(task)
+        changed['meta']['annotation_coordinates']['frame_rate'] = 24
+        with self.assertRaisesRegex(ValueError, 'FPS changed'):
+            build_dataset([task], [changed], inventory, {'label_config': config})
