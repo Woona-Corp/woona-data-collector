@@ -1,118 +1,89 @@
 # Woona Data Collector
 
-[CI](https://github.com/Woona-Corp/woona-data-collector/actions/workflows/mobile.yml) · [Releases](https://github.com/Woona-Corp/woona-data-collector/releases) · [Agent guide](AGENTS.md)
+Project documentation and wiki: [AFFiNE](https://159.223.239.217/workspace/8f9b801d-6f90-40a6-a70f-723db87d0355/25df5d8c-5468-5202-8364-1e43df703344).
 
-Native Android 12+ and iOS 17+ apps for dog profiles, questionnaires, BLE sensor recordings, optional synchronized video, offline storage, and resumable server sync. The shared FastAPI service stores metadata in PostgreSQL and recording files on disk. See [Architecture](ARCHITECTURE.md) for the data flow and [the shared contracts](shared/docs/target-server-plan/README.md) for schemas and API details.
+Native Android 12+ and iOS 17+ apps for dog profiles, questionnaires, BLE recordings,
+optional video and offline sync. FastAPI stores metadata in PostgreSQL and artifacts
+on disk. Android and iOS share the same [UI/UX contract](shared/UI_UX_CONTRACT.md)
+and release independently.
 
-Android and iOS share the same UI/UX requirements; independent releases do not permit different user workflows. See [UI/UX contract and remaining gaps](shared/UI_UX_CONTRACT.md).
+[CI](https://github.com/Woona-Corp/woona-data-collector/actions/workflows/mobile.yml) ·
+[Releases](https://github.com/Woona-Corp/woona-data-collector/releases) ·
+[Agent rules](AGENTS.md)
 
-Heart sessions, the separate post-recording questionnaire, and manual ECG/HR/reference uploads are documented in [Heart recordings](shared/HEART_RECORDINGS.md).
+## Start here
 
-Operator accounts and post-recording questionnaire edits in 1.3.5 are documented in [Accounts](shared/ACCOUNTS.md).
-
-The production labeling stack, canonical recordings, and annotation counts are documented in [Label Studio deployment](shared/LABEL_STUDIO.md).
-
-Backups are disabled by the owner's explicit decision of 27 October 2026; server and laptop jobs must stay disabled. See [Backup policy](shared/operations/backups/README.md). `./woona status` shows production health and this policy; `./woona check server` and `./woona check android` run local checks. The optional Windows/Clinic commands require the full Woona workspace.
-
-| Directory | Contents |
+| Task | Guide |
 | --- | --- |
-| [`android/`](android/) | Single-module Kotlin/Compose app, Gradle wrapper, tests, and SDK setup |
-| [`ios/`](ios/) | SwiftUI app, Xcode project, and XCTest suite; no third-party packages |
-| [`shared/`](shared/) | FastAPI, PostgreSQL Compose stack, contracts, and server tests |
-| [`AGENTS.md`](AGENTS.md) | Boundaries and verification instructions for coding agents |
+| Understand the system and module boundaries | [Architecture](ARCHITECTURE.md) |
+| Accounts, heart sessions and reference uploads | [Accounts](shared/ACCOUNTS.md), [heart recordings](shared/HEART_RECORDINGS.md) |
+| Build, sign or test iOS | [iOS guide](ios/README.md) |
+| Test Android sync and camera on a phone | [Isolated phone checks](android/docs/PHONE_CHECKS.md) |
+| Deploy and identify the running server | [Operations](shared/docs/target-server-plan/operations.md), [build inputs](shared/server/DEPENDENCY_BUILD.md), [provenance](shared/server/DEPLOYMENT_PROVENANCE.md) |
+| Find schemas, API notes and earlier acceptance results | [Contracts and plan index](shared/docs/target-server-plan/README.md) |
+| Inspect production labeling | [Label Studio](shared/LABEL_STUDIO.md) |
+
+Backups remain **disabled** by the owner's decision of 27 October 2026.
+Setup and updates must preserve the [backup policy](shared/operations/backups/README.md).
+`./woona status` reads production health; `./woona check server` and
+`./woona check android` run local checks. Windows/Clinic checks need the full workspace.
 
 ## Run locally
 
-**Android:** Install JDK 21 and the Android SDK, then open `android/` in Android Studio or use:
+**Android:** Install JDK 21, then prepare the SDK and build/test the single `app` module:
 
-```bash
+```sh
 ./android/tools/setup-android-sdk.sh fast
 ./android/tools/check.sh fast
 ```
 
-The debug APK is `android/app/build/outputs/apk/debug/app-debug.apk`. The `full` check adds the API 31 managed emulator suite. SDK setup defaults to `full` (including the emulator and API 31 system image); use `./android/tools/setup-android-sdk.sh full` before running the `full` check. The debug build defaults to the production URL `https://cool-trams.digital`, with no embedded token. For local emulator testing, configure `http://10.0.2.2:8080` in the app; for a physical phone, configure a reachable HTTPS server URL and a device token.
+APK: `android/app/build/outputs/apk/debug/app-debug.apk`. For the API 31 managed
+emulator suite, run SDK setup and checks with `full`. SDK setup defaults to `full`.
+Debug uses `https://cool-trams.digital` without an embedded token. For a local API,
+set `http://10.0.2.2:8080` in the emulator; phones need reachable HTTPS and a device token.
 
-For physical-phone sync tests, start an isolated Compose project with fresh storage:
+**iOS:** On macOS/Xcode, open `ios/Woona.xcodeproj`, choose the `Woona` scheme and
+an available simulator or signed device. [Test and distribution commands](ios/README.md).
 
-```bash
-mkdir -p /tmp/woona-phone-e2e/storage
-sudo chown -R 10001 /tmp/woona-phone-e2e/storage
-WOONA_API_PORT=18088 WOONA_STORAGE_ROOT_HOST=/tmp/woona-phone-e2e/storage \
-  docker compose -p woona-phone-e2e -f shared/compose.yaml up -d --build --wait
-```
+**Shared server:** From the repository root:
 
-Start `python android/tools/e2e-fault-proxy.py` in another terminal; it forwards to that local API and injects one-shot HTTP 503, read timeout, and compressed-ETag responses. Build an isolated diagnostic package to preserve an installed signed field app and its recordings:
-
-```bash
-cat > /tmp/woona-e2e.gradle <<'EOF'
-allprojects { plugins.withId('com.android.application') { androidComponents.finalizeDsl { dsl -> dsl.defaultConfig.applicationId = 'com.woona.drivetest.diagnostics' } } }
-EOF
-./android/gradlew -p android -I /tmp/woona-e2e.gradle assembleDebug assembleDebugAndroidTest
-adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-adb install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-adb reverse tcp:18088 tcp:18088
-adb reverse tcp:18089 tcp:18089
-adb shell am instrument -w -r \
-  -e class com.example.myapplication.sync.ServerApiClientIntegrationTest,com.example.myapplication.video.AndroidVideoRecorderDeviceTest \
-  -e serverBaseUrl http://127.0.0.1:18088 \
-  -e serverToken change-me-local-token \
-  -e serverFaultBaseUrl http://127.0.0.1:18089 \
-  com.woona.drivetest.diagnostics.test/androidx.test.runner.AndroidJUnitRunner
-```
-
-The tests cover all eight artifact types, Polar CSV files, live/replay/failed recordings, SQLite restore, upload/download resumption, integrity checks, real WorkManager retry, and physical camera capture with mock BLE. Optional `serverSecondaryToken` and `serverRevokedToken` instrumentation arguments exercise another device's upload ownership and revoked credentials; provision these only in the isolated server using `server.device_admin`. Production diagnostics are read-only and separately opt in through a privately supplied `cache/connection-test.token`.
-
-**iOS:** On macOS with Xcode, open `ios/Woona.xcodeproj` and run the shared `Woona` scheme. To run tests from the terminal, choose an available simulator:
-
-```bash
-xcodebuild -project ios/Woona.xcodeproj -scheme Woona \
-  -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16' test
-```
-
-See [the iOS guide](ios/README.md) for device signing and feature details. iOS cannot be built or tested with Xcode on Linux.
-
-**Shared server:** Docker Compose binds the API to localhost and does not publish PostgreSQL. Keep `.env` out of Git and replace its local-only credentials before any network deployment.
-
-```bash
+```sh
 cd shared
 cp .env.example .env
 mkdir -p ../var/storage
-sudo chown -R 10001 ../var/storage # API container runs as UID 10001
+sudo chown -R 10001 ../var/storage
 docker compose config -q
 docker compose up -d --build --wait
 curl http://127.0.0.1:8080/health/ready
 docker compose exec -T api python -m unittest discover -v -s server/tests
 ```
 
-The Android emulator reaches the host at `10.0.2.2`; a phone needs a reachable HTTPS endpoint. [Server operations](shared/docs/target-server-plan/operations.md) covers deployment and backups. [Dependency/build locking](shared/server/DEPENDENCY_BUILD.md) defines the hash-locked Python graph and pinned base; [deployment provenance](shared/server/DEPLOYMENT_PROVENANCE.md) defines verified image inputs and preflight. A dirty deployment checkout's HEAD is not proof of running image source.
+The API binds to localhost; PostgreSQL is private. Keep `.env` out of Git and
+replace local credentials before network deployment. The API runs as UID 10001.
 
 ## Checks and releases
 
-Pushes to `main` and pull requests select Android, iOS and server checks by a tested changed-path policy. Shared contracts/fixtures/workflows and unknown or unavailable diffs run all checks; platform-owned paths run their owners. Tags and manual scopes preserve full distribution coverage. The large ZIP64 fixture remains default-on, with a narrow ordinary-CI opt-out only for unrelated changes. See [CI selection policy](.github/ci/POLICY.md). Releases are independent; a platform-specific fix does not require releasing the other client. Keep functionality and shared contracts compatible across Android and iOS, and track temporary feature gaps explicitly. Marketing and build versions may differ.
+Pushes to `main` and pull requests use the [changed-path CI policy](.github/ci/POLICY.md).
+Unknown diffs, shared contracts/fixtures/workflows, tags and manual distribution
+scopes retain broad checks. The large ZIP64 fixture defaults to enabled.
 
-| Release | Trigger | Checks and delivery |
+| Platform | Before tagging | Trigger and output |
 | --- | --- | --- |
-| Android | `android-v*` tag | Android tests/lint and server tests; signed APK and SHA-256 in a GitHub Release |
-| iOS | `ios-v*` tag, or manual `Upload iOS to TestFlight` workflow | iOS simulator tests; signed archive uploaded to App Store Connect |
+| Android | Commit `versionCode` and `versionName` in `android/app/build.gradle.kts` | `android-v*`: tests/lint, server tests, signed APK and SHA-256 in GitHub Releases |
+| iOS | Commit app `MARKETING_VERSION` in `ios/Woona.xcodeproj/project.pbxproj` | `ios-v*` or manual TestFlight workflow: simulator tests, signed archive, Apple upload; CI sets the build number |
 
-For Android, update only `versionCode` and `versionName` in `android/app/build.gradle.kts`, then push the matching tag:
+Push the version commit before its tag. Legacy `v*` tags do not release mobile
+builds; pushes to `main` run CI without distribution. For contract changes, deploy
+and verify a compatible server before shipping dependent clients; retain support
+for installed clients during rollout.
 
-```bash
-git tag -a android-v1.3.8 -m 'Woona Android 1.3.8'
-git push origin android-v1.3.8
-```
+Android signing needs `ANDROID_KEYSTORE_BASE64`, `ANDROID_SIGNING_STORE_PASSWORD`,
+`ANDROID_SIGNING_KEY_ALIAS` and `ANDROID_SIGNING_KEY_PASSWORD`. The field-key
+`Woona-Android-release.apk` updates field installations; branch artifacts are
+`Woona-Android-debug.apk`. Distributable APKs must contain no server token.
+[iOS signing and Apple processing checks](ios/README.md) are separate.
 
-For iOS, update only the app's `MARKETING_VERSION` in `ios/Woona.xcodeproj/project.pbxproj`, then push the matching tag. CI generates the build number automatically:
-
-```bash
-git tag -a ios-v1.3.8 -m 'Woona iOS 1.3.8'
-git push origin ios-v1.3.8
-```
-
-Commit and push version changes before tagging. Legacy `v*` tags no longer trigger releases. A push to `main` runs CI without distributing a new mobile build. For shared API/schema changes, deploy and verify a compatible server before distributing dependent clients; support clients already installed during a staged rollout.
-
-Android releases require `ANDROID_KEYSTORE_BASE64`, `ANDROID_SIGNING_STORE_PASSWORD`, `ANDROID_SIGNING_KEY_ALIAS`, and `ANDROID_SIGNING_KEY_PASSWORD`. `Woona-Android-release.apk` uses the field release key and can update an existing field installation; branch builds publish `Woona-Android-debug.apk`. Do not embed a server token in a distributable APK.
-
-iOS distribution requires Apple signing and App Store Connect secrets listed in [the iOS guide](ios/README.md). Simulator test success does not prove TestFlight availability: verify Apple processing and assignment to the tester group separately.
-
-Emulator and simulator checks cover software behavior. Real BLE, camera capture, `video.mp4` quality, and hardware synchronization still require tests with the target sensor and physical phones. Prior local acceptance notes are in the [acceptance report](shared/docs/target-server-plan/acceptance-report.md); they are historical results, not proof of a new release.
+Emulator/simulator results verify software behavior. Real BLE, camera/MP4 quality
+and hardware synchronization require physical devices. Dated
+[acceptance results](shared/docs/target-server-plan/acceptance-report.md) do not
+verify a new release; a dirty deployment checkout's HEAD does not identify the running image.
