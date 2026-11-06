@@ -23,6 +23,7 @@ class ServerSettingsDraftRecreationTest {
             compose.onNode(hasText("Connect") or hasText("Reconnect")).performScrollTo().performClick()
             compose.onNodeWithText("Server URL").performTextReplacement("https://draft.invalid")
             compose.onNodeWithText("New token").performTextInput("synthetic-draft-only")
+            UiStopTrace.beforeClose("ServerDraft.beforeRecreate")
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             scenario.recreate()
             compose.waitUntil(30_000) { compose.onAllNodesWithText("New token").fetchSemanticsNodes().isNotEmpty() }

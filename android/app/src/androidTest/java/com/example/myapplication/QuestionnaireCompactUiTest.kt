@@ -121,7 +121,11 @@ class QuestionnaireCompactUiTest {
                 assertEquals(listOf("Аллюр/движение"), saved?.plannedActivities)
                 assertEquals(false, saved?.videoRequested)
             }
+        } catch (primary: Throwable) {
+            UiStopTrace.primary("Compact.landscape", primary)
+            throw primary
         } finally {
+            UiStopTrace.beforeClose("Compact.landscape")
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
             compose.activity.restoreTestOrientation(orientation)
@@ -162,7 +166,11 @@ class QuestionnaireCompactUiTest {
                 assertEquals("Portrait keyboard", saved?.sessionLabel)
                 assertEquals(listOf("Аллюр/движение"), saved?.plannedActivities)
             }
+        } catch (primary: Throwable) {
+            UiStopTrace.primary("Compact.portrait", primary)
+            throw primary
         } finally {
+            UiStopTrace.beforeClose("Compact.portrait")
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
             compose.activity.restoreTestOrientation(orientation)
