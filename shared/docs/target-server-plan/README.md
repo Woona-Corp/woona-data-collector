@@ -6,65 +6,32 @@
 
 ## Как читать этот план сейчас
 
-Исследование и отчёты в этой папке — датированные материалы июля–августа 2026,
-а не текущий release gate. В частности, исключение iOS из исходного плана и
-старые backup/restore-проверки не описывают сегодняшнюю систему.
+План и отчёты фиксируют исследование июля–августа 2026. Это история решения,
+не текущий release gate: исключение iOS и старые backup/restore-проверки
+не описывают сегодняшнюю систему.
 
-Текущие входы: [архитектура](../../../ARCHITECTURE.md),
-[UI/UX Android и iOS](../../UI_UX_CONTRACT.md),
-[модель данных](../../DATA.md),
-[политика отключённых backups](../../operations/backups/README.md),
-[проверенный деплой](../../server/DEPLOYMENT_PROVENANCE.md).
-QA 29 октября: [Android](../../../android/docs/QA_COMPLETION_2026-10-29.md) и
-[iOS](../../../ios/QA-EVIDENCE-2026-10-29.md); это датированные результаты,
-не подтверждение новой физической приёмки.
+| Нужна текущая информация | Читать |
+| --- | --- |
+| Устройство системы и приложения | [Архитектура](../../../ARCHITECTURE.md), [UI/UX Android/iOS](../../UI_UX_CONTRACT.md) |
+| Записи и данные | [Модель данных](../../DATA.md) |
+| Деплой и ограничения backup | [Provenance](../../server/DEPLOYMENT_PROVENANCE.md), [backup policy](../../operations/backups/README.md) |
+| Датированные QA-результаты 29 октября | [Android](../../../android/docs/QA_COMPLETION_2026-10-29.md), [iOS](../../../ios/QA-EVIDENCE-2026-10-29.md) |
 
-`models/` содержит используемые приложениями и сервером SQL/JSON-контракты,
-не архив: пути сохраняются для Docker COPY, миграций, валидации и тестов.
-Исторические prose-отчёты не заменяют текущие версии схем и исходников.
+`models/` — используемые приложениями и сервером SQL/JSON-контракты.
+Их пути нужны для Docker COPY, миграций, валидации и тестов; каталог не архивный.
+Историческая проза и QA не заменяют текущие схемы или новую физическую приёмку.
 
 ## Что находится в папке
 
-- [current-state-audit.md](current-state-audit.md) — подтверждённый текущий
-  функционал, фактические ограничения и найденные разрывы.
-- [target-architecture.md](target-architecture.md) — окончательная архитектура:
-  Android offline-first, один API-сервис, PostgreSQL и файловая система сервера.
-- [questionnaires.md](questionnaires.md) — окончательные правила обязательных
-  анкет и зависимости между ответами.
-- [camera-and-sync.md](camera-and-sync.md) — единый сценарий записи, preview,
-  завершение одной кнопкой и общая шкала времени камеры/датчика.
-- [api-and-sync.md](api-and-sync.md) — REST-контракт, идемпотентная и
-  возобновляемая передача, загрузка данных обратно на устройство.
-- [implementation-plan.md](implementation-plan.md) — подробная очередность работ
-  с критериями готовности и безопасной миграцией существующих данных.
-- [verification-plan.md](verification-plan.md) — сборки, тесты, Docker E2E,
-  проверки целостности, физическая камера/BLE и визуальная матрица экранов.
-- [implementation-status.md](implementation-status.md) — что реализовано и
-  какими проверками подтверждено.
-- [acceptance-report.md](acceptance-report.md) — фактический итоговый прогон:
-  сборки, тесты, Docker/PostgreSQL, backup/restore, визуальная проверка и
-  незакрытый аппаратный gate.
-- [operations.md](operations.md) — локальный запуск, production-настройки,
-  backup/restore и диагностика.
-- [sources.md](sources.md) — первичные Android/PostgreSQL/Docker основания
-  выбранных платформенных решений.
-- [models/fields.md](models/fields.md) — краткое описание окончательных таблиц,
-  полей и отношений.
-- [models/postgresql.sql](models/postgresql.sql) — целевая PostgreSQL DDL-модель.
-- [models/sqlite.sql](models/sqlite.sql) — окончательная локальная SQLite
-  DDL-модель и состояния profile/recording sync.
-- [models/dog-questionnaire.schema.json](models/dog-questionnaire.schema.json) —
-  окончательная модель анкеты собаки.
-- [models/session-questionnaire.schema.json](models/session-questionnaire.schema.json)
-  — окончательная модель анкеты сессии.
-- [visualizations/](visualizations/) — Mermaid-исходники и готовые SVG:
-  [контекст](visualizations/system-context.svg),
-  [серверная модель данных](visualizations/data-model.svg),
-  [локальная модель данных](visualizations/local-data-model.svg),
-  [состояния записи](visualizations/recording-state.svg),
-  [запуск/остановка](visualizations/capture-sequence.svg),
-  [выгрузка](visualizations/upload-sequence.svg),
-  [UI flow](visualizations/ui-flow.svg).
+| Материал | Документы |
+| --- | --- |
+| Исследование и архитектура | [Аудит исходного состояния](current-state-audit.md), [целевое решение](target-architecture.md), [источники](sources.md) |
+| Анкеты и запись | [Анкеты](questionnaires.md), [камера и время](camera-and-sync.md), [API и синхронизация](api-and-sync.md) |
+| План и результаты | [План реализации](implementation-plan.md), [план проверок](verification-plan.md), [статус](implementation-status.md), [приёмка](acceptance-report.md) |
+| Эксплуатация | [Запуск и диагностика](operations.md); исторические backup-команды заменены политикой выше |
+| Модель данных | [Поля](models/fields.md), [PostgreSQL DDL](models/postgresql.sql), [SQLite DDL](models/sqlite.sql) |
+| Схемы анкет | [Собака](models/dog-questionnaire.schema.json), [сессия](models/session-questionnaire.schema.json) |
+| Диаграммы | [Контекст](visualizations/system-context.svg), [серверная модель](visualizations/data-model.svg), [локальная модель](visualizations/local-data-model.svg), [состояния записи](visualizations/recording-state.svg), [Start/Stop](visualizations/capture-sequence.svg), [выгрузка](visualizations/upload-sequence.svg), [UI flow](visualizations/ui-flow.svg) |
 
 ## Зафиксированные границы решения
 

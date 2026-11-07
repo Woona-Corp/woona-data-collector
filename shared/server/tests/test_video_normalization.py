@@ -33,6 +33,25 @@ class NormalizationTest(unittest.TestCase):
             self.assertTrue(packet_grid(root/rebuilt['relative_path'])['cfr30'])
             self.assertEqual(rebuilt['source_relative_path'],'source.mp4')
 
+    def test_23976_source_with_partial_tail_is_admitted(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);source=root/'source.mp4'
+            subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','testsrc2=size=160x96:rate=24000/1001',
+                            '-t','1.0','-c:v','libx264','-threads','1',str(source)],check=True)
+            row=dict(id=str(uuid.uuid4()),recording_id=str(uuid.uuid4()),server_relative_path='source.mp4',
+                     sha256=sha256(source),expected_size_bytes=source.stat().st_size)
+            result=normalize_one(root,row,{},threads=1)
+            self.assertTrue(result['time_mapping']['max_error_seconds'] <= 1/30)
+            self.assertTrue(packet_grid(root/result['relative_path'])['cfr30'])
+
+    def test_audio_only_input_fails_as_value_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            source=Path(d)/'audio.m4a'
+            subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','sine=frequency=1000:sample_rate=48000',
+                            '-t','0.2','-c:a','aac',str(source)],check=True)
+            with self.assertRaisesRegex(ValueError,'No video stream'):
+                probe(source)
+
     def test_bad_original_sha_is_rejected_before_overwriting_media(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'source.mp4';p.write_bytes(b'not video')
@@ -42,7 +61,11 @@ class NormalizationTest(unittest.TestCase):
     def test_bad_recording_does_not_block_other_uploads(self):
         with tempfile.TemporaryDirectory() as d:
             rows=[{'recording_id':str(uuid.uuid4())} for _ in range(2)]
-            item={'frame_count':30,'processing_seconds':1,'size_bytes':100}
+            item={'transform':'cfr30','frame_rate':30,'frame_count':30,
+                  'duration_seconds':1,'source_duration_seconds':1,
+                  'grid_error_seconds':0,'video_start_seconds':0,
+                  'time_mapping':{'scale':1,'offset_seconds':0,'max_error_seconds':1/30},
+                  'processing_seconds':1,'size_bytes':100}
             registry=Path(d)/'derived/registry.json'
             with patch('server.video_normalization.prepared',return_value=False), \
                  patch('server.video_normalization.normalize_one',side_effect=[ValueError('bad video'),item]):

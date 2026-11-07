@@ -677,6 +677,8 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(stops, 1, "Finalization retry must not replace validated completion with an idle Stop result")
         XCTAssertEqual(clockReads, 1, "Finalization retry must reuse the first frozen acquisition end")
         let finalized = try XCTUnwrap(store.recording(id: recording.id))
+        XCTAssertEqual(finalized.status, "failed", "The first completed request with zero packets must not become retry-interrupted")
+        XCTAssertEqual(finalized.captureErrorCode, "no_sensor_data")
         XCTAssertEqual(finalized.endedAtUTC, WoonaStore.iso8601(stoppedAt))
         XCTAssertEqual(try XCTUnwrap(finalized.questionnaire?.durationMinutes), 10.0 / 60, accuracy: 0.000001)
         let videoArtifacts = try store.artifacts(recordingID: recording.id).filter { $0.type == "video" }
@@ -724,7 +726,7 @@ final class AppShellTests: XCTestCase {
         model.stopActiveCapture(status: "interrupted")
         try await waitForHeartPromptLocalIdle(model)
         XCTAssertEqual(model.pendingPostCaptureHeartQuestionnaire?.id, id)
-        XCTAssertEqual(try store.recording(id: id)?.status, "interrupted")
+        XCTAssertEqual(try store.recording(id: id)?.status, "failed")
         model.dismissHeartQuestionnaire()
         try await waitUntil("retried finalizer queue release") { model.canChangeAccount }
     }

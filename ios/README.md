@@ -1,36 +1,39 @@
 # Woona iOS
 
-Нативный SwiftUI-клиент iOS 17+, восстановленный из старого проекта и
-синхронизированный с текущим Android-контрактом. Внешних packages нет.
+Нативный клиент iOS 17+ на SwiftUI, CoreBluetooth и AVFoundation, без внешних
+пакетов. Общие экраны и сценарии заданы в [контракте Android/iOS](../shared/UI_UX_CONTRACT.md).
 
 ## Реализованный паритет
 
-- Overview / Charts / Settings, EN/RU и system/light/dark;
-- обязательные typed-анкеты собаки и сессии с conditional validation;
-- несколько собак, immutable profile versions и последние 10 записей;
-- CoreBluetooth scan/connect, live capture и replay старых/новых dump;
-- `BLERAW2`, `packets.bin`, `packet_timeline.bin`, diagnostics и export/share;
-- «Поделиться ZIP сессии» у каждой локальной записи, независимо от серверной
-  выгрузки и перезапуска: видео, все локальные артефакты, `manifest.json`,
-  историческая анкета собаки, анкета сессии и синхронизация; «Открыть историю»
-  открывает первые 100 записей, «Показать ещё N» добавляет до 100. Список ленивый;
-  SQLite и проверка наличия файлов выполняются вне главного потока.
-  «Обновить историю» возвращает первые 100, чтобы увидеть новые записи. ZIP сохраняется через системное меню
-  в «Файлы» или передаётся AirDrop. Исходники и очередь выгрузки не изменяются.
-  Отсутствующие на устройстве файлы перечислены в `missingFiles`; их можно
-  сначала скачать кнопкой «Скачать». Размер и SHA локальных файлов проверяются.
-- задняя AVCaptureSession camera, H.264 MP4, 16:9 preview и единый Start/Stop;
-- `ios.CMClock.hostTime`, первый video PTS и `sync.json`;
-- SQLite schema v8 с атомарными миграциями, Keychain token, общий Android/iOS сервер;
-- resumable `HEAD/PATCH` upload, metadata restore (до четырёх GET деталей
-  параллельно с последовательным сохранением), проверяемый Range download
-  через `.part` и BGProcessing retry;
-- ручная проверка места и лимитов в Настройках: квота выбранного аккаунта,
-  объём принятых данных, свободное/зарезервированное место всего сервера.
-  Проверка ограничена 15 секундами, отменяется при смене настроек/аккаунта;
-  старый сервер с HTTP 404 явно помечается как не поддерживающий эту проверку.
+| Область | Возможности |
+| --- | --- |
+| Интерфейс | Животные / Сессия / Видео / Записи / Настройки; графики внутри Сессии; RU/EN, system/light/dark |
+| Анкеты | Собака и сессия, проверка зависимых полей, несколько собак, неизменяемые версии профиля |
+| Датчик | CoreBluetooth scan/connect, live capture, replay старых и новых dump |
+| Запись | Камера H.264 MP4, preview 16:9, единый Start/Stop, `ios.CMClock.hostTime`, первый video PTS и `sync.json` |
+| Хранение | SQLite v8 с атомарными миграциями, `BLERAW2`, `packets.bin`, `packet_timeline.bin`, diagnostics |
+| Синхронизация | Keychain token, `HEAD/PATCH` upload, Range download через `.part`, BGProcessing retry |
+
+Восстановление получает до четырёх GET деталей параллельно и сохраняет их
+последовательно. В Настройках ручная проверка места показывает квоту аккаунта,
+объём принятых данных и свободное/зарезервированное место сервера. Лимит —
+15 секунд; смена настроек или аккаунта отменяет запрос. HTTP 404 старого сервера
+показывается как отсутствие поддержки проверки.
+
+Последние 10 сессий видны сразу. «Открыть историю» загружает первые 100;
+«Показать ещё N» добавляет до 100, «Обновить историю» возвращает начало списка.
+Список ленивый; SQLite и проверка файлов работают вне главного потока.
+
+«Поделиться ZIP сессии» доступно у каждой локальной записи после перезапуска
+и независимо от выгрузки. Архив содержит локальные артефакты и видео,
+`manifest.json`, историческую анкету собаки, анкету сессии и синхронизацию.
+Размер и SHA проверяются; отсутствующие файлы перечисляются в `missingFiles`
+и могут быть заранее скачаны кнопкой «Скачать». Share позволяет сохранить ZIP
+в «Файлы» или отправить AirDrop; исходники и очередь выгрузки сохраняются.
 
 ## Проверка на Mac
+
+Из каталога `ios/`, выбрав доступный симулятор:
 
 ```bash
 woona_result="/tmp/WoonaTests-$(date +%s).xcresult"
@@ -40,54 +43,43 @@ xcrun xcresulttool export attachments --path "$woona_result" --output-path "$woo
 python3 tools/check-recording-export.py "$woona_result-attachments"
 ```
 
-В Debug локальный HTTP разрешён только для local networking; Release ожидает
-HTTPS. Bearer token хранится в Keychain, URL и Wi-Fi policy — в UserDefaults.
+Debug допускает локальный HTTP для local networking; Release ожидает HTTPS.
+Токен хранится в Keychain, URL и Wi-Fi policy — в UserDefaults.
 
-Затем на подписанном физическом iPhone проверить BLE, camera permission,
-preview/MP4, 10-с/1/10/30-минутные записи, background/lock/interruption,
-upload resume и восстановление Android-записи. Linux не содержит Swift/Xcode,
-поэтому не доказывает компиляцию или аппаратное поведение.
+На подписанном iPhone отдельно проверить BLE, разрешения камеры, preview/MP4,
+записи 10 с / 1 / 10 / 30 минут, фон/блокировку/прерывания, продолжение выгрузки
+и восстановление Android-записи. Linux не заменяет native build/test в Xcode;
+симулятор не подтверждает работу реального датчика и камеры.
 
 ## TestFlight через CI
 
-Пуш тега `ios-v*` запускает только workflow `Upload iOS to TestFlight`:
-проверки на iOS Simulator, подписанный архив и загрузку в App Store Connect.
-Android выпускается отдельно тегом `android-v*`; его сборка не блокирует iOS.
-Перед iOS-релизом обновите только `MARKETING_VERSION` приложения и сохраните
-изменение в коммите. Номер сборки вычисляется из номера запуска CI и его
-попытки; вручную менять `CURRENT_PROJECT_VERSION` не нужно.
+1. Измените только app `MARKETING_VERSION` и отправьте коммит.
+2. Создайте и отправьте соответствующий тег `ios-v*`. Workflow
+   `Upload iOS to TestFlight` проверит симулятор, подпишет архив и загрузит его
+   в App Store Connect. Номер сборки задаёт CI; `CURRENT_PROJECT_VERSION`
+   вручную менять не нужно.
+3. Проверьте обработку Apple и назначение сборки внутренним тестировщикам.
+   Успешная загрузка сама по себе не подтверждает их доступ.
 
-```bash
-git tag -a ios-v1.3.8 -m 'Woona iOS 1.3.8'
-git push origin ios-v1.3.8
-```
-
-Можно запустить workflow вручную на нужной ветке: `upload=true` загружает
-новую сборку, `upload=false` проверяет подпись и экспорт без загрузки.
-Пуш в `main` и старые теги `v*` не запускают загрузку в TestFlight.
-Версии и даты выпуска платформ могут различаться; функциональный паритет и
-совместимость с общим сервером сохраняются. Для изменений контрактов сначала
+Ручной запуск: `upload=true` загружает сборку; `upload=false` проверяет подпись
+и экспорт. Push в `main` и старые `v*` теги не загружают TestFlight.
+Android использует `android-v*` независимо. При смене контрактов сначала
 разверните и проверьте совместимый сервер.
 
-После загрузки проверьте обработку Apple и доступность сборки тестировщикам.
-Текущие сборки предназначены только для внутреннего тестирования.
-Отдельный workflow `Verify internal TestFlight availability` проверяет точные
-marketing version и номер загруженной сборки. По умолчанию он ничего не меняет:
-в отчёте есть Apple processing state, expiration, internal beta state,
-ID внутренних групп, число тестировщиков и подтверждённое членство сборки.
-`available_for_internal_testers=true` требует VALID, non-expired,
-IN_BETA_TESTING и назначенную внутреннюю группу с тестировщиками; установку
-на физический iPhone этот статус не доказывает.
+Workflow `Verify internal TestFlight availability` по точной версии и номеру
+сборки по умолчанию только читает состояние. `available_for_internal_testers=true`
+требует VALID, non-expired, IN_BETA_TESTING и внутреннюю группу с тестировщиками;
+это не подтверждает установку на iPhone. Отчёт содержит processing/expiration,
+beta state, ID групп, число тестировщиков и членство сборки, без списка людей.
 
-Если автоматического назначения нет, повторите этот workflow с
-`assign_internal=true` и явными `internal_group_ids` из предыдущего отчёта.
-Перед записью helper повторно проверяет принадлежность каждой группы и сборки
-к `com.woona.apps` и `isInternalGroup=true`, затем проверяет результат через API.
-Внешние группы, beta review, приглашения, localizations и список людей он не
-меняет и не выводит. Signing/upload workflow `testflight.yml` остаётся отдельным.
+Если назначения нет, повторите проверку с `assign_internal=true` и явными
+`internal_group_ids` из отчёта. Helper проверяет приложение `com.woona.apps`
+и `isInternalGroup=true` до записи, затем перечитывает результат через API.
+Внешние группы, beta review, приглашения и localizations остаются отдельными.
+Signing/upload выполняется отдельным `testflight.yml`.
 
-Секреты GitHub Actions: `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY`
-(ключ App Store Connect с ролью Developer), `BUILD_CERTIFICATE_BASE64`,
+GitHub Actions secrets: `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY`
+(App Store Connect, роль Developer), `BUILD_CERTIFICATE_BASE64`,
 `BUILD_PROVISION_PROFILE_BASE64`, `P12_PASSWORD`, `KEYCHAIN_PASSWORD`.
-Сертификат и профиль подписи истекают 24 сентября 2027 года; перед этим
-перевыпустите их и обновите соответствующие секреты.
+Сертификат и профиль истекают **24 сентября 2027**; заранее перевыпустите их
+и обновите secrets. Текущая доставка предназначена для внутреннего тестирования.
