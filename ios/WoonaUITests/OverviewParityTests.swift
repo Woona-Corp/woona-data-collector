@@ -293,11 +293,20 @@ final class OverviewParityTests: XCTestCase {
         details.tap()
         XCTAssertTrue(rawCause.waitForExistence(timeout: 5), "Expanding recording details exposes the saved raw capture failure")
         let remove = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "recording.removeLocal.")).firstMatch
+        // XCTest reports this button as hittable even below the custom tabs
+        // (CI: y=851.7 on an 874-point screen; tabs start at y=764.3).
+        // Scroll it into the unobscured content area before synthesizing a tap.
+        let tabs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "tab."))
         for _ in 0..<4 {
-            if remove.isHittable { break }
+            let tabsTop = tabs.allElementsBoundByIndex.map { $0.frame.minY }.min() ?? app.frame.maxY
+            if remove.isHittable && remove.frame.maxY <= tabsTop { break }
             app.swipeUp()
         }
         XCTAssertTrue(remove.isEnabled)
+        XCTAssertTrue(remove.isHittable)
+        XCTAssertLessThanOrEqual(remove.frame.maxY, tabs.allElementsBoundByIndex.map { $0.frame.minY }.min() ?? app.frame.maxY,
+                                 "Remove must be visibly above the custom navigation tabs before tapping")
+        attachScreen("Remove-local-action-visible-EnglishLight")
         remove.tap()
         let confirmation = app.alerts["Remove session files from this device?"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))

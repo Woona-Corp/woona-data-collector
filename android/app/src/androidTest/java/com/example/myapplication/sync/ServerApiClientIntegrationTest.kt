@@ -11,6 +11,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import com.example.myapplication.BuildConfig
@@ -213,7 +214,13 @@ class ServerApiClientIntegrationTest {
                         .fetchSemanticsNodes().isNotEmpty()
                 }
                 composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("server.sync.settings"))
-                val errorNode = composeRule.onNode(hasText("invalid_bearer_token", substring = true) and hasAnyAncestor(hasTestTag("server.sync.settings")))
+                val inServerSettings = hasAnyAncestor(hasTestTag("server.sync.settings"))
+                composeRule.onNode(hasText("invalid_bearer_token", substring = true) and inServerSettings).assertDoesNotExist()
+                composeRule.onNode((hasText("token", substring = true, ignoreCase = true) or hasText("токен", substring = true, ignoreCase = true)) and inServerSettings)
+                    .performScrollTo().assertIsDisplayed()
+                composeRule.onNode((hasText("+ Details") or hasText("+ Подробности")) and inServerSettings)
+                    .performScrollTo().performClick()
+                val errorNode = composeRule.onNode(hasText("invalid_bearer_token", substring = true) and inServerSettings)
                     .performScrollTo().assertIsDisplayed().fetchSemanticsNode()
                 composeRule.onNode(hasText("Retry uploads") or hasText("Повторить выгрузку"))
                     .performScrollTo().assertIsDisplayed().assertIsEnabled()

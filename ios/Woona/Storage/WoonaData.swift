@@ -1088,7 +1088,10 @@ final class WoonaStore {
     @discardableResult
     func createRecording(profile: DogProfile, source: String, questionnaire: SessionQuestionnaire) throws -> WoonaRecording {
         var questionnaire = questionnaire
-        if questionnaire.schemaVersion == 2 { questionnaire.animalId = profile.questionnaire.animalId }
+        if questionnaire.schemaVersion == 2 {
+            questionnaire.animalId = profile.questionnaire.animalId
+            questionnaire = questionnaire.preparedForCommit()
+        }
         guard questionnaire.validate().isValid else { throw WoonaStoreError.invalidData("Session questionnaire is incomplete") }
         let id = UUID()
         let now = Date()
@@ -1301,6 +1304,9 @@ final class WoonaStore {
     }
 
     func saveSessionQuestionnaire(recordingID: UUID, questionnaire: SessionQuestionnaire, revision: Int? = nil) throws {
+        // User edits may repair old missing arrays; server-canonical responses must
+        // retain their exact representation rather than being silently rewritten.
+        let questionnaire = revision == nil ? questionnaire.preparedForCommit() : questionnaire
         guard let recording = try recording(id: recordingID), ["completed", "failed", "interrupted"].contains(recording.status),
               let original = recording.questionnaire,
               questionnaire.validate().isValid, questionnaire.readyForSync,
@@ -2410,5 +2416,15 @@ struct ReferenceMetadata: Codable, Equatable, Sendable {
 }
 
 extension SessionQuestionnaire {
+    // Only explicit creation/edit commits supply this required V2 transport array.
+    // Never use during decode, read, hashing, or serialization of historical data.
+    func preparedForCommit() -> Self {
+        var result = self
+        if schemaVersion == 2 && sessionKind == "heart" && plannedActivities == nil {
+            result.plannedActivities = []
+        }
+        return result
+    }
+
     var readyForSync: Bool { sessionKind != "heart" || heartQuestionnaire?.validate().isValid == true }
 }

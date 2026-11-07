@@ -1546,6 +1546,7 @@ final class AppViewModel: ObservableObject {
               profile.accountID == selectedAccountID else {
             throw WoonaStoreError.invalidData("Редактирование временно недоступно: проверьте аккаунт и дождитесь завершения записи/синхронизации / Editing is unavailable; check the account and wait for capture/synchronization")
         }
+        let questionnaire = questionnaire.preparedForCommit()
         if ["synced", "remote"].contains(displayedRecording.serverSyncState) {
             isAccountOperationRunning = true
             defer { isAccountOperationRunning = false; schedulePendingSync() }

@@ -751,6 +751,9 @@ struct SessionQuestionnaireEditor: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(q("Отмена")) { dismiss() }.disabled(saveState.isSaving) }
                 ToolbarItem(placement: .confirmationAction) { Button(q(initial == nil ? "Продолжить" : "Сохранить")) {
+                    // Existing heart records can lack this hidden transport field.
+                    // Repair only on explicit Save, never when opening the editor.
+                    draft = draft.preparedForCommit()
                     errors = draft.validate().errors
                     if initial != nil && !draft.readyForSync { errors["heartQuestionnaire"] = "Заполните ответы по сердцебиению" }
                     guard errors.isEmpty else { return }

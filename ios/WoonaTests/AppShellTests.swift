@@ -510,6 +510,34 @@ final class AppShellTests: XCTestCase {
         try await exerciseFixture()
     }
 
+    func testEditingDeployedHeartWithMissingActivityArraySavesThroughModel() async throws {
+        let originalSelection = heartPromptSelectionPreferences()
+        defer { restoreHeartPromptSelectionPreferences(originalSelection) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try makeHeartPromptProfile(store, name: "legacy-edit")
+        let old = try makeOldHeartPromptRecord(store, profile: profile)
+        var legacy = try XCTUnwrap(old.questionnaire)
+        legacy.plannedActivities = nil
+        let legacyBytes = try WoonaStore.sessionQuestionnaireData(legacy)
+        let json = String(decoding: legacyBytes, as: UTF8.self).replacingOccurrences(of: "'", with: "''")
+        try executeHeartPromptSQL(root, "UPDATE recordings SET questionnaire_json='\(json)' WHERE id='\(old.id.uuidString)'")
+        let model = AppViewModel(store: store, uiTesting: true)
+        defer { cleanupHeartPromptFixture(root, model: model) }
+        try await waitUntil("legacy heart editor ready") { !model.isHistoryLoading && model.canChangeAccount }
+        let displayed = try XCTUnwrap(store.recording(id: old.id))
+        XCTAssertNil(displayed.questionnaire?.plannedActivities)
+        XCTAssertEqual(try WoonaStore.sessionQuestionnaireData(XCTUnwrap(displayed.questionnaire)), legacyBytes)
+        try await model.saveHeartQuestionnaire(validUnknownHeartAnswers(), displayedRecording: displayed)
+        let saved = try XCTUnwrap(store.recording(id: old.id))
+        XCTAssertEqual(saved.questionnaire?.plannedActivities, [])
+        XCTAssertEqual(saved.questionnaire?.readyForSync, true)
+        XCTAssertEqual(saved.status, old.status)
+        XCTAssertEqual(saved.endedAtUTC, old.endedAtUTC)
+        XCTAssertNil(displayed.questionnaire?.plannedActivities, "The displayed historical snapshot is not mutated")
+        try await waitForHeartPromptLocalIdle(model)
+    }
+
     func testHeartCapturePromptOwnsFreshFinalizedRecordAndDoesNotReopenAfterDismissal() async throws {
         let originalSelection = heartPromptSelectionPreferences()
         defer { restoreHeartPromptSelectionPreferences(originalSelection) }
@@ -1346,7 +1374,9 @@ final class AppShellTests: XCTestCase {
     private func makeOldHeartPromptRecord(_ store: WoonaStore, profile: DogProfile) throws -> WoonaRecording {
         var questionnaire = SessionQuestionnaire()
         questionnaire.schemaVersion = 2; questionnaire.sessionKind = "heart"; questionnaire.sessionLabel = "Old incomplete heart"; questionnaire.videoRequested = false
+        questionnaire.plannedActivities = [] // Same explicit V2 transport array as the session sheet.
         let recording = try store.createRecording(profile: profile, source: "live", questionnaire: questionnaire)
+        XCTAssertEqual(recording.questionnaire?.plannedActivities, [])
         try store.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8))
         return try XCTUnwrap(store.recording(id: recording.id))
     }
@@ -1356,8 +1386,11 @@ final class AppShellTests: XCTestCase {
         try Data().write(to: source)
         var questionnaire = SessionQuestionnaire()
         questionnaire.schemaVersion = 2; questionnaire.sessionKind = "heart"; questionnaire.sessionLabel = label; questionnaire.videoRequested = false
+        questionnaire.plannedActivities = [] // Heart captures still carry the required array.
         try model.startReplay(from: source, questionnaire: questionnaire)
-        return try XCTUnwrap(model.activeRecording).id
+        let recording = try XCTUnwrap(model.activeRecording)
+        XCTAssertEqual(recording.questionnaire?.plannedActivities, [])
+        return recording.id
     }
 
     private func waitForHeartPromptLocalIdle(_ model: AppViewModel) async throws {

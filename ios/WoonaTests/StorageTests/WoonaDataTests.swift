@@ -143,6 +143,46 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["observedSigns"]))
     }
 
+    func testNewHeartCaptureSuppliesRequiredActivityArrayWithoutChangingHistoricalEncoding() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        var heart = SessionQuestionnaire()
+        heart.schemaVersion = 2; heart.sessionKind = "heart"; heart.sessionLabel = "New heart"; heart.videoRequested = false
+        // An old payload with no array must retain its original encoding/hash. Only
+        // creation of a new row may supply the required empty transport array.
+        let historicalBytes = try WoonaStore.sessionQuestionnaireData(heart)
+        let historicalHash = WoonaStore.sha256(historicalBytes)
+        let historicalObject = try XCTUnwrap(JSONSerialization.jsonObject(with: historicalBytes) as? [String: Any])
+        XCTAssertNil(historicalObject["plannedActivities"])
+        for source in ["live", "replay"] {
+            let recording = try store.createRecording(profile: profile, source: source, questionnaire: heart)
+            let answers = try XCTUnwrap(recording.questionnaire)
+            XCTAssertEqual(answers.plannedActivities, [])
+            XCTAssertTrue(answers.validate().isValid)
+            XCTAssertFalse(answers.readyForSync, "Heart answers still need post-capture completion")
+            let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: WoonaStore.sessionQuestionnaireData(answers)) as? [String: Any])
+            XCTAssertEqual(wire["plannedActivities"] as? [String], [])
+            try store.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8))
+            let saved = try XCTUnwrap(store.recording(id: recording.id))
+            XCTAssertEqual(saved.status, "completed")
+            XCTAssertEqual(saved.questionnaire?.plannedActivities, [])
+        }
+        XCTAssertNil(heart.plannedActivities, "Do not mutate the caller's draft")
+        let decodedHistorical = try JSONDecoder().decode(SessionQuestionnaire.self, from: historicalBytes)
+        XCTAssertEqual(try WoonaStore.sessionQuestionnaireData(decodedHistorical), historicalBytes)
+        XCTAssertEqual(try WoonaStore.sha256(WoonaStore.sessionQuestionnaireData(decodedHistorical)), historicalHash)
+        heart.plannedActivities = [""]
+        XCTAssertEqual(heart.preparedForCommit().plannedActivities, [""], "Do not hide invalid supplied answers")
+        XCTAssertThrowsError(try store.createRecording(profile: profile, source: "replay", questionnaire: heart))
+        heart.sessionKind = "activity"; heart.plannedActivities = nil
+        XCTAssertNil(heart.preparedForCommit().plannedActivities)
+        XCTAssertThrowsError(try store.createRecording(profile: profile, source: "replay", questionnaire: heart))
+        heart.schemaVersion = 1; heart.sessionKind = "heart"
+        XCTAssertNil(heart.preparedForCommit().plannedActivities, "V1 encoding must remain unchanged")
+    }
+
     func testLocalAnimalIdentityRejectsOtherUUIDAcrossAccountsAndHistoricalVersionsWithoutMutation() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -2496,6 +2536,27 @@ final class WoonaDataTests: XCTestCase {
         let recording = try store!.createRecording(profile: profile, source: "live", questionnaire: session)
         try store!.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8))
         XCTAssertTrue(try store!.pendingRecordings().isEmpty)
+        // Simulate a deployed V2 heart row whose synthesized Codable omitted the
+        // required array. Loading/reopening must not rewrite its bytes or artifacts.
+        var historical = try XCTUnwrap(store!.recording(id: recording.id)?.questionnaire)
+        historical.plannedActivities = nil
+        let historicalBytes = try WoonaStore.sessionQuestionnaireData(historical)
+        let historicalHash = WoonaStore.sha256(historicalBytes)
+        let syncBeforeEdit = try XCTUnwrap(store!.artifacts(recordingID: recording.id).first { $0.type == "sync" })
+        let syncHashBeforeEdit = try WoonaStore.sha256File(root.appendingPathComponent(syncBeforeEdit.relativePath))
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+        let legacyJSON = String(decoding: historicalBytes, as: UTF8.self).replacingOccurrences(of: "'", with: "''")
+        XCTAssertEqual(sqlite3_exec(database, "UPDATE recordings SET questionnaire_json='\(legacyJSON)' WHERE id='\(recording.id.uuidString)'", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(database)
+        store = nil
+        store = try WoonaStore(rootDirectory: root)
+        let loadedHistorical = try XCTUnwrap(store!.recording(id: recording.id)?.questionnaire)
+        XCTAssertNil(loadedHistorical.plannedActivities)
+        XCTAssertEqual(try WoonaStore.sessionQuestionnaireData(loadedHistorical), historicalBytes)
+        XCTAssertEqual(try WoonaStore.sha256(WoonaStore.sessionQuestionnaireData(loadedHistorical)), historicalHash)
+        XCTAssertEqual(loadedHistorical.preparedForCommit().plannedActivities, [])
+        XCTAssertNil(loadedHistorical.plannedActivities, "Preparing an edit cannot mutate the loaded historical value")
         func unknown(_ key: String) -> HeartAnswer { HeartQuestionnaire.options[key]!.first { $0.key == "unknown" }! }
         var heart = HeartQuestionnaire()
         heart.knownHeartCondition = unknown("knownHeartCondition")
@@ -2512,6 +2573,10 @@ final class WoonaDataTests: XCTestCase {
         invalid.referenceMethod = HeartQuestionnaire.options["referenceMethod"]!.first { $0.key == "ecg" }
         XCTAssertFalse(invalid.validate().isValid)
         try store!.saveHeartQuestionnaire(recordingID: recording.id, heart: heart)
+        let editedHeart = try XCTUnwrap(store!.recording(id: recording.id)?.questionnaire)
+        XCTAssertEqual(editedHeart.plannedActivities, [])
+        XCTAssertTrue(editedHeart.validate().isValid)
+        XCTAssertEqual(try WoonaStore.sha256File(root.appendingPathComponent(syncBeforeEdit.relativePath)), syncHashBeforeEdit, "An explicit questionnaire edit must not rewrite immutable capture artifacts")
         XCTAssertEqual(1, try store!.pendingRecordings().count)
         let bytes = Data("utc,bpm\n2026-10-05T12:00:00Z,120\n".utf8)
         let input = root.appendingPathComponent("target.csv")
