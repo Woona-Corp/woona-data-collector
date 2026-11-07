@@ -521,14 +521,20 @@ final class OverviewParityTests: XCTestCase {
             guard !viewport.isEmpty else { return false }
             if element.exists && element.isHittable && viewport.contains(element.frame) { return true }
             guard attempt < maxSwipes else { break }
+            // Center the target with a bounded drag, not a flick. CI's default
+            // 500pt/s release moved ~336pt in this 218pt landscape viewport,
+            // repeatedly throwing the same heading above then below the screen.
+            let maximumDrag = viewport.height * 0.6
+            let offset = element.exists ? element.frame.midY - viewport.midY : maximumDrag
+            let distance = min(abs(offset), maximumDrag)
+            let startY = viewport.minY + viewport.height * (offset < 0 ? 0.2 : 0.8)
+            let endY = startY + (offset < 0 ? distance : -distance)
             let origin = app.coordinate(withNormalizedOffset: .zero)
-            let lower = origin.withOffset(CGVector(dx: viewport.midX, dy: viewport.minY + viewport.height * 0.8))
-            let upper = origin.withOffset(CGVector(dx: viewport.midX, dy: viewport.minY + viewport.height * 0.2))
-            if element.exists && element.frame.midY < viewport.minY {
-                upper.press(forDuration: 0, thenDragTo: lower)
-            } else {
-                lower.press(forDuration: 0, thenDragTo: upper)
-            }
+            let start = origin.withOffset(CGVector(dx: viewport.midX, dy: startY))
+            let end = origin.withOffset(CGVector(dx: viewport.midX, dy: endY))
+            // Holding the finger at the destination stops inertial scrolling;
+            // this is part of the gesture, not a delay/retry after releasing it.
+            start.press(forDuration: 0, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
         }
         attachScreen("Overview-unreachable-element", fullDevice: true)
         let hierarchy = XCTAttachment(string: app.debugDescription)
