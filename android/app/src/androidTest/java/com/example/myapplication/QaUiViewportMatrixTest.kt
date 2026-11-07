@@ -88,6 +88,10 @@ class QaUiViewportMatrixTest(private val landscape: Boolean, private val font: F
             setSystemFont(font)
             compose.activity.requestedOrientation = if (landscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             compose.waitUntil(10_000) { val v = compose.activity.findViewById<View>(android.R.id.content); (v.width > v.height) == landscape }
+            // Geometry can update before rotation settles. Drain accessibility
+            // events before creating the dialog; this is not a visibility retry
+            // or a guarantee that compositor-only animation has finished.
+            automation.waitForIdle(500, 10_000)
             var server by mutableStateOf(true)
             compose.setContent { MaterialTheme {
                 if (server) ServerSettingsDialog(ServerSettings("https://example.invalid", "", "qa-device", true), language, {}, { _, _ -> })
@@ -120,6 +124,8 @@ class QaUiViewportMatrixTest(private val landscape: Boolean, private val font: F
         } catch (primary: Throwable) {
             primaryFailure = primary
             UiStopTrace.primary("QA[$landscape,$font,$language]", primary)
+            // Capture the failing state before keyboard/orientation cleanup.
+            runCatching { screenshot("primary-failure") }.onFailure { capture -> primary.addSuppressed(capture) }
             throw primary
         } finally {
             UiStopTrace.beforeClose("QA[$landscape,$font,$language]")

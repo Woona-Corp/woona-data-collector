@@ -730,16 +730,19 @@ private fun QuestionnaireDialog(
             dismissOnClickOutside = false,
             // Use native window bounds; Compose 1.7's custom fullscreen measurement can exceed them.
             usePlatformDefaultWidth = true,
-            // Let the platform resize the dialog above a regular IME. An
-            // edge-to-edge MATCH_PARENT dialog can be panned as a whole when
-            // a bottom multiline field requests focus, taking pinned actions
-            // off screen even though Compose's local bounds remain unchanged.
-            decorFitsSystemWindows = true,
+            // Compose owns safe drawing/IME insets below. Native fitting plus
+            // ADJUST_RESIZE alone does not constrain target-36 dialogs on
+            // Android 16, even when the correct IME inset reaches the window.
+            decorFitsSystemWindows = false,
         ),
     ) {
         Surface(
+            // The union includes IME and system bars without adding their
+            // overlapping bottom insets. Constrain header/actions AND form,
+            // before BoxWithConstraints chooses its compact header layout.
             modifier = Modifier
-                .fillMaxSize(),
+                .fillMaxSize()
+                .safeDrawingPadding(),
         ) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val view = LocalView.current

@@ -7,61 +7,65 @@ struct AppRootView: View {
     @Environment(\.colorScheme) private var systemColorScheme
 
     var body: some View {
-        ZStack {
-            TabView(selection: $appState.selectedTab) {
-                OverviewView(section: .animals)
-                    .toolbar(.hidden, for: .tabBar)
-                    .tag(AppViewModel.AppTab.overview)
-                Group {
-                    if appState.showingSessionCharts { ChartsView() }
-                    else { OverviewView(section: .session) }
-                }
-                .toolbar(.hidden, for: .tabBar)
-                .tag(AppViewModel.AppTab.session)
-                OverviewView(section: .video)
-                    .toolbar(.hidden, for: .tabBar)
-                    .tag(AppViewModel.AppTab.video)
-                OverviewView(section: .recordings)
-                    .toolbar(.hidden, for: .tabBar)
-                    .tag(AppViewModel.AppTab.recordings)
-
-                SettingsView()
-                    .tabItem {
-                        Label(appState.text(.settings), systemImage: "gearshape")
+        // Give the tab content a real viewport above navigation. An outer
+        // safe-area inset can be lost by the hidden-tab-bar TabView/NavigationStack,
+        // leaving the last history actions permanently underneath these tabs.
+        VStack(spacing: 0) {
+            ZStack {
+                TabView(selection: $appState.selectedTab) {
+                    OverviewView(section: .animals)
+                        .toolbar(.hidden, for: .tabBar)
+                        .tag(AppViewModel.AppTab.overview)
+                    Group {
+                        if appState.showingSessionCharts { ChartsView() }
+                        else { OverviewView(section: .session) }
                     }
                     .toolbar(.hidden, for: .tabBar)
-                    .tag(AppViewModel.AppTab.settings)
-            }
-            .disabled(appState.isLocalRecoveryRunning)
+                    .tag(AppViewModel.AppTab.session)
+                    OverviewView(section: .video)
+                        .toolbar(.hidden, for: .tabBar)
+                        .tag(AppViewModel.AppTab.video)
+                    OverviewView(section: .recordings)
+                        .toolbar(.hidden, for: .tabBar)
+                        .tag(AppViewModel.AppTab.recordings)
 
-            if appState.isLocalRecoveryRunning {
-                VStack(spacing: 12) {
-                    ProgressView()
-                    Text(appState.selectedLanguage == .russian ? "Восстанавливаем прерванную локальную работу…" : "Recovering interrupted local work…")
-                    Text(appState.selectedLanguage == .russian ? "Исходные файлы сохраняются. Дождитесь окончания проверки перед новой записью." : "Original files are preserved. Wait for this check before starting another capture.")
-                        .font(.footnote)
+                    SettingsView()
+                        .tabItem {
+                            Label(appState.text(.settings), systemImage: "gearshape")
+                        }
+                        .toolbar(.hidden, for: .tabBar)
+                        .tag(AppViewModel.AppTab.settings)
                 }
-                .padding(24).background(Color.woonaSurface, in: RoundedRectangle(cornerRadius: 12))
-                .padding(20)
-                .accessibilityIdentifier("startup.recovery")
-            }
+                .disabled(appState.isLocalRecoveryRunning)
 
-            if let exportPhase = appState.exportPhase, appState.preparedExport == nil {
-                ExportProgressOverlay(phase: exportPhase)
+                if appState.isLocalRecoveryRunning {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text(appState.selectedLanguage == .russian ? "Восстанавливаем прерванную локальную работу…" : "Recovering interrupted local work…")
+                        Text(appState.selectedLanguage == .russian ? "Исходные файлы сохраняются. Дождитесь окончания проверки перед новой записью." : "Original files are preserved. Wait for this check before starting another capture.")
+                            .font(.footnote)
+                    }
+                    .padding(24).background(Color.woonaSurface, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(20)
+                    .accessibilityIdentifier("startup.recovery")
+                }
+
+                if let exportPhase = appState.exportPhase, appState.preparedExport == nil {
+                    ExportProgressOverlay(phase: exportPhase)
+                }
             }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if let error = appState.localRecoveryError {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(appState.selectedLanguage == .russian ? "Локальное восстановление не завершено" : "Local recovery is incomplete").font(.headline)
-                    Text(error).font(.caption).textSelection(.enabled)
-                    Text(appState.selectedLanguage == .russian ? "Исходные файлы сохранены. Можно экспортировать все данные в Настройках." : "Original files are preserved. You can export all data in Settings.").font(.footnote)
-                    Button(appState.selectedLanguage == .russian ? "Повторить восстановление" : "Retry recovery") { appState.recoverLocalData() }
-                        .disabled(!appState.canExportCompleteArchive)
-                }.padding(12).background(Color.woonaSurface)
+            .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let error = appState.localRecoveryError {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(appState.selectedLanguage == .russian ? "Локальное восстановление не завершено" : "Local recovery is incomplete").font(.headline)
+                        Text(error).font(.caption).textSelection(.enabled)
+                        Text(appState.selectedLanguage == .russian ? "Исходные файлы сохранены. Можно экспортировать все данные в Настройках." : "Original files are preserved. You can export all data in Settings.").font(.footnote)
+                        Button(appState.selectedLanguage == .russian ? "Повторить восстановление" : "Retry recovery") { appState.recoverLocalData() }
+                            .disabled(!appState.canExportCompleteArchive)
+                    }.padding(12).background(Color.woonaSurface)
+                }
             }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack(spacing: 8) {
                 navigationItem(.overview, title: appState.selectedLanguage == .russian ? "Животные" : "Animals", symbol: "pawprint")
                 navigationItem(.session, title: appState.selectedLanguage == .russian ? "Сессия" : "Session", symbol: "waveform.path.ecg")
@@ -71,6 +75,7 @@ struct AppRootView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            .fixedSize(horizontal: false, vertical: true)
             .background(Color.woonaSurface)
         }
         .tint(usesDarkPalette ? WoonaPalette.color(0x7ACCC5) : WoonaPalette.color(0x146B74))

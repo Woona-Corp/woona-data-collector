@@ -60,13 +60,15 @@ final class OverviewParityTests: XCTestCase {
         app.buttons["tab.recordings"].tap()
         XCUIDevice.shared.orientation = .landscapeRight
         let capture = app.staticTexts["Local capture"].firstMatch
-        for _ in 0..<16 where !capture.isHittable { app.swipeUp() }
+        XCTAssertTrue(revealOverviewElement(capture), "Local capture must be fully visible above the custom tabs")
         XCTAssertTrue(capture.isHittable)
+        attachScreen("Recording-Capture-LargeText-Landscape-EnglishLight", fullDevice: true)
         let delivery = app.staticTexts["Server delivery"].firstMatch
-        for _ in 0..<16 where !delivery.isHittable { app.swipeUp() }
+        XCTAssertTrue(revealOverviewElement(delivery), "Server delivery must be fully visible above the custom tabs")
         XCTAssertTrue(delivery.isHittable)
+        attachScreen("Recording-Delivery-LargeText-Landscape-EnglishLight", fullDevice: true)
         let share = app.buttons["Share session ZIP"].firstMatch
-        for _ in 0..<16 where !share.isHittable { app.swipeUp() }
+        XCTAssertTrue(revealOverviewElement(share), "Share must be fully visible above the custom tabs")
         XCTAssertTrue(share.isHittable, "Existing actions remain reachable after the grouped summaries at accessibility size")
         attachScreen("Recording-Groups-LargeText-Landscape-EnglishLight", fullDevice: true)
     }
@@ -293,18 +295,11 @@ final class OverviewParityTests: XCTestCase {
         details.tap()
         XCTAssertTrue(rawCause.waitForExistence(timeout: 5), "Expanding recording details exposes the saved raw capture failure")
         let remove = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "recording.removeLocal.")).firstMatch
-        // XCTest reports this button as hittable even below the custom tabs
-        // (CI: y=851.7 on an 874-point screen; tabs start at y=764.3).
-        // Scroll it into the unobscured content area before synthesizing a tap.
-        let tabs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "tab."))
-        for _ in 0..<4 {
-            let tabsTop = tabs.allElementsBoundByIndex.map { $0.frame.minY }.min() ?? app.frame.maxY
-            if remove.isHittable && remove.frame.maxY <= tabsTop { break }
-            app.swipeUp()
-        }
+        XCTAssertTrue(revealOverviewElement(remove, maxSwipes: 4),
+                      "Remove must be fully visible above the custom navigation tabs before tapping")
         XCTAssertTrue(remove.isEnabled)
         XCTAssertTrue(remove.isHittable)
-        XCTAssertLessThanOrEqual(remove.frame.maxY, tabs.allElementsBoundByIndex.map { $0.frame.minY }.min() ?? app.frame.maxY,
+        XCTAssertLessThanOrEqual(remove.frame.maxY, app.buttons["tab.recordings"].frame.minY,
                                  "Remove must be visibly above the custom navigation tabs before tapping")
         attachScreen("Remove-local-action-visible-EnglishLight")
         remove.tap()
@@ -509,6 +504,40 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.buttons["chart.fullscreen.open"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.segmentedControls.buttons["Channel 2"].isSelected)
     }
+    // App-wide swipes start over the custom tabs in landscape, so they do not
+    // scroll history. Also, XCTest can call offscreen SwiftUI leaves hittable.
+    // Use the real unobscured viewport for both the gesture and visibility check.
+    private func revealOverviewElement(_ element: XCUIElement, maxSwipes: Int = 16) -> Bool {
+        for attempt in 0...maxSwipes {
+            let scroll = app.scrollViews.firstMatch
+            let navigation = app.navigationBars.firstMatch
+            let tabs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "tab."))
+            guard scroll.exists, navigation.exists, tabs.count == 5,
+                  let tabsTop = tabs.allElementsBoundByIndex.map({ $0.frame.minY }).min() else { return false }
+            let viewport = scroll.frame.intersection(app.frame).intersection(CGRect(
+                x: app.frame.minX, y: navigation.frame.maxY,
+                width: app.frame.width, height: max(0, tabsTop - navigation.frame.maxY)
+            ))
+            guard !viewport.isEmpty else { return false }
+            if element.exists && element.isHittable && viewport.contains(element.frame) { return true }
+            guard attempt < maxSwipes else { break }
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let lower = origin.withOffset(CGVector(dx: viewport.midX, dy: viewport.minY + viewport.height * 0.8))
+            let upper = origin.withOffset(CGVector(dx: viewport.midX, dy: viewport.minY + viewport.height * 0.2))
+            if element.exists && element.frame.midY < viewport.minY {
+                upper.press(forDuration: 0, thenDragTo: lower)
+            } else {
+                lower.press(forDuration: 0, thenDragTo: upper)
+            }
+        }
+        attachScreen("Overview-unreachable-element", fullDevice: true)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "Overview-unreachable-element-native-bounds"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        return false
+    }
+
     private func attachScreen(_ name: String, fullDevice: Bool = false) {
         let screenshot = XCTAttachment(screenshot: fullDevice ? XCUIScreen.main.screenshot() : app.screenshot())
         screenshot.name = name

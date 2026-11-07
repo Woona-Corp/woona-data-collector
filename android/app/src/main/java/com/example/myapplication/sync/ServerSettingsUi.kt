@@ -3,6 +3,7 @@ package com.example.myapplication.sync
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -44,7 +45,7 @@ fun ServerSettingsDialog(
 ) {
     var error by remember { mutableStateOf<String?>(null) }
     var confirmingDisconnect by remember { mutableStateOf(false) }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(decorFitsSystemWindows = true)) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(decorFitsSystemWindows = false)) {
         val view = LocalView.current
         DisposableEffect(view) {
             (view.parent as? DialogWindowProvider)?.window?.apply {
@@ -53,7 +54,14 @@ fun ServerSettingsDialog(
             }
             onDispose {}
         }
-        Surface(modifier = Modifier.fillMaxSize()) {
+        // Own insets in Compose, not in DecorView: ADJUST_RESIZE alone leaves
+        // this dialog full-height on Android 16 / target 36. safeDrawing is the
+        // UNION of system bars, cutout and IME, so navigation/IME overlap is
+        // removed once, not added twice. Apply it outside the entire form and
+        // footer; only the weighted scroll body then shrinks for the keyboard.
+        // Keep native window measurement (default usePlatformDefaultWidth),
+        // not Compose 1.7's display-configuration-based fullscreen measurement.
+        Surface(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
             Column(
                 modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
