@@ -62,8 +62,9 @@ final class WoonaDataTests: XCTestCase {
         dog.breedName = nil; dog.species = nil; dog.numberOrName = "\u{85}"
         XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["numberOrName"]))
         dog.numberOrName = "name"
-        dog.notes = "a" + String(repeating: "\u{301}", count: 2000)
-        dog.size = dog.notes; dog.savedAtLocal = dog.notes
+        let overlongText = "a" + String(repeating: "\u{301}", count: 2000)
+        dog.notes = overlongText
+        dog.size = overlongText; dog.savedAtLocal = overlongText
         XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["notes", "size", "savedAtLocal"]))
 
         var session = SessionQuestionnaire()
