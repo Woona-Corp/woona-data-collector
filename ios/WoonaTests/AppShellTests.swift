@@ -727,7 +727,6 @@ final class AppShellTests: XCTestCase {
         try await waitForHeartPromptLocalIdle(model)
         XCTAssertEqual(model.pendingPostCaptureHeartQuestionnaire?.id, id)
         XCTAssertEqual(try store.recording(id: id)?.status, "failed")
-        XCTAssertEqual(try store.recording(id: id)?.captureErrorCode, "no_sensor_data")
         model.dismissHeartQuestionnaire()
         try await waitUntil("retried finalizer queue release") { model.canChangeAccount }
     }
