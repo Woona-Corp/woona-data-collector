@@ -42,8 +42,11 @@ class LocalAnimalIdentityTextTest {
         assertEquals(SyncActivityOutcome.FAILED, conflict.syncActivityOutcome())
         assertEquals("http_409", conflict.syncActivityCode())
         val unavailable = ServerHttpException(503, "private server response", emptyMap())
-        assertEquals(SyncActivityOutcome.WAITING_SERVER, unavailable.syncActivityOutcome())
+        assertEquals(SyncActivityOutcome.FAILED, unavailable.syncActivityOutcome())
         assertEquals("http_503", unavailable.syncActivityCode())
+        val rateLimited = ServerHttpException(429, "private server response", emptyMap())
+        assertEquals(SyncActivityOutcome.FAILED, rateLimited.syncActivityOutcome())
+        assertEquals("http_429", rateLimited.syncActivityCode())
         assertEquals("local_io", ServerTransferException("arbitrary_secret", "private details", true).syncActivityCode())
         assertEquals("validation_failed", IllegalArgumentException("private questionnaire").syncActivityCode())
     }

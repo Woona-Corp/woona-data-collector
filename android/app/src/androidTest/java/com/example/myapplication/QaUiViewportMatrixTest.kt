@@ -83,6 +83,7 @@ class QaUiViewportMatrixTest(private val landscape: Boolean, private val font: F
             android.os.ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand("settings put system font_scale $scale")).use { it.readBytes() }
             compose.waitUntil(10_000) { kotlin.math.abs(compose.activity.resources.configuration.fontScale - scale) < 0.01f }
         }
+        var primaryFailure: Throwable? = null
         try {
             setSystemFont(font)
             compose.activity.requestedOrientation = if (landscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -117,14 +118,17 @@ class QaUiViewportMatrixTest(private val landscape: Boolean, private val font: F
             action(if (ru) "Проверить и сохранить" else "Validate and save", false)
             screenshot("notes-ime")
         } catch (primary: Throwable) {
+            primaryFailure = primary
             UiStopTrace.primary("QA[$landscape,$font,$language]", primary)
             throw primary
         } finally {
             UiStopTrace.beforeClose("QA[$landscape,$font,$language]")
-            androidx.test.espresso.Espresso.closeSoftKeyboard()
-            automation.serviceInfo = automation.serviceInfo.apply { this.flags = flags }
-            compose.activity.restoreTestOrientation(orientation)
-            setSystemFont(originalFont)
+            restoreUiTestState(primaryFailure,
+                { androidx.test.espresso.Espresso.closeSoftKeyboard() },
+                { automation.serviceInfo = automation.serviceInfo.apply { this.flags = flags } },
+                { compose.activity.restoreTestOrientation(orientation) },
+                { setSystemFont(originalFont) },
+            )
         }
     }
 }

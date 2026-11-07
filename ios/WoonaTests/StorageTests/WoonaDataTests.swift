@@ -46,6 +46,102 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertTrue(dog.validateSheet().isValid)
     }
 
+    func testV2SheetStringBoundsUseScalarsAndPythonBlanknessWithoutRewritingAnswers() {
+        let emoji100 = String(repeating: "😀", count: 100)
+        let combining120 = "a" + String(repeating: "\u{301}", count: 119)
+        var dog = DogQuestionnaire()
+        dog.schemaVersion = 2; dog.animalId = emoji100; dog.numberOrName = emoji100
+        dog.breedName = emoji100
+        dog.species = String(repeating: "😀", count: 2000)
+        XCTAssertTrue(dog.validateSheet().isValid)
+        XCTAssertEqual(dog.species?.unicodeScalars.count, 2000)
+        dog.breedName = combining120
+        dog.species = String(repeating: "a", count: 2001)
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["breedName", "species"]))
+        XCTAssertEqual(dog.breedName, combining120, "Validation must not normalize the payload")
+        dog.breedName = nil; dog.species = nil; dog.numberOrName = "\u{85}"
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["numberOrName"]))
+        dog.numberOrName = "name"
+        dog.notes = "a" + String(repeating: "\u{301}", count: 2000)
+        dog.size = dog.notes; dog.savedAtLocal = dog.notes
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["notes", "size", "savedAtLocal"]))
+
+        var session = SessionQuestionnaire()
+        session.schemaVersion = 2; session.sessionLabel = emoji100; session.plannedActivities = ["activity"]
+        session.activityDetails = String(repeating: "😀", count: 1000)
+        session.operatorName = String(repeating: "😀", count: 150)
+        XCTAssertTrue(session.validateSheet().isValid)
+        session.sessionLabel = combining120
+        session.operatorName = "a" + String(repeating: "\u{301}", count: 150)
+        XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["sessionLabel", "operatorName"]))
+        session.sessionLabel = "\u{85}"; session.operatorName = "operator"
+        XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["sessionLabel"]))
+        XCTAssertEqual(session.sessionLabel, "\u{85}")
+        session.sessionLabel = "session"
+        session.surfaceDetails = "a" + String(repeating: "\u{301}", count: 300)
+        session.location = String(repeating: "a", count: 2001)
+        session.savedAtLocal = session.location
+        XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["surfaceDetails", "location", "savedAtLocal"]))
+    }
+
+    func testV2SheetArraysEnforceRawItemAndCollectionBoundsAlsoInHeartMode() {
+        let emoji100 = String(repeating: "😀", count: 100)
+        let combining120 = "a" + String(repeating: "\u{301}", count: 119)
+        let thirty = (0..<30).map { "item-\($0)" }
+        for kind in ["activity", "heart"] {
+            var session = SessionQuestionnaire()
+            session.schemaVersion = 2; session.sessionLabel = "session"; session.sessionKind = kind
+            for valid in [[emoji100], thirty, ["é", "e\u{301}"], ["A", "a"], [" "]] {
+                session.plannedActivities = valid; session.surfaces = valid
+                XCTAssertNil(session.validateSheet().errors["plannedActivities"])
+                XCTAssertNil(session.validateSheet().errors["surfaces"])
+            }
+            for invalid in [[""], [combining120], thirty + ["item-30"], ["duplicate", "duplicate"]] {
+                session.plannedActivities = invalid; session.surfaces = invalid
+                XCTAssertNotNil(session.validateSheet().errors["plannedActivities"], kind)
+                XCTAssertNotNil(session.validateSheet().errors["surfaces"], kind)
+                XCTAssertEqual(session.plannedActivities, invalid)
+            }
+            session.plannedActivities = []; session.surfaces = []
+            XCTAssertEqual(session.validateSheet().errors["plannedActivities"] == nil, kind == "heart")
+            XCTAssertNil(session.validateSheet().errors["surfaces"])
+            session.plannedActivities = nil; session.surfaces = nil
+            XCTAssertNotNil(session.validateSheet().errors["plannedActivities"], "Required array must be present even for heart sessions")
+            XCTAssertNil(session.validateSheet().errors["surfaces"])
+        }
+    }
+
+    func testV2SheetOptionalVitalsValidateBoundsRegardlessOfStatus() {
+        var session = SessionQuestionnaire()
+        session.schemaVersion = 2; session.sessionLabel = "session"; session.plannedActivities = ["activity"]
+        XCTAssertTrue(session.validateSheet().isValid, "Absent vitals stay optional")
+        for (pulse, respiration, temperature) in [(20, 1, 30.0), (300, 200, 45.0)] {
+            session.pulseBpm = pulse; session.respirationPerMinute = respiration; session.bodyTemperatureC = temperature
+            XCTAssertTrue(session.validateSheet().isValid)
+        }
+        for (pulse, respiration, temperature) in [(19, 0, 29.9), (301, 201, 45.1)] {
+            session.pulseBpm = pulse; session.respirationPerMinute = respiration; session.bodyTemperatureC = temperature
+            XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["pulseBpm", "respirationPerMinute", "bodyTemperatureC"]))
+        }
+        session.pulseBpm = nil; session.respirationPerMinute = nil
+        for temperature in [Double.nan, Double.infinity, -Double.infinity] {
+            session.bodyTemperatureC = temperature
+            XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["bodyTemperatureC"]))
+        }
+    }
+
+    func testV2SheetObservedSignsOnlyEnforcesMaximum100Items() {
+        var dog = DogQuestionnaire()
+        dog.schemaVersion = 2; dog.animalId = "id"; dog.numberOrName = "name"
+        for signs in [[], [""], [String(repeating: "a", count: 2001)], Array(repeating: "custom", count: 100)] {
+            dog.observedSigns = signs
+            XCTAssertTrue(dog.validateSheet().isValid, "V2 permits empty, repeated and arbitrary string answers")
+            XCTAssertEqual(dog.observedSigns, signs)
+        }
+        dog.observedSigns = Array(repeating: "custom", count: 101)
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["observedSigns"]))
+    }
+
     func testLocalAnimalIdentityRejectsOtherUUIDAcrossAccountsAndHistoricalVersionsWithoutMutation() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

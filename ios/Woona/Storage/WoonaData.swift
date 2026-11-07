@@ -358,10 +358,22 @@ extension DogQuestionnaire {
             ("notes", notes, 2000), ("medications", medications, 2000), ("history", history, 2000),
             ("specialistName", specialistName, 2000), ("diseaseCategory", diseaseCategory, 2000),
             ("diseaseCategoryDetails", diseaseCategoryDetails, 2000),
+            ("species", species, 2000), ("savedAtLocal", savedAtLocal, 2000),
+            ("chronicLameness", chronicLameness, 2000),
+            ("breedStatus", breedStatus, 2000), ("size", size, 2000),
+            ("ageStatus", ageStatus, 2000), ("ageSource", ageSource, 2000), ("sex", sex, 2000),
+            ("sterilizationStatus", sterilizationStatus, 2000), ("weightStatus", weightStatus, 2000),
+            ("bodyConditionStatus", bodyConditionStatus, 2000), ("muscleMass", muscleMass, 2000),
+            ("neckCircumferenceStatus", neckCircumferenceStatus, 2000), ("coatLength", coatLength, 2000),
+            ("undercoat", undercoat, 2000), ("shavedAreasStatus", shavedAreasStatus, 2000),
+            ("diagnosesStatus", diagnosesStatus, 2000), ("housing", housing, 2000),
+            ("walksStatus", walksStatus, 2000), ("cohabitants", cohabitants, 2000),
+            ("shelterPermission", shelterPermission, 2000), ("notesStatus", notesStatus, 2000),
         ]
         for (key, value, limit) in textFields {
-            if let value, value.count > limit { errors[key] = "Максимум \(limit) символов" }
+            if let value, value.unicodeScalars.count > limit { errors[key] = "Максимум \(limit) символов" }
         }
+        if observedSigns.count > 100 { errors["observedSigns"] = "Максимум 100 вариантов" }
         if let ageYears, !(0...40).contains(ageYears) { errors["ageYears"] = "Укажите 0–40 лет" }
         if let ageMonths, !(0...11).contains(ageMonths) { errors["ageMonths"] = "Укажите 0–11 месяцев" }
         if let weightKg, !weightKg.isFinite || weightKg <= 0 || weightKg > 150 { errors["weightKg"] = "Вес должен быть >0 и ≤150 кг" }
@@ -374,23 +386,35 @@ extension DogQuestionnaire {
 extension SessionQuestionnaire {
     func validateSheet() -> QuestionnaireValidation {
         var errors: [String: String] = [:]
-        if sessionLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sessionLabel.count > 100 { errors["sessionLabel"] = "Укажите номер сессии (до 100 символов)" }
+        if AnimalIdentityKey.bytes(sessionLabel).isEmpty || sessionLabel.unicodeScalars.count > 100 { errors["sessionLabel"] = "Укажите номер сессии (до 100 символов)" }
         let textFields: [(String, String?, Int)] = [
             ("operatorName", operatorName, 150), ("activityDetails", activityDetails, 1000),
             ("surfaceDetails", surfaceDetails, 300), ("sensorPositionDetails", sensorPositionDetails, 300),
             ("preMeasurementStateDetails", preMeasurementStateDetails, 500), ("notes", notes, 2000),
             ("lastMedicationAt", lastMedicationAt, 2000), ("specialistName", specialistName, 2000),
+            ("savedAtLocal", savedAtLocal, 2000), ("animalId", animalId, 2000),
+            ("sessionDate", sessionDate, 2000), ("startTime", startTime, 2000), ("endTime", endTime, 2000),
+            ("activityGroup", activityGroup, 2000), ("activityType", activityType, 2000),
+            ("location", location, 2000), ("surface", surface, 2000),
+            ("airTemperatureStatus", airTemperatureStatus, 2000), ("sensorPosition", sensorPosition, 2000),
+            ("collarTightness", collarTightness, 2000), ("preMeasurementState", preMeasurementState, 2000),
+            ("pulseStatus", pulseStatus, 2000), ("respirationStatus", respirationStatus, 2000),
+            ("bodyTemperatureStatus", bodyTemperatureStatus, 2000),
         ]
         for (key, value, limit) in textFields {
-            if let value, value.count > limit { errors[key] = "Максимум \(limit) символов" }
+            if let value, value.unicodeScalars.count > limit { errors[key] = "Максимум \(limit) символов" }
         }
         let activities = plannedActivities ?? []
-        if sessionKind != "heart" && (activities.isEmpty || activities.contains(where: { $0.isEmpty }) || Set(activities).count != activities.count) { errors["plannedActivities"] = "Выберите формат записи" }
+        // Arrays use raw scalar lengths and exact string equality, even in heart mode.
+        if plannedActivities == nil || (sessionKind != "heart" && activities.isEmpty) || activities.count > 30 || activities.contains(where: { $0.isEmpty || $0.unicodeScalars.count > 100 }) || Set(activities.map { Array($0.utf8) }).count != activities.count { errors["plannedActivities"] = "Выберите формат записи" }
         if let sessionKind, !["heart", "activity"].contains(sessionKind) { errors["sessionKind"] = "Выберите вид сессии" }
         if let heartQuestionnaire { errors.merge(heartQuestionnaire.validate().errors) { _, new in new } }
         let selectedSurfaces = surfaces ?? []
-        if selectedSurfaces.contains(where: { $0.isEmpty }) || Set(selectedSurfaces).count != selectedSurfaces.count { errors["surfaces"] = "Проверьте поверхности" }
+        if selectedSurfaces.count > 30 || selectedSurfaces.contains(where: { $0.isEmpty || $0.unicodeScalars.count > 100 }) || Set(selectedSurfaces.map { Array($0.utf8) }).count != selectedSurfaces.count { errors["surfaces"] = "Проверьте поверхности" }
         if let airTemperatureC, !airTemperatureC.isFinite || !(-60...70).contains(airTemperatureC) { errors["airTemperatureC"] = "Температура: −60…70 °C" }
+        if let pulseBpm, !(20...300).contains(pulseBpm) { errors["pulseBpm"] = "Пульс: 20–300 уд/мин" }
+        if let respirationPerMinute, !(1...200).contains(respirationPerMinute) { errors["respirationPerMinute"] = "Дыхание: 1–200 в минуту" }
+        if let bodyTemperatureC, !bodyTemperatureC.isFinite || !(30...45).contains(bodyTemperatureC) { errors["bodyTemperatureC"] = "Температура тела: 30–45 °C" }
         if let durationMinutes, !durationMinutes.isFinite || durationMinutes < 0 { errors["durationMinutes"] = "Продолжительность должна быть ≥0" }
         for (key, value, format) in [("sessionDate", sessionDate, "yyyy-MM-dd"), ("startTime", startTime, "HH:mm"), ("endTime", endTime, "HH:mm")] {
             if let value, !value.isEmpty {

@@ -548,6 +548,8 @@ private struct AnimalIdentityView: View {
     var body: some View {
         AppCard(title: ru ? "Идентичность животного" : "Animal identity") {
             Text(profile.numberOrName).font(.subheadline.weight(.semibold))
+            // Keep the identifier on the leaf: a card-level identifier overrides
+            // child identifiers in SwiftUI's native accessibility hierarchy.
             Text(label).accessibilityIdentifier("identity.status")
             if status == .checking { ProgressView() }
             if let checkedAt = appState.profileIdentityCheckedAt[profile.profileVersionID] {
@@ -573,7 +575,6 @@ private struct AnimalIdentityView: View {
             }
             SyncActivityDetails(kind: "profile", id: profile.profileVersionID, russian: ru, refreshKey: status.rawValue)
         }
-        .accessibilityIdentifier("overview.identity")
     }
 }
 

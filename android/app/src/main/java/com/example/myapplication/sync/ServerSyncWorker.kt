@@ -504,7 +504,8 @@ internal fun Exception.isRetryable(): Boolean = when (this) {
 internal fun Exception.syncActivityOutcome(): SyncActivityOutcome = when {
     !isRetryable() -> SyncActivityOutcome.FAILED
     this is IOException && this !is ServerHttpException && this !is ServerTransferException -> SyncActivityOutcome.WAITING_NETWORK
-    else -> SyncActivityOutcome.WAITING_SERVER
+    // A retryable HTTP refusal is still a failed real attempt, not missing configuration.
+    else -> SyncActivityOutcome.FAILED
 }
 
 internal fun Exception.syncActivityCode(): String = when (this) {

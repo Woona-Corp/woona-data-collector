@@ -54,6 +54,7 @@ final class OverviewParityTests: XCTestCase {
         let identity = app.staticTexts["identity.status"]
         for _ in 0..<12 where !identity.isHittable { app.swipeUp() }
         XCTAssertTrue(identity.exists)
+        XCTAssertTrue(identity.isHittable, "Identity status remains reachable at accessibility size")
         XCTAssertNotEqual(identity.label, "Server confirmed", "Synthetic local fixtures have no exact-version server receipt")
         attachScreen("Identity-LargeText-EnglishLight")
         app.buttons["tab.recordings"].tap()
@@ -284,10 +285,13 @@ final class OverviewParityTests: XCTestCase {
         }
         XCTAssertTrue(cause.exists)
         XCTAssertTrue(app.staticTexts["Upload: upload was confirmed; check the current server copy below"].exists)
-        let details = app.buttons["Error details"]
-        if !details.isHittable { app.swipeUp() }
+        let details = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "recording.error.")).firstMatch
+        let rawCause = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "GATT status 8")).firstMatch
+        XCTAssertFalse(rawCause.exists, "Raw capture diagnostics stay collapsed by default")
+        for _ in 0..<4 where !details.isHittable { app.swipeUp() }
+        XCTAssertTrue(details.isHittable)
         details.tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "GATT status 8")).firstMatch.exists)
+        XCTAssertTrue(rawCause.waitForExistence(timeout: 5), "Expanding recording details exposes the saved raw capture failure")
         let remove = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "recording.removeLocal.")).firstMatch
         for _ in 0..<4 {
             if remove.isHittable { break }

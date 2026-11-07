@@ -271,7 +271,9 @@ final class AppShellTests: XCTestCase {
         let unknown = recordingUploadErrorText("Unexpected future failure", language: .english)
         XCTAssertTrue(unknown.contains("outcome is not confirmed"))
         XCTAssertTrue(unknown.contains("complete archive"))
-        XCTAssertTrue(unknown.contains("Unexpected future failure"))
+        // Unknown technical payload belongs in collapsed, sanitized Details,
+        // not in the primary user-facing operation summary.
+        XCTAssertFalse(unknown.contains("Unexpected future failure"))
     }
 
     func testHTTPFailuresExplainSafeNextActions() {

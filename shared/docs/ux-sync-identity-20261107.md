@@ -258,7 +258,7 @@ No production records, tokens, clinical fixtures or real patient/dog histories.
 | Durable sync | Each eligible local commit schedules work; no recursive log scheduling. Offline, disabled server, Wi-Fi-only, reconnect, duplicate Retry, restart after commit, kill mid-request, timeout and resumable partial files. No loss, crash, double binding or fake receipt. |
 | Identity/account | New/local/confirmed/stale revision; checking; offline last-confirmed; existing/missing account; partial restore; empty scope; explicit unassigned Link; wrong account conflict; switch blocked during capture. No name-based match, silent merge or guessed transfer. |
 | Recording axes | Every capture × meaningful delivery combination, especially interrupted + confirmed; known existing quality only (no empty quality block); missing video, remote-only, corrupt/missing file, unknown totals and incomplete receipt. Existing history pagination/download/share/delete safeguards regressions. |
-| Error/history | Latest error versus durable ordered attempts; success clears only relevant error; absent old history, interrupted attempt, unknown code, absent requestId; token/query redaction before storage/copy; actionable recovery and draft retention. |
+| Error/history | Latest error versus bounded retained actual events; success clears only relevant error; retention/admission limits, absent old history or unflushed events, interrupted attempt, unknown code, absent requestId; token/query redaction before storage/copy; actionable recovery and draft retention. |
 | Native UI/accessibility | Both platforms × RU/EN × light/dark; compact portrait/landscape, large accessibility font, keyboard, TalkBack/VoiceOver. Review screenshots of each identity state, account partial restore, field/revision conflict, partial upload, long error, expanded redacted details and attempts. |
 
 **Before implementation acceptance:** obtain agreed copy and review schema/API
@@ -281,3 +281,6 @@ none. Compatible API/migrations must be deployed/verified before dependent build
 retain compatibility for installed clients. Android signed release, iOS upload,
 Apple processing, tester availability and physical installation are separate gates.
 No commit, CI run or screenshot alone proves release readiness.
+
+Current candidate evidence and unresolved gates are recorded separately in
+[QA evidence, 2026-11-07](qa-identity-sync-20261107.md).
