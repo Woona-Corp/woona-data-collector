@@ -362,9 +362,11 @@ final class AppViewModel: ObservableObject {
     private var cameraStartTask: Task<Void, Never>?
     private var captureStartedMonotonicNs: UInt64?
     private var captureStoppedTiming: CaptureStoppedTiming?
-    // Own the first Stop snapshot (including a nil camera result) until durable
-    // completion. Retrying metadata finalization must not stop/promote again.
+    // Own the first Stop snapshot (including a nil camera result and requested
+    // status) until durable completion. Retrying metadata finalization must not
+    // stop/promote again or turn a completed capture into interrupted/failed.
     private var captureStoppedRecordingID: UUID?
+    private var captureStoppedStatus: String?
     private var captureErrorCode: String?
     private var captureErrorMessage: String?
     private var captureSessionZeroAtUTC: String?
@@ -929,6 +931,7 @@ final class AppViewModel: ObservableObject {
         captureStartedMonotonicNs = nil
         captureStoppedTiming = nil
         captureStoppedRecordingID = nil
+        captureStoppedStatus = nil
         isCaptureReady = false
         isRecording = false
         isCameraDegraded = false
@@ -974,6 +977,7 @@ final class AppViewModel: ObservableObject {
         captureStartedMonotonicNs = nil
         captureStoppedTiming = nil
         captureStoppedRecordingID = nil
+        captureStoppedStatus = nil
         cameraCaptureInfo = nil
         captureErrorCode = nil
         captureErrorMessage = nil
@@ -1027,6 +1031,7 @@ final class AppViewModel: ObservableObject {
 #endif
             captureStoppedTiming = CaptureStoppedTiming(endedAt: stoppedAt, startedMonotonicNs: captureStartedMonotonicNs, stoppedMonotonicNs: stoppedMonotonicNs)
             captureStoppedRecordingID = recording.id
+            captureStoppedStatus = status
         }
         cameraRecorder.generationFence.advance()
         cameraGeneration = nil
@@ -1052,9 +1057,6 @@ final class AppViewModel: ObservableObject {
 #else
                     cameraCaptureInfo = try await cameraRecorder.stopRecording()
 #endif
-                    if cameraCaptureInfo == nil, captureStartedMonotonicNs != nil, !isCameraDegraded {
-                        handleCameraFailure("Camera stopped before validated video was available")
-                    }
                     if let directory = store?.directory(for: recording) {
                         _ = try CameraRecorder.promoteCompletedVideo(in: directory, info: cameraCaptureInfo)
                     }
@@ -1068,7 +1070,7 @@ final class AppViewModel: ObservableObject {
             if recording.source == "live" { bleSessionManager.disconnect() }
             else { await replayController.stop() }
             await finishCaptureProcessing()
-            await finalizeActiveRecording(recording, requestedStatus: status)
+            await finalizeActiveRecording(recording, requestedStatus: captureStoppedStatus ?? status)
         }
     }
 
@@ -1154,6 +1156,7 @@ final class AppViewModel: ObservableObject {
         captureStartedMonotonicNs = startedMonotonicNs
         captureStoppedTiming = nil
         captureStoppedRecordingID = nil
+        captureStoppedStatus = nil
         cameraCaptureInfo = nil
         captureErrorCode = nil
         captureErrorMessage = nil
@@ -1974,6 +1977,7 @@ final class AppViewModel: ObservableObject {
             let finalization = try await CaptureFinalizer.run(root: store.rootDirectory, recordingID: recording.id, status: finalStatus, files: files, syncJSON: data, timing: captureStoppedTiming)
             activeRecording = nil
             captureStoppedRecordingID = nil
+            captureStoppedStatus = nil
             captureStoppedTiming = nil
             cameraCaptureInfo = nil
             hasPreparedActiveCapture = false

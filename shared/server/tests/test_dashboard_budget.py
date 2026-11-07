@@ -50,6 +50,14 @@ class DashboardBudgetTest(unittest.TestCase):
             self.assertIn('checkedAtUtc', data['label_service'])
             self.assertIn('снимок Label Studio', dashboard.render(data, ''))
 
+    def test_provider_disconnect_is_unavailable_not_dashboard_error(self):
+        dashboard.clear_label_summary_cache()
+        with patch.object(dashboard, 'records_from_sources', return_value=([], self.extra.copy())), \
+             patch.object(dashboard, 'request_json', side_effect=ConnectionResetError('reset')):
+            data = dashboard.load_dashboard()
+        self.assertFalse(data['label_service']['available'])
+        self.assertIsNone(data['totals']['pending_import'])
+
     def test_missing_list_annotations_has_bounded_fallback_not_false_zero(self):
         for task in self.tasks:
             task.pop('annotations')

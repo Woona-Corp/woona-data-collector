@@ -687,6 +687,10 @@ class DeviceFeatureController(
     )
 
     fun createCsvShareIntent(context: Context): Intent? {
+        if (!canShareCsvFile()) {
+            showErrorOnMainThread(appTextResolver.getString(R.string.export_finish_capture_first))
+            return null
+        }
         return try {
             showExportPhaseOnMainThread(ExportPhase.PREPARING_SNAPSHOTS)
             val snapshot = ensureExportSnapshot() ?: return null
@@ -777,7 +781,7 @@ class DeviceFeatureController(
 
     fun canShareLogFile(): Boolean = !v2PreviewConnection && packetCaptureController.currentLogFile()?.exists() == true
 
-    fun canShareCsvFile(): Boolean = !v2PreviewConnection && packetCaptureController.currentPacketFile()?.exists() == true
+    fun canShareCsvFile(): Boolean = !v2PreviewConnection && !isCaptureActive() && packetCaptureController.currentPacketFile()?.exists() == true
 
     private fun canCreateSessionArchiveNow(): Boolean = !v2PreviewConnection && !isCaptureActive() && videoRecorder?.isActive() != true &&
         uiState.videoState !in setOf(VideoCaptureState.STARTING, VideoCaptureState.RECORDING, VideoCaptureState.STOPPING)
