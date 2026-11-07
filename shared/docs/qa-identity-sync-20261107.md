@@ -63,8 +63,13 @@ This is verification evidence, **not a release or distribution announcement**.
   failures. **Prevention of that emulator crash is not claimed**; no assertions
   were removed and no speculative timing workaround was introduced.
 
-The corrected source needs a complete native CI rerun. A previous failure must
-not be reported as a final pass merely because individual causes were explained.
+Follow-up full Android CI on `deb9770` passed
+([run](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42400547401)).
+The parallel PR run found a new Swift test-fixture optional-string assignment and
+four translations missing from the shared presentation catalog; `9ca623c` fixes
+both, and all 240 display translations match both native catalogs locally.
+Corrected-source native iOS/full CI remains a release gate. A previous failure
+must not be reported as a final pass merely because its cause was explained.
 
 ## Physical-device and integration limitations
 
@@ -79,10 +84,22 @@ not be reported as a final pass merely because individual causes were explained.
   target were then independently checked before installing the isolated build.
   [Phone instructions](../../android/docs/PHONE_CHECKS.md) now require these
   independent guards; signature rejection is not an acceptable protection plan.
-- Physical visual review was not completed: the phone was locked, then USB
-  disconnected. A new isolated loopback API/proxy became ready, but **zero**
-  phone API regressions executed before disconnection. Its own containers,
-  PostgreSQL volume, network and proxy were removed; existing services remained.
+- Initial physical visual review was blocked by the locked phone and USB loss.
+  After the owner reconnected/unlocked it, the 1080×2364 outer display was reviewed
+  in English/dark mode/font scale 1.1: animal/account selection, distinct local
+  capture/server delivery, collapsed details, and a real unconfigured-server
+  delivery check followed by its actual waiting event. No network delivery was
+  falsely reported as confirmed. Account UI was clarified as data scope rather
+  than sign-in, and journal retention counts were made explicit on both platforms.
+- USB disappeared again before RU/light/landscape/large-text and live API checks
+  could be completed. These physical matrix cells remain **not verified**.
+  The temporary USB keep-awake setting must be restored to its saved original
+  value (0) when the device is reachable again; other font/orientation/theme
+  changes were not applied after disconnection.
+- The isolated loopback API/proxy became ready, but **zero** phone API regressions
+  executed in the initial attempt. Its own containers, PostgreSQL volume, network
+  and proxy were removed; existing services remained. A resumed isolated attempt
+  is separately bounded and must not be counted as a pass before instrumentation.
 - No physical Android/iPhone BLE, camera, background/process-death or sensor
   quality evidence is supplied by these software runs. No backup job was enabled.
 

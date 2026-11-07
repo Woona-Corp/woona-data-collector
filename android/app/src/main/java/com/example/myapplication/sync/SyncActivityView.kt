@@ -39,8 +39,8 @@ fun SyncActivityHistory(kind: String, id: String, language: AppLanguage, refresh
             Text((if (expanded) "− " else "+ ") + text("Sync activity", "Журнал синхронизации"))
         }
         if (expanded) {
-            Text(text("Recent recorded events, not a complete audit history. Events before this update or not written before process exit may be absent.",
-                "Последние сохранённые события, не полный аудит. События до обновления или не записанные до закрытия процесса могут отсутствовать."), style = MaterialTheme.typography.bodySmall)
+            Text(text("Up to 20 events for this item from the last 128 installation events, newest first. Not a complete audit: earlier or unflushed events may be absent.",
+                "До 20 событий объекта из последних 128 событий установки, новые сверху. Это не полный аудит: ранние или не записанные до закрытия события могут отсутствовать."), style = MaterialTheme.typography.bodySmall)
             if (loading) Text(text("Loading…", "Загружаем…"))
             else if (events.isEmpty()) Text(text("No recorded events for this item yet.", "Для этого объекта пока нет сохранённых событий."))
             else events.forEach { event ->

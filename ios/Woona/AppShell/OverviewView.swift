@@ -425,9 +425,9 @@ private struct SyncActivityDetails: View {
     @State private var reload = 0
 
     var body: some View {
-        DisclosureGroup(russian ? "История действий" : "Activity history") {
+        DisclosureGroup(russian ? "Журнал синхронизации" : "Sync activity") {
             VStack(alignment: .leading, spacing: 12) {
-                Text(russian ? "Последние сохранённые события, новые сверху. Журнал ограничен; это не полная история попыток." : "Recent saved events, newest first. The journal is bounded; this is not a complete attempt history.")
+                Text(russian ? "До 20 событий объекта из последних 128 событий установки, новые сверху. Это не полный аудит: ранние или не записанные до закрытия события могут отсутствовать." : "Up to 20 events for this item from the last 128 installation events, newest first. Not a complete audit: earlier or unflushed events may be absent.")
                     .foregroundStyle(.secondary)
                 if events.isEmpty {
                     Text(russian ? "Сохранённых событий нет. Ранее действия могли не записываться." : "No saved events. Earlier actions may not have been recorded.")
