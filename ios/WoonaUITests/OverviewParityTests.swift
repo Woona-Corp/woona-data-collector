@@ -8,13 +8,13 @@ final class OverviewParityTests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing"]
-        if name.contains("testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions") {
+        if name.contains("testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions") || name.contains("testIdentityAndRecordingGroupsReflowWithLargeTextInLandscape") {
             app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
         }
         if name.contains("testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls") {
             app.launchArguments.append("--ui-testing-v2-charts")
         }
-        if name.contains("testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire") || name.contains("testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory") {
+        if name.contains("testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire") || name.contains("testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory") || name.contains("testIdentityAndRecordingGroupsReflowWithLargeTextInLandscape") {
             app.launchArguments.append("--ui-testing-preexisting-heart")
         }
         if name.contains("testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory") {
@@ -40,6 +40,34 @@ final class OverviewParityTests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [newDogReady], timeout: 15), .completed,
                        "New dog must become enabled and hittable after launch")
+    }
+
+    func testIdentityAndRecordingGroupsReflowWithLargeTextInLandscape() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        for _ in 0..<12 where !app.staticTexts["Data account"].isHittable { app.swipeDown() }
+        XCTAssertTrue(app.staticTexts["Data account"].isHittable)
+        XCTAssertTrue(app.buttons["account.apply"].exists)
+        let dog = app.buttons["UI Dog 2"]
+        for _ in 0..<12 where !dog.isHittable { app.swipeUp() }
+        XCTAssertTrue(dog.isHittable)
+        dog.tap()
+        let identity = app.staticTexts["identity.status"]
+        for _ in 0..<12 where !identity.isHittable { app.swipeUp() }
+        XCTAssertTrue(identity.exists)
+        XCTAssertNotEqual(identity.label, "Server confirmed", "Synthetic local fixtures have no exact-version server receipt")
+        attachScreen("Identity-LargeText-EnglishLight")
+        app.buttons["tab.recordings"].tap()
+        XCUIDevice.shared.orientation = .landscapeRight
+        let capture = app.staticTexts["Local capture"].firstMatch
+        for _ in 0..<16 where !capture.isHittable { app.swipeUp() }
+        XCTAssertTrue(capture.isHittable)
+        let delivery = app.staticTexts["Server delivery"].firstMatch
+        for _ in 0..<16 where !delivery.isHittable { app.swipeUp() }
+        XCTAssertTrue(delivery.isHittable)
+        let share = app.buttons["Share session ZIP"].firstMatch
+        for _ in 0..<16 where !share.isHittable { app.swipeUp() }
+        XCTAssertTrue(share.isHittable, "Existing actions remain reachable after the grouped summaries at accessibility size")
+        attachScreen("Recording-Groups-LargeText-Landscape-EnglishLight", fullDevice: true)
     }
 
     func testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions() {

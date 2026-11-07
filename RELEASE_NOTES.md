@@ -1,5 +1,33 @@
 # Woona mobile release notes
 
+## Unreleased candidate — Android 1.5.8 / iOS 1.5.8
+
+- Prevent creating another local dog card with an already used animal ID,
+  including historical aliases and cards in other data accounts. Comparison is
+  pinned to the deployed Python 3.13 / Unicode 15.1 behavior on both platforms;
+  existing UUIDs and questionnaire content hashes are not rewritten or merged.
+- Explain identity conflicts inline while preserving the questionnaire draft.
+  Local commits continue through asynchronous server validation; absent server
+  configuration preserves queued work instead of stranding it as a permanent
+  failure. A known server conflict still requires an explicit correction.
+- Separate exact-version profile acknowledgement, local capture, server delivery,
+  file progress and technical evidence. Diagnostic payloads are collapsed and
+  redacted before storage/presentation, including credentials and signed URL data.
+- Add bounded actual sync events and read-only local capture-log previews. The
+  journal retains at most 128 recent installation events and displays 20 matching
+  events per item; it is best-effort diagnostics, not a complete durable audit.
+  Process exit may lose pending journal writes without losing the domain queue.
+- Account linking invalidates the former scope's profile confirmation and queues
+  validation of the current version. Existing recordings/files remain intact.
+
+### Candidate verification and release gate
+
+This heading prepares a version; it does not announce a release or tester access.
+Combined Android fast/full regression, native macOS iOS tests, visual review and
+release-asset checks must pass for the final source before publication. Existing
+physical BLE/camera/background and historical-data limitations still apply. No
+server API/schema migration or backup job is introduced by this candidate.
+
 ## Android 1.5.5 / iOS 1.5.5
 
 - iOS: fence camera preparation/start/stop ownership, validate completed video

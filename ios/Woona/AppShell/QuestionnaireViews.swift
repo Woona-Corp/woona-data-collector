@@ -252,6 +252,7 @@ let englishQuestionnaireText: [String: String] = [
 ]
 
 func questionnaireSaveError(_ error: Error, language: AppLanguage) -> String {
+    if let identity = error as? LocalAnimalIdentityError { return identity.message(language: language) }
     let prefix = language == .russian
         ? "Анкета не сохранена на устройстве. Черновик остаётся открытым; устраните причину и повторите сохранение."
         : "The questionnaire was not saved on this device. Your draft remains open; correct the cause and retry."

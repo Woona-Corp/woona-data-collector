@@ -5,6 +5,126 @@ import CryptoKit
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    func testAnimalIdentityKeyMatchesPythonStripCasefoldWithoutCanonicalOrLocaleCollisions() {
+        let equivalent = [
+            (" Straße\u{1C}", "STRASSE"), ("ẞ", "ss"), ("ΟΣ", "ος"), ("ος", "οσ"),
+            ("\u{85}\u{A0}ID\u{3000}", "id"), ("ﬃ", "FFI"), ("İ", "i\u{307}"),
+            ("\u{13A0}", "\u{AB70}"), ("\u{A7D0}", "\u{A7D1}"), ("\u{10570}", "\u{10597}")
+        ]
+        for (a, b) in equivalent { XCTAssertEqual(AnimalIdentityKey.bytes(a), AnimalIdentityKey.bytes(b), "\(a) / \(b)") }
+        // Unicode 16 folds must not collide on the live Unicode 15.1 server.
+        for (a, b) in [("é", "e\u{301}"), ("İ", "i"), ("ı", "i"), ("Ａ", "A"), ("\u{200B}id", "id"), ("\u{A7CB}", "\u{264}"), ("\u{1C89}", "\u{1C8A}")] {
+            XCTAssertNotEqual(AnimalIdentityKey.bytes(a), AnimalIdentityKey.bytes(b), "No NFKC, canonical, or locale equivalence: \(a) / \(b)")
+        }
+    }
+
+    func testSheetIdentityBoundsCountRawUnicodeScalarsNotGraphemesOrFoldedBytes() {
+        var dog = DogQuestionnaire()
+        dog.schemaVersion = 2
+        // A single grapheme can exceed Python's 100-code-point limit.
+        let atLimit = "a" + String(repeating: "\u{301}", count: 99)
+        let overLimit = atLimit + "\u{301}"
+        XCTAssertEqual(atLimit.count, 1)
+        XCTAssertEqual(atLimit.unicodeScalars.count, 100)
+        for value in [atLimit, String(repeating: "\u{10570}", count: 100), String(repeating: "ß", count: 100)] {
+            dog.animalId = value; dog.numberOrName = value
+            XCTAssertTrue(dog.validateSheet().isValid, "Raw scalar length, not UTF-16 or expanded casefold length")
+        }
+        for value in [overLimit, String(repeating: "\u{10570}", count: 101), " " + atLimit] {
+            dog.animalId = value; dog.numberOrName = value
+            XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["animalId", "numberOrName"]))
+        }
+        // Python strip includes C0 separators but excludes zero-width space.
+        for value in ["", "\u{1C}\u{1D}\u{1E}\u{1F}\u{85}\u{A0}\u{3000}"] {
+            dog.animalId = value; dog.numberOrName = value
+            XCTAssertTrue(AnimalIdentityKey.bytes(value).isEmpty)
+            XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["animalId", "numberOrName"]))
+        }
+        dog.animalId = nil; dog.numberOrName = "valid"
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["animalId"]))
+        dog.animalId = "\u{200B}"; dog.numberOrName = "\u{200B}"
+        XCTAssertTrue(dog.validateSheet().isValid)
+    }
+
+    func testLocalAnimalIdentityRejectsOtherUUIDAcrossAccountsAndHistoricalVersionsWithoutMutation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        var dog = DogQuestionnaire(); dog.schemaVersion = 2; dog.animalId = "Straße"; dog.numberOrName = "Original"
+        let original = try store.saveProfile(dog, accountID: "scope-a")
+        let recording = try store.createRecording(profile: original, source: "live", questionnaire: completeSession())
+        var revised = dog; revised.animalId = "Changed-ID"; revised.numberOrName = "Revised"
+        let latest = try store.saveProfile(revised, replacing: original)
+        for scope in [nil, "scope-a", "scope-b"] as [String?] {
+            var duplicate = dog; duplicate.animalId = " STRASSE "; duplicate.numberOrName = "Not a merge"
+            XCTAssertThrowsError(try store.saveProfile(duplicate, accountID: scope)) { error in
+                XCTAssertEqual(error as? LocalAnimalIdentityError, LocalAnimalIdentityError())
+            }
+        }
+        XCTAssertEqual(try store.profiles().count, 1)
+        XCTAssertEqual(try store.profiles().first?.profileVersionID, latest.profileVersionID)
+        XCTAssertEqual(try store.recording(id: recording.id)?.dogID, original.id)
+        XCTAssertEqual(try store.recording(id: recording.id)?.profileVersionID, original.profileVersionID)
+        XCTAssertEqual(try store.profileSyncState(versionID: latest.profileVersionID), "pending")
+        // A different existing UUID cannot edit its way into a historical ID either.
+        var other = dog; other.animalId = "Other-ID"
+        let otherProfile = try store.saveProfile(other, accountID: "scope-b")
+        other.animalId = "strasse"
+        XCTAssertThrowsError(try store.saveProfile(other, replacing: otherProfile))
+        XCTAssertEqual(try store.profiles().first(where: { $0.id == otherProfile.id })?.profileVersionID, otherProfile.profileVersionID)
+    }
+
+    func testLocalAnimalIdentityAllowsSameDogRevisionAndExactByteDistinctIDs() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        var dog = DogQuestionnaire(); dog.schemaVersion = 2; dog.animalId = "ΟΣ"; dog.numberOrName = "First"
+        let first = try store.saveProfile(dog)
+        try store.markProfileAccepted(dogID: first.id, versionID: first.profileVersionID)
+        dog.animalId = "ος"; dog.numberOrName = "Edited"
+        let second = try store.saveProfile(dog, replacing: first)
+        XCTAssertEqual(first.id, second.id)
+        XCTAssertNotEqual(first.profileVersionID, second.profileVersionID)
+        XCTAssertNotEqual(first.contentSha256, second.contentSha256)
+        XCTAssertEqual(try store.profileSyncState(versionID: second.profileVersionID), "pending")
+        XCTAssertEqual(try store.saveProfile(dog, replacing: second).profileVersionID, second.profileVersionID)
+        for id in ["é", "e\u{301}", "İ", "i", "ı"] {
+            dog.animalId = id
+            _ = try store.saveProfile(dog)
+        }
+        XCTAssertEqual(try store.profiles().count, 6)
+    }
+
+    func testLinkingDataAccountInvalidatesUnassignedVersionConfirmation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
+        try store.linkDog(dogID: profile.id, accountID: "scope-a")
+        XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "pending")
+        XCTAssertEqual(try store.profiles().first?.accountID, "scope-a")
+        try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
+        try store.linkDog(dogID: profile.id, accountID: "scope-a")
+        XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "synced")
+        XCTAssertThrowsError(try store.linkDog(dogID: profile.id, accountID: "scope-b"))
+    }
+
+    func testLocalIdentityErrorIsTypedActionableRussianAndEnglishAndDiagnosticsRedactCredentials() throws {
+        let error = LocalAnimalIdentityError()
+        XCTAssertEqual(error.field, "animalId")
+        XCTAssertTrue(error.message(language: .russian).contains("Черновик и записи сохранены"))
+        XCTAssertTrue(error.message(language: .english).contains("Select the existing dog or correct the ID"))
+        let diagnostic = safeSyncDiagnostic("HTTP 409 requestId=req-7 Bearer secret-value token=another https://user:password@host/path", secret: "secret-value")
+        for secret in ["secret-value", "another", "user:password"] { XCTAssertFalse(diagnostic.contains(secret)) }
+        XCTAssertTrue(diagnostic.contains("requestId=req-7"))
+        let response = ServerSyncError.responseError(status: 422, data: Data(#"{"detail":{"code":"invalid","message":"Bearer private-value token=private-token","requestId":"req-8","password":"not-allowlisted"}}"#.utf8))
+        XCTAssertFalse(response.localizedDescription.contains("private-value"))
+        XCTAssertFalse(response.localizedDescription.contains("private-token"))
+        XCTAssertFalse(response.localizedDescription.contains("not-allowlisted"))
+        XCTAssertTrue(response.localizedDescription.contains("req-8"))
+    }
+
     func testActualLiveTimingExcludesPreparationAndFinalizationAndUsesMonotonicElapsed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1188,6 +1308,8 @@ final class WoonaDataTests: XCTestCase {
             XCTAssertEqual(puts, 1, syncDiagnostics())
             XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "permanent_error")
             XCTAssertEqual(model.profileUploadFailed, 1)
+            XCTAssertEqual(model.profileIdentityStatuses[profile.profileVersionID], .conflict)
+            XCTAssertNil(model.profileIdentityCheckedAt[profile.profileVersionID])
             XCTAssertFalse(model.uploadQueueExplanation.contains("queue is empty"))
             let automatic = await model.resumePendingSync()
             XCTAssertTrue(automatic, syncDiagnostics()) // No eligible retry remains; this does not mark it uploaded.
@@ -1203,6 +1325,11 @@ final class WoonaDataTests: XCTestCase {
             XCTAssertEqual(try store.profiles().first?.revision, 8)
             XCTAssertEqual(model.profileUploadPending, 0)
             XCTAssertEqual(model.profileUploadFailed, 0)
+            XCTAssertEqual(model.profileIdentityStatuses[profile.profileVersionID], .serverConfirmed)
+            XCTAssertNotNil(model.profileIdentityCheckedAt[profile.profileVersionID])
+            model.updateTransferNetworkPath(available: false, unmetered: false)
+            XCTAssertEqual(model.profileIdentityStatuses[profile.profileVersionID], .offline)
+            XCTAssertNotNil(model.profileIdentityCheckedAt[profile.profileVersionID])
             XCTAssertEqual(try store.localInventory().recordings, 0)
         }
     }

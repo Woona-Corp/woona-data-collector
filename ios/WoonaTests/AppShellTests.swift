@@ -7,6 +7,43 @@ import SwiftUI
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    func testLocalProfileSaveWithoutServerConfigurationPreservesPendingVersionAndNeverClaimsChecking() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let model = AppViewModel(store: store, uiTesting: true)
+        model.serverBaseURL = ""; model.serverToken = ""
+        model.updateTransferNetworkPath(available: true, unmetered: true)
+        try await waitUntil("local recovery ready", timeout: 10) { model.canSelectAnimal }
+        var dog = DogQuestionnaire(); dog.schemaVersion = 2; dog.animalId = "local-only"; dog.numberOrName = "Offline dog"
+        try model.saveDogProfile(dog)
+        let first = try XCTUnwrap(model.selectedDogProfile)
+        XCTAssertEqual(try store.profileSyncState(versionID: first.profileVersionID), "pending")
+        try await waitUntil("local-only attempt settled", timeout: 10) { model.canChangeAccount && !model.isHistoryLoading }
+        XCTAssertEqual(model.profileIdentityStatuses[first.profileVersionID], .unverified)
+        XCTAssertNil(model.profileIdentityCheckedAt[first.profileVersionID])
+        XCTAssertNil(model.errorMessage)
+        // An absent URL is also unconfigured when a retained technical token exists.
+        model.serverToken = "synthetic-retained-token"
+        dog.numberOrName = "Revised offline dog"
+        try model.saveDogProfile(dog, replacing: first)
+        let second = try XCTUnwrap(model.selectedDogProfile)
+        try await waitUntil("unconfigured revision settled", timeout: 10) { model.canChangeAccount && !model.isHistoryLoading }
+        XCTAssertEqual(second.id, first.id)
+        XCTAssertNotEqual(second.profileVersionID, first.profileVersionID)
+        XCTAssertEqual(try store.profileSyncState(versionID: second.profileVersionID), "pending")
+        XCTAssertEqual(model.profileIdentityStatuses[second.profileVersionID], .unverified)
+        XCTAssertNil(model.profileIdentityCheckedAt[second.profileVersionID])
+        XCTAssertNil(model.errorMessage)
+        model.updateTransferNetworkPath(available: false, unmetered: false)
+        XCTAssertEqual(model.profileIdentityStatuses[second.profileVersionID], .offline)
+        let resumed = await model.resumePendingSync()
+        XCTAssertFalse(resumed)
+        XCTAssertEqual(try store.profileSyncState(versionID: second.profileVersionID), "pending")
+        XCTAssertEqual(try store.profiles().count, 1)
+        try await waitUntil("history reads settled", timeout: 10) { !model.isHistoryLoading }
+    }
+
     func testServerConnectionDraftLivesInAppMemoryAcrossViewRecreationAndClearsOnDismissal() {
         let model = AppViewModel(store: nil, uiTesting: true)
         model.serverBaseURL = "https://saved.example"

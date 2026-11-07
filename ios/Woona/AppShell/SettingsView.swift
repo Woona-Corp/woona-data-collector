@@ -20,7 +20,10 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                 if let error = appState.errorMessage {
                     AppCard(title: appState.selectedLanguage == .russian ? "Ошибка" : "Error") {
-                        Text(error).foregroundStyle(.red).textSelection(.enabled)
+                        Text(recordingUploadErrorText(error, language: appState.selectedLanguage)).foregroundStyle(.red)
+                        DisclosureGroup(russian ? "Подробности" : "Details") {
+                            Text(safeSyncDiagnostic(error, secret: appState.serverToken)).font(.caption).textSelection(.enabled)
+                        }
                     }
                 }
                 AppCard(title: appState.text(.bleTransport)) {
@@ -68,14 +71,14 @@ struct SettingsView: View {
                 AppCard(title: russian ? "Очистка по удалениям сервера" : "Server retirement cleanup") {
                     Text(retirementCheckLabel).font(.footnote)
                     if let date = appState.retirementCheckedAt { Text(recordingDisplayTime(date)).font(.caption) }
-                    if let error = appState.retirementCheckError { Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+                    if let error = appState.retirementCheckError { Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + safeSyncDiagnostic(error, secret: appState.serverToken)).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
                     Text(russian ? "Локальных удалений в очереди: \(appState.retirementCleanupStatus.pendingCount)" : "Pending local deletions: \(appState.retirementCleanupStatus.pendingCount)").font(.footnote)
                     if appState.retirementCleanupStatus.deferredCount > 0 {
                         Text(russian ? "Отложенных команд удаления: \(appState.retirementCleanupStatus.deferredCount). Повторим после безопасного завершения записи или обновления связанных профилей." : "Deferred retirements: \(appState.retirementCleanupStatus.deferredCount). They retry after capture stops safely or referenced profiles are refreshed.").font(.footnote)
                     }
                     if appState.retirementCleanupStatus.pendingCount > 0 {
                         Text(russian ? "Серверные метаданные уже выведены из обращения. Локальная очистка будет повторена; ошибка файла не отменяет удаление на сервере." : "Server metadata is already retired. Local cleanup will retry; a file error does not undo server retirement.").font(.footnote)
-                        if let error = appState.retirementCleanupStatus.lastError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+                        if let error = appState.retirementCleanupStatus.lastError { Text(safeSyncDiagnostic(error, secret: appState.serverToken)).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
                     }
                     if appState.retirementCleanupStatus.pendingCount > 0 || appState.retirementCleanupStatus.deferredCount > 0 || appState.retirementCheckError != nil {
                         Button(russian ? "Повторить проверку и очистку" : "Retry check and cleanup") { appState.recoverLocalData() }
@@ -84,43 +87,59 @@ struct SettingsView: View {
                 }
 
                 AppCard(title: appState.selectedLanguage == .russian ? "Серверное хранилище" : "Server storage") {
+                    Text(russian ? "Подключение" : "Connection").font(.subheadline.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                    Text(isServerConfigured ? safeSyncDiagnostic(appState.serverBaseURL, secret: appState.serverToken) : (russian ? "Не настроено" : "Not configured"))
+                        .font(.subheadline).textSelection(.enabled)
+                    Text(connectionLabel).font(.footnote)
+                    if let date = appState.connectionCheckedAt {
+                        Text((russian ? "Проверено: " : "Checked: ") + recordingDisplayTime(date)).font(.caption)
+                    }
+                    Text(russian ? "Аккаунт: \(appState.selectedAccountID ?? "без аккаунта")" : "Account: \(appState.selectedAccountID ?? "unassigned")").font(.footnote)
+                    Button {
+                        appState.beginServerConnectionEditing()
+                    } label: {
+                        Text(isServerConfigured ? (russian ? "Переподключить" : "Reconnect") : (russian ? "Подключить" : "Connect"))
+                            .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered).accessibilityIdentifier("server.configure").disabled(!appState.canChangeAccount)
+                    Button { appState.checkServerConnection() } label: {
+                        Text(russian ? "Проверить соединение" : "Check connection")
+                            .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered).disabled(!isServerConfigured || appState.connectionCheck == "checking")
+                    .accessibilityIdentifier("server.check")
+                    if let error = appState.connectionCheckError {
+                        Text(recordingUploadErrorText(error, language: appState.selectedLanguage)).font(.footnote).foregroundStyle(.red)
+                        DisclosureGroup(russian ? "Подробности проверки соединения" : "Connection check details") {
+                            Text(safeSyncDiagnostic(error, secret: appState.serverToken)).font(.caption).textSelection(.enabled)
+                        }
+                    }
+                    Divider()
+                    if !isServerConfigured || appState.networkAvailable == false || (appState.serverWifiOnly && appState.networkUnmetered == false) {
+                        Text(!isServerConfigured ? (russian ? "Сервер не подключён" : "Server not connected") : (russian ? "Ожидает сети" : "Waiting for network")).font(.subheadline.weight(.semibold))
+                        Text(russian ? "Работа без сети сохраняется на телефоне. Файлы, анкеты и очередь отправки не удаляются, когда сервер недоступен." : "Offline work is preserved on this phone. Files, questionnaires and the upload queue are not deleted when the server is unavailable.").font(.footnote)
+                    }
+                    Text(russian ? "Очередь · все локальные аккаунты" : "Queue · all local accounts").font(.subheadline.weight(.semibold)).accessibilityAddTraits(.isHeader)
                     Text(russian ? "Очередь всех локальных аккаунтов. Каждая анкета и запись отправляется в свой аккаунт." : "Queue for all local accounts. Each profile and recording uploads to its own account.").font(.footnote)
                     Text(appState.uploadQueueExplanation).font(.footnote)
                     Text(russian ? "Анкеты: \(appState.profileUploadPending) ожидают · \(appState.profileUploadFailed) ошибок" : "Profiles: \(appState.profileUploadPending) waiting · \(appState.profileUploadFailed) failed").font(.footnote)
                     if let error = appState.profileUploadLastError {
+                        Text(recordingUploadErrorText(error, language: appState.selectedLanguage)).font(.footnote).foregroundStyle(.red)
                         DisclosureGroup(russian ? "Ошибка отправки анкеты" : "Profile upload error") {
-                            Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                            Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + safeSyncDiagnostic(error, secret: appState.serverToken)).font(.caption).foregroundStyle(.red).textSelection(.enabled)
                         }
                     }
+                    Text(russian ? "Подтверждение загрузки не проверяет качество записи." : "Confirmed uploads do not verify capture quality.").font(.footnote)
                     Text(appState.backgroundSyncExplanation).font(.footnote)
                     if let error = appState.backgroundSyncError {
                         DisclosureGroup(russian ? "Подробности фонового запуска" : "Background scheduling details") {
-                            Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                            Text(safeSyncDiagnostic(error, secret: appState.serverToken)).font(.caption).foregroundStyle(.red).textSelection(.enabled)
                         }
                     }
-                    Text(russian ? "Аккаунт: \(appState.selectedAccountID ?? "без аккаунта")" : "Account: \(appState.selectedAccountID ?? "unassigned")").font(.footnote)
                     Text(russian ? "Сессии: \(appState.uploadPending) ожидают · \(appState.uploadRunning) выгружаются · \(appState.uploadSynced) подтверждены · \(appState.uploadFailed) ошибок" : "Sessions: \(appState.uploadPending) pending · \(appState.uploadRunning) uploading · \(appState.uploadSynced) confirmed · \(appState.uploadFailed) failed").font(.footnote)
                     if let error = appState.uploadLastError {
-                        DisclosureGroup(russian ? "Подробности последней ошибки" : "Last error details") { Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-                    }
-                    Text(connectionLabel).font(.footnote)
-                    if let date = appState.connectionCheckedAt { Text(recordingDisplayTime(date)).font(.caption) }
-                    if let error = appState.connectionCheckError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-                    Button(russian ? "Проверить соединение" : "Check connection") { appState.checkServerConnection() }
-                        .buttonStyle(.bordered)
-                        .disabled(!isServerConfigured || appState.connectionCheck == "checking")
-                        .accessibilityIdentifier("server.check")
-                    ServerStorageDetails(appState: appState, russian: russian)
-                    HStack {
-                        Text(isServerConfigured ? appState.serverBaseURL : (russian ? "Не настроено" : "Not configured"))
-                            .font(.subheadline)
-                        Spacer()
-                        Button(isServerConfigured ? (russian ? "Переподключить" : "Reconnect") : (russian ? "Подключить" : "Connect")) {
-                            appState.beginServerConnectionEditing()
-                        }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("server.configure")
-                        .disabled(!appState.canChangeAccount)
+                        Text(recordingUploadErrorText(error, language: appState.selectedLanguage)).font(.footnote).foregroundStyle(.red)
+                        DisclosureGroup(russian ? "Подробности последней ошибки" : "Last error details") { Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + safeSyncDiagnostic(error, secret: appState.serverToken)).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
                     }
                     Toggle(russian ? "Только по Wi‑Fi" : "Wi-Fi only", isOn: Binding(
                         get: { appState.serverWifiOnly },
@@ -129,10 +148,14 @@ struct SettingsView: View {
                         }
                     ))
                         .disabled(!isServerConfigured || !appState.canChangeNetworkPolicy)
-                    Button(russian ? "Повторить выгрузку" : "Retry uploads") { appState.retryFailedSync() }
+                    Button { appState.retryFailedSync() } label: {
+                        Text(russian ? "Повторить выгрузку" : "Retry uploads").fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, minHeight: 44)
+                    }
                         .buttonStyle(.bordered)
                         .disabled(!isServerConfigured || !appState.canChangeAccount)
-                    Button(russian ? "Восстановить с сервера" : "Restore from server") { appState.refreshFromServer() }
+                    Button { appState.refreshFromServer() } label: {
+                        Text(russian ? "Восстановить с сервера" : "Restore from server").fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, minHeight: 44)
+                    }
                         .buttonStyle(.bordered)
                         .disabled(!isServerConfigured || !appState.canChangeAccount)
                     if appState.serverRestoreState != "not_started" {
@@ -147,8 +170,11 @@ struct SettingsView: View {
                                 .font(.caption).textSelection(.enabled)
                         }
                     }
+                    ServerStorageDetails(appState: appState, russian: russian)
                     if isServerConfigured {
-                        Button(russian ? "Отключить сервер" : "Disconnect server", role: .destructive) { isServerDisconnectPresented = true }
+                        Button(role: .destructive) { isServerDisconnectPresented = true } label: {
+                            Text(russian ? "Отключить сервер" : "Disconnect server").fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, minHeight: 44)
+                        }
                             .buttonStyle(.bordered)
                             .disabled(!appState.canDisconnectServer)
                             .accessibilityIdentifier("server.disconnect")
@@ -258,7 +284,7 @@ private struct ServerConnectionEditor: View {
                         let cleanToken = draft.token.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !cleanToken.isEmpty else { error = russian ? "Введите токен" : "Enter token"; return }
                         do { try onSave(draft.baseURL, cleanToken); dismiss() }
-                        catch { self.error = (russian ? "Настройки сервера не сохранены. Исправьте причину и повторите.\n" : "Server settings were not saved. Correct the cause and retry.\n") + error.localizedDescription }
+                        catch { self.error = (russian ? "Настройки сервера не сохранены. Исправьте причину и повторите.\n" : "Server settings were not saved. Correct the cause and retry.\n") + safeSyncDiagnostic(error.localizedDescription, secret: draft.token) }
                     }
                     .accessibilityIdentifier("server.save")
                 }
@@ -318,10 +344,13 @@ private struct ServerStorageDetails: View {
             }
             if let error = appState.serverStorageError {
                 DisclosureGroup(t("Подробности ошибки проверки места", "Storage check error details")) {
-                    Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                    Text(recordingUploadErrorText(error, language: appState.selectedLanguage) + "\n" + safeSyncDiagnostic(error, secret: appState.serverToken)).font(.caption).foregroundStyle(.red).textSelection(.enabled)
                 }
             }
-            Button(appState.serverStorageCheck == "failed" || appState.serverStorageCheck == "unavailable" ? t("Повторить проверку места", "Retry storage check") : t("Проверить место на сервере", "Check server storage")) { appState.checkServerStorage() }
+            Button { appState.checkServerStorage() } label: {
+                Text(appState.serverStorageCheck == "failed" || appState.serverStorageCheck == "unavailable" ? t("Повторить проверку места", "Retry storage check") : t("Проверить место на сервере", "Check server storage"))
+                    .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, minHeight: 44)
+            }
                 .buttonStyle(.bordered).disabled(!configured || appState.serverStorageCheck == "checking").accessibilityIdentifier("server.storageCheck")
         }.font(.footnote)
     }

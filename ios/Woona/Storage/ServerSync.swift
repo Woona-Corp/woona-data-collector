@@ -257,6 +257,32 @@ struct ServerDeletion: Decodable, Hashable, Sendable {
     let id_sha256: String
 }
 
+/// Redact before persistence as well as presentation/copy. Never retain a raw
+/// response blob: only allowlisted diagnostics are extracted by responseError.
+func safeSyncDiagnostic(_ value: String, secret: String? = nil) -> String {
+    var result = value.replacingOccurrences(of: #"\/"#, with: "/")
+    if let secret, !secret.isEmpty { result = result.replacingOccurrences(of: secret, with: "[redacted]") }
+    // Remove all query/fragment data, not just a fixed list of signing vendors.
+    let urls = try! NSRegularExpression(pattern: #"(?i)https?(?:://|%3a%2f%2f)[^\s"'<>\\]+"#)
+    for match in urls.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed() {
+        guard let range = Range(match.range, in: result) else { continue }
+        var url = String(result[range]).replacingOccurrences(
+            of: #"(?i)(https?(?:://|%3a%2f%2f))[^/\s]+(?:@|%40)"#, with: "$1[redacted]@", options: .regularExpression)
+        if let delimiter = url.range(of: #"(?i)[?#]|%3f|%23"#, options: .regularExpression) {
+            url = String(url[..<delimiter.lowerBound]) + "[redacted]"
+        }
+        result.replaceSubrange(range, with: url)
+    }
+    for pattern in [
+        #"(?i)\bauthorization[\"']?\s*[:=]\s*(?:Basic|Digest)\s+[^\s\"',;\]}]+"#,
+        #"(?i)\bBearer\s+(?:\[redacted\]|[^\s"',;\]}]+)"#,
+        #"(?i)(["']?\b(?:access[_-]?token|refresh[_-]?token|device[_-]?token|token|authorization|password|secret|api[_-]?key|key|sig|signature|x-amz-signature|x-amz-credential|x-goog-signature)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\s,;}\]&]+)"#
+    ] {
+        result = result.replacingOccurrences(of: pattern, with: "[redacted]", options: .regularExpression)
+    }
+    return String(result.prefix(8192))
+}
+
 enum ServerSyncError: LocalizedError {
     case invalidURL
     case tokenMissing
@@ -265,7 +291,7 @@ enum ServerSyncError: LocalizedError {
     case requestFailed(Int, String)
     case animalIDConflict
 
-    static func responseError(status: Int, data: Data) -> ServerSyncError {
+    static func responseError(status: Int, data: Data, secret: String? = nil) -> ServerSyncError {
         let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         let detail = body?["detail"] as? [String: Any] ?? body
         if status == 409, detail?["code"] as? String == "animal_id_already_exists" { return .animalIDConflict }
@@ -279,7 +305,7 @@ enum ServerSyncError: LocalizedError {
             if let value = detail?[key] ?? body?[key] { diagnostics[key] = value }
         }
         let extra = (try? JSONSerialization.data(withJSONObject: diagnostics, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) }
-        return .requestFailed(status, (code.map { "\($0): \(message)" } ?? message) + (diagnostics.isEmpty ? "" : "\n" + (extra ?? "")))
+        return .requestFailed(status, safeSyncDiagnostic((code.map { "\($0): \(message)" } ?? message) + (diagnostics.isEmpty ? "" : "\n" + (extra ?? "")), secret: secret))
     }
 
     var errorDescription: String? {
@@ -420,7 +446,15 @@ final class WoonaServerClient {
     func updateQuestionnaire(recordingID: UUID, questionnaire: SessionQuestionnaire, expectedRevision: Int) async throws -> ServerRecordingDetail {
         let answers = try JSONSerialization.jsonObject(with: WoonaStore.sessionQuestionnaireData(questionnaire))
         let body = try JSONSerialization.data(withJSONObject: ["expectedRevision": expectedRevision, "questionnaire": answers])
-        return try await json(method: "PUT", path: "/v1/recordings/\(recordingID.uuidString)/questionnaire", body: body, as: ServerRecordingDetail.self)
+        SyncActivityLog.shared.record(kind: "recording", id: recordingID.uuidString, action: .upload, outcome: .started)
+        do {
+            let result = try await json(method: "PUT", path: "/v1/recordings/\(recordingID.uuidString)/questionnaire", body: body, as: ServerRecordingDetail.self)
+            SyncActivityLog.shared.record(kind: "recording", id: recordingID.uuidString, action: .upload, outcome: .succeeded)
+            return result
+        } catch {
+            SyncActivityLog.shared.record(kind: "recording", id: recordingID.uuidString, action: .upload, outcome: .failed, code: "questionnaire_update_failed")
+            throw error
+        }
     }
 
     func deviceID() async throws -> UUID {
@@ -429,6 +463,7 @@ final class WoonaServerClient {
     }
 
     func upload(profile: DogProfile, store: WoonaStore) async throws -> Int {
+        SyncActivityLog.shared.record(kind: "profile", id: profile.profileVersionID.uuidString, action: .profileValidation, outcome: .started)
         do {
             try await reconcileDeletions(into: store)
             guard try store.profile(dogID: profile.id, versionID: profile.profileVersionID) != nil else {
@@ -465,8 +500,11 @@ final class WoonaServerClient {
             }
             try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
             try store.setServerRevision(dogID: profile.id, revision: receipt.dogRevision)
+            SyncActivityLog.shared.record(kind: "profile", id: profile.profileVersionID.uuidString, action: .profileValidation, outcome: .succeeded)
             return receipt.dogRevision
         } catch {
+            SyncActivityLog.shared.record(kind: "profile", id: profile.profileVersionID.uuidString, action: .profileValidation, outcome: .failed,
+                code: (error as? ServerSyncError).map { if case .animalIDConflict = $0 { return "animal_id_already_exists" }; return "profile_validation_failed" } ?? "profile_validation_failed")
             let permanent: Bool
             if case ServerSyncError.animalIDConflict = error { permanent = true }
             else if case ServerSyncError.transfer(_, _, let retryable) = error { permanent = !retryable }
@@ -701,6 +739,7 @@ final class WoonaServerClient {
     }
 
     func upload(recording: WoonaRecording, profile: DogProfile, store: WoonaStore, onProgress: (() -> Void)? = nil) async throws {
+        SyncActivityLog.shared.record(kind: "recording", id: recording.id.uuidString, action: .upload, outcome: .started)
         let rootKey = store.rootDirectory.resolvingSymlinksInPath().standardizedFileURL.path
         Self.liveUploads[rootKey, default: [:]][recording.id, default: 0] += 1
         defer {
@@ -850,7 +889,9 @@ final class WoonaServerClient {
             let canonical = try JSONDecoder().decode(SessionQuestionnaire.self, from: JSONEncoder().encode(accepted.sessionQuestionnaire))
             try store.saveSessionQuestionnaire(recordingID: accepted.id, questionnaire: canonical, revision: accepted.questionnaireRevision ?? 1)
             try store.updateRecordingSync(recording.id, state: "synced")
+            SyncActivityLog.shared.record(kind: "recording", id: recording.id.uuidString, action: .upload, outcome: .succeeded)
         } catch {
+            SyncActivityLog.shared.record(kind: "recording", id: recording.id.uuidString, action: .upload, outcome: .failed, code: "upload_failed")
             let state: String
             if case ServerSyncError.transfer(_, _, let retryable) = error {
                 state = retryable ? "retryable_error" : "permanent_error"
@@ -1104,7 +1145,11 @@ final class WoonaServerClient {
     private func validate(response: URLResponse, data: Data) throws {
         guard let response = response as? HTTPURLResponse else { throw ServerSyncError.responseInvalid }
         guard (200...299).contains(response.statusCode) else {
-            throw ServerSyncError.responseError(status: response.statusCode, data: data)
+            let error = ServerSyncError.responseError(status: response.statusCode, data: data, secret: token)
+            if case .requestFailed(let status, let message) = error {
+                throw ServerSyncError.requestFailed(status, safeSyncDiagnostic(message, secret: token))
+            }
+            throw error
         }
     }
 }

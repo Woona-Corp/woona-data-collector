@@ -37,7 +37,7 @@ class RecordingHistoryActionsTest {
         show("synced")
         compose.onNodeWithText("GATT 8", substring = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Загрузка: загрузка была подтверждена; актуальную копию проверьте ниже").assertExists()
-        compose.onNodeWithText("Подробности ошибки").performScrollTo().performClick()
+        compose.onNodeWithText("+ Подробности").performScrollTo().performClick()
         compose.onNodeWithText("Ошибка GATT-подключения: 8", substring = true).assertExists()
     }
 

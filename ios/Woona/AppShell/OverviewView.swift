@@ -14,12 +14,12 @@ struct AppCard<Content: View>: View {
         self.content = content()
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.system(size: 16, weight: .semibold))
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.headline).accessibilityAddTraits(.isHeader)
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
+        .padding(16)
         .background(Color.woonaSurface, in: RoundedRectangle(cornerRadius: 12))
     }
 }
@@ -28,8 +28,10 @@ struct AccountControls: View {
     @EnvironmentObject private var appState: AppViewModel
     private var russian: Bool { appState.selectedLanguage == .russian }
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(russian ? "Аккаунт" : "Account").font(.caption).foregroundStyle(.secondary)
+        AppCard(title: russian ? "Аккаунт данных" : "Data account") {
+            Text((russian ? "Активный аккаунт: " : "Active account: ") + (appState.selectedAccountID ?? (russian ? "без аккаунта" : "unassigned")))
+                .font(.subheadline.weight(.semibold))
+            Divider()
             TextField(russian ? "Аккаунт" : "Account", text: $appState.accountInput,
                       prompt: Text(russian ? "Аккаунт" : "Account").foregroundStyle(Color.woonaMuted))
                 .textFieldStyle(.roundedBorder)
@@ -37,13 +39,18 @@ struct AccountControls: View {
                 .autocorrectionDisabled()
                 .accessibilityIdentifier("account.input")
                 .disabled(!appState.canChangeAccount)
-            Text(russian ? "Уникальный идентификатор без пароля. Пустое поле — данные без аккаунта." : "Unique identifier without a password. Leave empty to show unassigned data.")
+            Text(russian ? "Создаёт или открывает аккаунт данных. Это не пароль. Пустое поле — данные без аккаунта." : "Creates or opens a data account. Not a password. Leave empty to show unassigned data.")
                 .font(.footnote).foregroundStyle(.secondary)
             Button(russian ? "Применить аккаунт" : "Apply account") { appState.applyAccount() }
                 .buttonStyle(.borderedProminent).foregroundStyle(Color.woonaOnPrimary)
                 .accessibilityIdentifier("account.apply")
                 .disabled(!appState.canChangeAccount)
-            if appState.isAccountOperationRunning { ProgressView() }
+            if appState.isAccountOperationRunning {
+                ProgressView(russian ? "Восстановление… Прежний аккаунт остаётся активным." : "Restoring… The previous account remains active.")
+            }
+            if !appState.canChangeAccount && !appState.isAccountOperationRunning {
+                Text(russian ? "Завершите запись перед сменой аккаунта." : "Finish recording before changing the account.").font(.footnote)
+            }
             Text(russian ? "Локальная история: \(appState.localProfileCount) животных, \(appState.localRecordingCount) сессий. Активный аккаунт: \(appState.selectedAccountID ?? "без аккаунта")." : "Local history: \(appState.localProfileCount) animals, \(appState.localRecordingCount) sessions. Active account: \(appState.selectedAccountID ?? "unassigned").")
                 .font(.footnote).accessibilityIdentifier("account.localInventory")
             if appState.hiddenProfileCount > 0 {
@@ -238,7 +245,7 @@ func recordingUploadErrorText(_ message: String?, language: AppLanguage) -> Stri
     if ["missing", "changed", "sha-256", "checksum", "unreadable"].contains(where: normalized.contains) {
         return errorText(language, "Локальный файл отсутствует, изменён или не прошёл проверку целостности", "A local file is missing, changed or failed integrity verification")
     }
-    return errorText(language, "Результат операции не подтверждён. Причина не распознана: проверьте статус операции, сохраните полный архив и передайте подробности разработчику. Технические сведения: ", "The operation outcome is not confirmed. The cause is unrecognized: check the operation status, save a complete archive and send details to support. Technical details: ") + raw
+    return errorText(language, "Результат операции не подтверждён. Сохраните полный архив и передайте сведения из «Подробности» разработчику.", "The operation outcome is not confirmed. Save a complete archive and send Details to support.")
 }
 
 func recordingCaptureText(status: String, code: String?, message: String?, language: AppLanguage) -> String {
@@ -304,7 +311,11 @@ struct ServerRecordingTransferView: View {
                 .accessibilityIdentifier("recording.serverStatus." + recordingID.uuidString)
             if appState.serverToken.isEmpty { Text(ru ? "Для проверки подключите сервер в Настройках." : "Configure the server in Settings to check.").font(.caption) }
             if appState.checkingTransferIDs.contains(recordingID) { ProgressView() }
-            if let error = appState.transferStatusErrors[recordingID] { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            if let error = appState.transferStatusErrors[recordingID] {
+                Text((ru ? "Проверка доставки не завершена. " : "Delivery check did not finish. ") + recordingUploadErrorText(error, language: appState.selectedLanguage))
+                    .font(.footnote).foregroundStyle(.red)
+                DisclosureGroup(ru ? "Подробности" : "Details") { Text(safeSyncDiagnostic(error, secret: appState.serverToken)).font(.footnote).textSelection(.enabled) }
+            }
             if let status = appState.serverTransferStatuses[recordingID] {
                 if let date = appState.transferCheckedAt[recordingID] {
                     Text((ru ? "Проверено: " : "Checked: ") + recordingDisplayTime(date) + " · " + appState.serverBaseURL).font(.caption)
@@ -318,35 +329,40 @@ struct ServerRecordingTransferView: View {
                     if let date = transfer.lastProgressAtUtc { Text((ru ? "Последнее продвижение: " : "Last progress: ") + recordingDisplayTime(date)).font(.caption) }
                     Text((ru ? "Следующее действие: " : "Next action: ") + transferNextAction(transfer.nextAction, ru: ru)).font(.caption)
                 } else { Text((ru ? "Сервер вернул прежний формат статуса: " : "Server returned the earlier status format: ") + status.ingestStatus).font(.caption) }
-                if let quality = status.quality {
-                    Text(quality.status == "warnings" ? (ru ? "Качество потока: есть предупреждения" : "Stream quality: warnings present") : (ru ? "Качество потока: " : "Stream quality: ") + (quality.status == "not_audited" ? (ru ? "не проверено" : "not checked") : (quality.status == "audited" ? (ru ? "диагностика проверена" : "diagnostics checked") : quality.status)))
-                        .font(.caption).foregroundStyle(quality.status == "warnings" ? Color.orange : Color.secondary)
-                    ForEach(Array(quality.warnings.enumerated()), id: \.offset) { _, warning in
-                        Text(qualityWarningText(warning.code, count: warning.count, ru: ru)).font(.caption)
+                DisclosureGroup(ru ? "Подробности" : "Details") {
+                    VStack(alignment: .leading, spacing: 10) {
+                    if let quality = status.quality {
+                        Text(quality.status == "warnings" ? (ru ? "Качество потока: есть предупреждения" : "Stream quality: warnings present") : (ru ? "Качество потока: " : "Stream quality: ") + (quality.status == "not_audited" ? (ru ? "не проверено" : "not checked") : (quality.status == "audited" ? (ru ? "диагностика проверена" : "diagnostics checked") : quality.status)))
+                            .font(.caption).foregroundStyle(quality.status == "warnings" ? Color.orange : Color.secondary)
+                        ForEach(Array(quality.warnings.enumerated()), id: \.offset) { _, warning in
+                            Text(qualityWarningText(warning.code, count: warning.count, ru: ru)).font(.caption)
+                        }
+                        if !quality.continuousSensorCoverageVerified {
+                            Text(ru ? "Непрерывное покрытие датчиком не подтверждено. Успешная загрузка файлов не проверяет полноту измерений." : "Continuous sensor coverage is not verified. A successful file transfer does not verify measurement completeness.").font(.caption)
+                        }
                     }
-                    if !quality.continuousSensorCoverageVerified {
-                        Text(ru ? "Непрерывное покрытие датчиком не подтверждено. Успешная загрузка файлов не проверяет полноту измерений." : "Continuous sensor coverage is not verified. A successful file transfer does not verify measurement completeness.").font(.caption)
+                    if let labeling = status.labeling {
+                        Text(labeling.eligible ? (ru ? "Подходит для разметки. Наличие и выполнение задачи Label Studio этой проверкой не подтверждаются." : "Eligible for labeling. This check does not confirm a Label Studio task or its completion.") : (ru ? "Пока не подходит для разметки: " : "Not yet eligible for labeling: ") + labeling.exclusionReasons.joined(separator: "; ")).font(.caption)
                     }
-                }
-                if let labeling = status.labeling {
-                    Text(labeling.eligible ? (ru ? "Подходит для разметки. Наличие и выполнение задачи Label Studio этой проверкой не подтверждаются." : "Eligible for labeling. This check does not confirm a Label Studio task or its completion.") : (ru ? "Пока не подходит для разметки: " : "Not yet eligible for labeling: ") + labeling.exclusionReasons.joined(separator: "; ")).font(.caption)
-                }
-                DisclosureGroup(ru ? "Файлы и подробности доставки" : "Files and transfer details") {
-                    ForEach(status.artifacts ?? []) { artifact in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("\(artifact.fileName): \(artifact.uploadedBytes)/\(artifact.sizeBytes) · \(artifact.storageStatus)")
-                            let rawError = [artifact.errorCode, artifact.errorMessage].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
-                            if !rawError.isEmpty {
-                                let explanation = recordingUploadErrorText(rawError, language: appState.selectedLanguage)
-                                Text((ru ? "Причина: " : "Cause: ") + explanation).foregroundStyle(.red).textSelection(.enabled)
-                                if !explanation.contains(rawError) { Text((ru ? "Технические сведения: " : "Technical details: ") + rawError).textSelection(.enabled) }
-                            }
-                            Text(transferNextAction(artifact.nextAction, ru: ru))
-                        }.font(.caption)
+                    DisclosureGroup(ru ? "Файлы и подробности доставки" : "Files and transfer details") {
+                        ForEach(status.artifacts ?? []) { artifact in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(artifact.fileName): \(artifact.uploadedBytes)/\(artifact.sizeBytes) · \(artifact.storageStatus)")
+                                let rawError = [artifact.errorCode, artifact.errorMessage].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
+                                if !rawError.isEmpty {
+                                    let explanation = recordingUploadErrorText(rawError, language: appState.selectedLanguage)
+                                    Text((ru ? "Причина: " : "Cause: ") + explanation).foregroundStyle(.red).textSelection(.enabled)
+                                    if !explanation.contains(rawError) { Text((ru ? "Технические сведения: " : "Technical details: ") + safeSyncDiagnostic(rawError, secret: appState.serverToken)).textSelection(.enabled) }
+                                }
+                                Text(transferNextAction(artifact.nextAction, ru: ru))
+                            }.font(.caption)
+                        }
                     }
+                }.padding(.top, 8).textSelection(.enabled)
                 }
             }
         }
+        .padding(.vertical, 4)
     }
 }
 
@@ -400,6 +416,167 @@ func recordingSourceText(_ source: String, language: AppLanguage) -> String {
     return errorText(language, "Источник: ", "Source: ") + value
 }
 
+private struct SyncActivityDetails: View {
+    let kind: String
+    let id: UUID
+    let russian: Bool
+    let refreshKey: String
+    @State private var events: [SyncActivityEvent] = []
+    @State private var reload = 0
+
+    var body: some View {
+        DisclosureGroup(russian ? "История действий" : "Activity history") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(russian ? "Последние сохранённые события, новые сверху. Журнал ограничен; это не полная история попыток." : "Recent saved events, newest first. The journal is bounded; this is not a complete attempt history.")
+                    .foregroundStyle(.secondary)
+                if events.isEmpty {
+                    Text(russian ? "Сохранённых событий нет. Ранее действия могли не записываться." : "No saved events. Earlier actions may not have been recorded.")
+                }
+                ForEach(Array(events.enumerated()), id: \.offset) { _, event in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(recordingDisplayTime(event.timestampUtc)).foregroundStyle(.secondary)
+                        Text(syncActivityActionLabel(event.action, russian: russian) + " · " + syncActivityOutcomeLabel(event.outcome, russian: russian))
+                        if let code = event.code { Text(code).monospaced() }
+                    }
+                    Divider()
+                }
+                Button(russian ? "Обновить события" : "Refresh events") { reload += 1 }
+            }.font(.footnote).textSelection(.enabled).padding(.top, 8)
+        }
+        .task(id: refreshKey + String(reload)) {
+            let entityKind = kind
+            let entityID = id.uuidString
+            events = await Task.detached(priority: .utility) {
+                SyncActivityLog.shared.recent(kind: entityKind, id: entityID, limit: 20)
+            }.value
+        }
+    }
+}
+
+/// Read-only, opt-in preview of this repository's actual recording file, never a UI-supplied path.
+/// The file read is capped at the final 32 KiB; the shared sanitizer also caps displayed text.
+enum CaptureDiagnosticPreview {
+    static let maximumTailBytes = 32 * 1024
+
+    static func load(recordingID: UUID, store: WoonaStore, secret: String?) -> String? {
+        do {
+            guard let recording = try store.recording(id: recordingID) else { return nil }
+            let root = store.rootDirectory.resolvingSymlinksInPath().standardizedFileURL
+            let directory = root.appendingPathComponent(recording.relativeDirectory, isDirectory: true).standardizedFileURL
+            // Reject traversals and redirected directories, including symlinks to another recording.
+            guard !recording.relativeDirectory.split(separator: "/").contains(".."),
+                  directory.path.hasPrefix(root.path + "/"),
+                  store.directory(for: recording).resolvingSymlinksInPath().standardizedFileURL.path == directory.path else { return nil }
+            let artifacts = try store.artifacts(recordingID: recordingID)
+            let artifact = artifacts.first { $0.type == "diagnostic" && $0.fileName == "diagnostics.log" }
+            let file = artifact.map { root.appendingPathComponent($0.relativePath).standardizedFileURL }
+                ?? directory.appendingPathComponent("diagnostics.log")
+            guard artifact?.relativePath.split(separator: "/").contains("..") != true,
+                  file.path == directory.appendingPathComponent("diagnostics.log").path,
+                  file.resolvingSymlinksInPath().standardizedFileURL.path == file.path,
+                  try FileManager.default.attributesOfItem(atPath: file.path)[.type] as? FileAttributeType == .typeRegular else { return nil }
+            let handle = try FileHandle(forReadingFrom: file)
+            defer { try? handle.close() }
+            let size = try handle.seekToEnd()
+            let offset = size > UInt64(maximumTailBytes) ? size - UInt64(maximumTailBytes) : 0
+            try handle.seek(toOffset: offset)
+            let data = try handle.read(upToCount: maximumTailBytes) ?? Data()
+            guard !data.isEmpty else { return nil }
+            // A tail can start mid-UTF8 scalar. Replacement decoding keeps the rest readable.
+            return safeSyncDiagnostic(String(decoding: data, as: UTF8.self), secret: secret)
+        } catch {
+            // Missing/remote-only/unreadable files are not network failures and never trigger download.
+            return nil
+        }
+    }
+}
+
+private struct CaptureDiagnosticDetails: View {
+    @EnvironmentObject private var appState: AppViewModel
+    let recordingID: UUID
+    let russian: Bool
+    @State private var expanded = false
+    @State private var content: String?
+    @State private var loading = false
+
+    var body: some View {
+        DisclosureGroup(russian ? "Журнал записи" : "Capture log", isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(russian ? "Ограниченный просмотр последних 32 КиБ сохранённого журнала; показано не более 8192 символов. Исходные файлы не изменяются." : "Bounded preview of the last 32 KiB of the saved log; at most 8192 characters are shown. Original files are unchanged.")
+                    .foregroundStyle(.secondary)
+                if loading {
+                    ProgressView(russian ? "Загружаем…" : "Loading…")
+                } else {
+                    Text(content.map { safeSyncDiagnostic($0, secret: appState.serverToken) } ?? (russian ? "Читаемого журнала на устройстве нет. Файл, доступный только на сервере, сначала нужно скачать." : "No readable capture log on this device. A server-only file must be downloaded first."))
+                        .textSelection(.enabled)
+                }
+            }.font(.footnote).padding(.top, 8)
+        }
+        .accessibilityIdentifier("recording.captureLog." + recordingID.uuidString)
+        .task(id: expanded) {
+            guard expanded else { content = nil; return }
+            loading = true
+            defer { loading = false }
+            let root = appState.captureDiagnosticRootDirectory
+            let id = recordingID
+            let secret = appState.serverToken
+            let result = await Task.detached(priority: .utility) {
+                guard let root, let reader = try? WoonaStore(rootDirectory: root, readOnly: true) else { return Optional<String>.none }
+                return CaptureDiagnosticPreview.load(recordingID: id, store: reader, secret: secret)
+            }.value
+            guard !Task.isCancelled else { return }
+            content = result
+        }
+    }
+}
+
+private struct AnimalIdentityView: View {
+    @EnvironmentObject private var appState: AppViewModel
+    let profile: DogProfile
+    private var ru: Bool { appState.selectedLanguage == .russian }
+    private var status: ProfileIdentityStatus { appState.profileIdentityStatuses[profile.profileVersionID] ?? .unverified }
+    private var label: String {
+        switch status {
+        case .unverified: return ru ? "Не проверено" : "Unverified"
+        case .checking: return ru ? "Проверка…" : "Checking…"
+        case .serverConfirmed: return ru ? "Подтверждено сервером" : "Server confirmed"
+        case .conflict: return ru ? "Конфликт" : "Conflict"
+        case .offline: return ru ? "Нет связи" : "Offline"
+        case .needsAttention: return ru ? "Нужно исправить" : "Needs attention"
+        }
+    }
+    var body: some View {
+        AppCard(title: ru ? "Идентичность животного" : "Animal identity") {
+            Text(profile.numberOrName).font(.subheadline.weight(.semibold))
+            Text(label).accessibilityIdentifier("identity.status")
+            if status == .checking { ProgressView() }
+            if let checkedAt = appState.profileIdentityCheckedAt[profile.profileVersionID] {
+                Text((ru ? "Последнее подтверждение: " : "Last confirmed: ") + recordingDisplayTime(checkedAt)).font(.footnote)
+            }
+            if status == .unverified || status == .offline {
+                Text(ru ? "Сохранено на устройстве. Подключите сервер и сеть для проверки этой версии." : "Saved on this device. Connect the server and network to check this version.").font(.footnote)
+            }
+            if let error = appState.profileIdentityErrors[profile.profileVersionID] {
+                Text(recordingUploadErrorText(error, language: appState.selectedLanguage)).font(.footnote).foregroundStyle(.red)
+            }
+            if status != .checking {
+                Button(ru ? "Проверить и восстановить анкеты" : "Check and restore profiles") { appState.refreshFromServer() }
+                    .disabled(!appState.canChangeAccount || appState.serverToken.isEmpty)
+            }
+            DisclosureGroup(ru ? "Подробности" : "Details") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text((ru ? "ID животного: " : "Dog UUID: ") + profile.id.uuidString)
+                    Text((ru ? "Аккаунт данных: " : "Data account: ") + (profile.accountID ?? (ru ? "без аккаунта" : "unassigned")))
+                    Text((ru ? "Версия профиля: " : "Profile version: ") + profile.profileVersionID.uuidString)
+                    if let error = appState.profileIdentityErrors[profile.profileVersionID] { Text(safeSyncDiagnostic(error, secret: appState.serverToken)) }
+                }.font(.footnote).textSelection(.enabled).padding(.top, 8)
+            }
+            SyncActivityDetails(kind: "profile", id: profile.profileVersionID, russian: ru, refreshKey: status.rawValue)
+        }
+        .accessibilityIdentifier("overview.identity")
+    }
+}
+
 enum OverviewSection { case animals, session, video, recordings }
 
 struct OverviewView: View {
@@ -429,11 +606,13 @@ struct OverviewView: View {
                 LazyVStack(alignment: .leading, spacing: 8) {
                 if section == .animals { AccountControls() }
                 if appState.errorMessage != nil {
-                    AppCard(title: appState.selectedLanguage == .russian ? "Ошибка" : "Error") {
+                    AppCard(title: russian ? "Нужно исправить" : "Needs attention") {
                     if let errorMessage = appState.errorMessage {
-                        Text(errorMessage)
+                        Text(recordingUploadErrorText(errorMessage, language: appState.selectedLanguage))
                             .foregroundStyle(.red)
-                            .textSelection(.enabled)
+                        DisclosureGroup(russian ? "Подробности" : "Details") {
+                            Text(safeSyncDiagnostic(errorMessage, secret: appState.serverToken)).font(.footnote).textSelection(.enabled)
+                        }
                         if appState.hasDogIdentityConflict {
                             Button(appState.selectedLanguage == .russian ? "Проверить и восстановить анкеты" : "Check and restore profiles") { appState.refreshFromServer() }
                                 .disabled(!appState.canChangeAccount)
@@ -506,7 +685,7 @@ struct OverviewView: View {
                         }
                     }
 
-                    HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 12) {
                         Button(appState.selectedLanguage == .russian ? "Новая собака" : "New dog") {
                             dogEditorPresentation = DogProfileEditorPresentation(profile: nil)
                         }
@@ -523,6 +702,7 @@ struct OverviewView: View {
                     // Keep New and Edit as separate visible actions on both platforms.
                     .buttonStyle(.bordered)
                 }
+                if let profile = appState.selectedDogProfile { AnimalIdentityView(profile: profile) }
 
                 }
 
@@ -559,6 +739,49 @@ struct OverviewView: View {
                             let captureCode = recording.captureErrorCode ?? remote?.captureErrorCode
                             let captureMessage = recording.captureErrorMessage ?? remote?.captureErrorMessage
                             AppCard(title: recording.sessionLabel) {
+                                Text(recordingDisplayTime(recording.startedAtUTC) + " · " + profile.numberOrName)
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                                Divider()
+                                Text(russian ? "Запись на телефоне" : "Local capture")
+                                    .font(.subheadline.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                                Text(recordingCaptureText(status: recording.status, code: captureCode, message: captureMessage, language: appState.selectedLanguage))
+                                    .font(.callout)
+                                    .foregroundStyle(["failed", "interrupted"].contains(recording.status) || captureCode != nil ? Color.red : Color.primary)
+                                if let count = appState.recordingFileCounts[recording.id] {
+                                    Label(russian ? "На устройстве: \(count.local) из \(count.total) файлов" : "On device: \(count.local) of \(count.total) files", systemImage: "internaldrive")
+                                        .font(.footnote)
+                                }
+                                Divider()
+                                Text(russian ? "Доставка на сервер" : "Server delivery")
+                                    .font(.subheadline.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                                if recording.serverSyncState == "permanent_error" {
+                                    Text(russian ? "Нужно исправить" : "Needs attention").font(.subheadline.weight(.semibold)).foregroundStyle(.red)
+                                }
+                                if ["pending", "retryable_error"].contains(recording.serverSyncState), appState.networkAvailable == false {
+                                    Text(russian ? "Ожидает сети" : "Waiting for network").font(.subheadline.weight(.semibold))
+                                    Text(russian ? "Локальные данные сохранены. Подключитесь к сети; очередь продолжится при доступности." : "Local data is saved. Connect to a network; the queue resumes when eligible.").font(.footnote)
+                                } else {
+                                    Text(recordingUploadText(state: recording.serverSyncState, message: appState.recordingSyncErrors[recording.id], language: appState.selectedLanguage))
+                                        .font(.callout)
+                                }
+                                if let progress = appState.recordingUploadProgress[recording.id] {
+                                    Text(russian ? "Передано: \(progress.bytes) из \(progress.total) байт. Подтверждено файлов: \(progress.verified)/\(progress.files)." : "Transferred: \(progress.bytes) of \(progress.total) bytes. Confirmed files: \(progress.verified)/\(progress.files).")
+                                        .font(.footnote).monospacedDigit()
+                                    if progress.total > 0 { ProgressView(value: Double(progress.bytes), total: Double(progress.total)) }
+                                }
+                                ServerRecordingTransferView(recordingID: recording.id)
+                                DisclosureGroup(russian ? "Подробности" : "Details") {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text(recordingSourceText(recording.source, language: appState.selectedLanguage))
+                                        let details = [captureCode, captureMessage, appState.recordingSyncErrors[recording.id]].compactMap { $0 }.joined(separator: "\n")
+                                        if !details.isEmpty { Text(safeSyncDiagnostic(details, secret: appState.serverToken)).textSelection(.enabled) }
+                                    }.font(.footnote).padding(.top, 8)
+                                }
+                                .accessibilityIdentifier("recording.error." + recording.id.uuidString)
+                                CaptureDiagnosticDetails(recordingID: recording.id, russian: russian)
+                                    .id(recording.id)
+                                SyncActivityDetails(kind: "recording", id: recording.id, russian: russian, refreshKey: recording.serverSyncState)
+                                Divider()
                                 if ["completed", "failed", "interrupted"].contains(recording.status) {
                                     Button(appState.selectedLanguage == .russian ? "Изменить анкету" : "Edit questionnaire") { editingSession = recording }
                                         .disabled(!appState.canEditQuestionnaire(recording))
@@ -571,44 +794,14 @@ struct OverviewView: View {
                                     }
                                     .disabled(recording.serverSyncState == "remote" || !appState.canEditQuestionnaire(recording))
                                 }
-                                VStack(alignment: .leading) {
-                                    Text(recordingDisplayTime(recording.startedAtUTC)).font(.caption)
-                                    Text(profile.numberOrName).font(.caption)
-                                    Text(recordingSourceText(recording.source, language: appState.selectedLanguage)).font(.caption)
-                                    Text(recordingCaptureText(status: recording.status, code: captureCode, message: captureMessage, language: appState.selectedLanguage))
-                                        .font(.caption)
-                                        .foregroundStyle(["failed", "interrupted"].contains(recording.status) || captureCode != nil ? Color.red : Color.secondary)
-                                    Text(recordingUploadText(state: recording.serverSyncState, message: appState.recordingSyncErrors[recording.id], language: appState.selectedLanguage))
-                                        .font(.caption)
-                                        .foregroundStyle(["retryable_error", "permanent_error"].contains(recording.serverSyncState) ? Color.red : Color.secondary)
-                                }
-                                let details = [captureCode, captureMessage, appState.recordingSyncErrors[recording.id]].compactMap { $0 }.joined(separator: "\n")
-                                if !details.isEmpty {
-                                    DisclosureGroup(russian ? "Подробности ошибки" : "Error details") {
-                                        Text(details).font(.caption).textSelection(.enabled)
-                                    }
-                                    .accessibilityIdentifier("recording.error." + recording.id.uuidString)
-                                }
-                                if let progress = appState.recordingUploadProgress[recording.id] {
-                                    Text(russian ? "Передано: \(progress.bytes) из \(progress.total) байт. Подтверждено файлов: \(progress.verified)/\(progress.files)." : "Transferred: \(progress.bytes) of \(progress.total) bytes. Confirmed files: \(progress.verified)/\(progress.files).")
-                                        .font(.caption)
-                                    if progress.total > 0 { ProgressView(value: Double(progress.bytes), total: Double(progress.total)) }
-                                }
-                                ServerRecordingTransferView(recordingID: recording.id)
-                                if let count = appState.recordingFileCounts[recording.id] {
-                                    Text(appState.selectedLanguage == .russian ? "На устройстве: \(count.local) из \(count.total) файлов" : "On device: \(count.local) of \(count.total) files")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                                HStack {
-                                    Button(appState.selectedLanguage == .russian ? "Поделиться ZIP сессии" : "Share session ZIP") {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Button(russian ? "Поделиться ZIP сессии" : "Share session ZIP") {
                                         appState.shareRecording(recording.id)
                                     }
                                     .disabled(appState.exportPhase != nil || !appState.exportableRecordingIDs.contains(recording.id))
                                     if appState.downloadableRecordingIDs.contains(recording.id) {
-                                        Button(appState.selectedLanguage == .russian ? "Скачать" : "Download") {
-                                            appState.downloadRecording(recording.id)
-                                        }
-                                        .disabled(appState.downloadingRecordingID != nil)
+                                        Button(russian ? "Скачать" : "Download") { appState.downloadRecording(recording.id) }
+                                            .disabled(appState.downloadingRecordingID != nil)
                                     }
                                 }
                                 if let counts = appState.recordingFileCounts[recording.id], counts.local > 0 {
@@ -634,10 +827,18 @@ struct OverviewView: View {
                             AppCard(title: recording.sessionLabel) {
                                 Text(recordingDisplayTime(recording.startedAtUtc)).font(.caption)
                                 Text(recordingSourceText(recording.source, language: appState.selectedLanguage)).font(.caption)
-                                Text(recordingCaptureText(status: recording.captureStatus, code: recording.captureErrorCode, message: recording.captureErrorMessage, language: appState.selectedLanguage)).font(.caption)
+                                Divider()
+                                Text(russian ? "Запись на телефоне" : "Local capture").font(.subheadline.weight(.semibold))
+                                Text(recordingCaptureText(status: recording.captureStatus, code: recording.captureErrorCode, message: recording.captureErrorMessage, language: appState.selectedLanguage)).font(.callout)
+                                Divider()
+                                Text(russian ? "Доставка на сервер" : "Server delivery").font(.subheadline.weight(.semibold))
                                 Text(recordingUploadText(state: recording.ingestStatus == "uploading" ? "uploading" : recording.ingestStatus, message: nil, language: appState.selectedLanguage))
                                     .font(.caption).foregroundStyle(.secondary)
-                                if let details = recording.captureErrorMessage { Text(details).font(.caption).textSelection(.enabled) }
+                                if let details = recording.captureErrorMessage {
+                                    DisclosureGroup(russian ? "Подробности" : "Details") { Text(safeSyncDiagnostic(details, secret: appState.serverToken)).font(.footnote).textSelection(.enabled) }
+                                }
+                                CaptureDiagnosticDetails(recordingID: recording.id, russian: russian)
+                                    .id(recording.id)
                             }
                         }
                 }
@@ -657,7 +858,7 @@ struct OverviewView: View {
                         packetsLost: appState.packetsLost,
                         packetsRejected: appState.packetsRejected
                     )
-                    CompactSessionDetails()
+                    DisclosureGroup(russian ? "Подробности" : "Details") { CompactSessionDetails().textSelection(.enabled) }
 
                 }
 
@@ -707,9 +908,11 @@ struct OverviewView: View {
                         Text(russian ? "Здесь будут показаны диагностические сообщения и события захвата." : "Session diagnostics and capture events will appear here.")
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(Array(appState.diagnosticMessages.enumerated()), id: \.offset) { _, message in
-                            Text(message)
-                                .font(.footnote)
+                        Text(russian ? "Сообщений: \(appState.diagnosticMessages.count)" : "Messages: \(appState.diagnosticMessages.count)").font(.footnote)
+                        DisclosureGroup(russian ? "Подробности" : "Details") {
+                            ForEach(Array(appState.diagnosticMessages.enumerated()), id: \.offset) { _, message in
+                                Text(safeSyncDiagnostic(message, secret: appState.serverToken)).font(.footnote).textSelection(.enabled)
+                            }
                         }
                     }
                 }
@@ -927,7 +1130,7 @@ private struct CompactSessionDetails: View {
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity)
         .multilineTextAlignment(.center)
-        .lineLimit(2)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 

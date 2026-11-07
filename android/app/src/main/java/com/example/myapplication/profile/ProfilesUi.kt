@@ -143,6 +143,8 @@ fun ProfilesOverview(
     historyListState: androidx.compose.foundation.lazy.LazyListState = rememberLazyListState(),
     serverReports: Map<String, Pair<String?, Boolean>> = emptyMap(),
     onCheckServerRecording: (String) -> Unit = {},
+    profileSyncStatus: @Composable (DogProfile) -> Unit = {},
+    recordingEvidence: @Composable (Recording) -> Unit = {},
 ) {
     var pendingLocalRemoval by remember { mutableStateOf<Recording?>(null) }
     pendingLocalRemoval?.let { recording ->
@@ -200,10 +202,15 @@ fun ProfilesOverview(
                         enabled = canSelectProfile,
                         onClick = { onSelectProfile(profile.id) },
                     )
-                    Text(profile.numberOrName, modifier = Modifier.padding(top = 12.dp))
+                    Column(Modifier.weight(1f).padding(top = 12.dp)) {
+                        Text(profile.numberOrName, fontWeight = FontWeight.Medium)
+                        Text(tr(language, "Animal identity", "Идентичность животного"), style = MaterialTheme.typography.labelMedium)
+                        Text(tr(language, "ID: ${profile.questionnaire.animalId ?: "not saved"}", "ID: ${profile.questionnaire.animalId ?: "не сохранён"}"), style = MaterialTheme.typography.bodySmall)
+                        profileSyncStatus(profile)
+                    }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onCreateProfile, enabled = canSelectProfile) {
                     Text(tr(language, "New dog", "Новая собака"))
                 }
@@ -257,7 +264,7 @@ fun ProfilesOverview(
                 }
                 if (recordingsError != null) {
                     Text(tr(language, "History could not be loaded. Existing data is preserved.", "Не удалось загрузить историю. Существующие данные сохранены."), color = MaterialTheme.colorScheme.error)
-                    Text(recordingsError, style = MaterialTheme.typography.bodySmall)
+                    com.example.myapplication.sync.SyncDetails(tr(language, "Details", "Подробности"), recordingsError)
                     OutlinedButton(onClick = onRetryRecordings, enabled = !recordingsLoading) { Text(tr(language, "Retry", "Повторить")) }
                 }
                 if (recordings.isEmpty() && !recordingsLoading) Text(tr(language, "No recordings for this dog", "У этой собаки пока нет записей"), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -268,6 +275,35 @@ fun ProfilesOverview(
                 val localArtifacts = recording.artifacts.filter { it.localPresence in setOf("local", "both") }
                 val remoteArtifacts = recording.artifacts.filter { it.localPresence == "remote_only" }
                 val dataLabels = recordingDataLabels(recording, language)
+                Text(recording.sessionLabel, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text("${selected?.numberOrName.orEmpty()} · ${recordingDisplayTime(recording.startedAtUtc)}", style = MaterialTheme.typography.bodyMedium)
+                HorizontalDivider()
+                Text(tr(language, "Local capture", "Запись на телефоне"), style = MaterialTheme.typography.labelLarge)
+                Text(recordingCaptureText(recording.status.value, recording.captureErrorCode, recording.captureErrorMessage, language), style = MaterialTheme.typography.bodyMedium)
+                Text(recordingSourceText(recording.source.value, language), style = MaterialTheme.typography.bodySmall)
+                if (recording.status.value in setOf("failed", "interrupted") || recording.captureErrorCode != null) {
+                    Text(tr(language, "Keep the original files. Open Details to review the capture failure before starting another session.", "Сохраните исходные файлы. Откройте подробности для проверки сбоя перед новой сессией."), style = MaterialTheme.typography.bodySmall)
+                }
+                HorizontalDivider()
+                Text(tr(language, "Server delivery", "Доставка на сервер"), style = MaterialTheme.typography.labelLarge)
+                Text(recordingUploadText(recording.serverSyncState, recording.serverSyncError, language), style = MaterialTheme.typography.bodyMedium)
+                val bytesTotal = recording.artifacts.sumOf { it.sizeBytes.coerceAtLeast(0) }
+                val bytesUploaded = recording.artifacts.sumOf { it.uploadedBytes.coerceIn(0, it.sizeBytes.coerceAtLeast(0)) }
+                val verifiedFiles = recording.artifacts.count { it.uploadState == "available" }
+                Text(tr(language, "Transferred: $bytesUploaded of $bytesTotal bytes", "Передано: $bytesUploaded из $bytesTotal байт"), style = MaterialTheme.typography.bodySmall)
+                if (bytesTotal > 0) androidx.compose.material3.LinearProgressIndicator(progress = { (bytesUploaded.toDouble() / bytesTotal).toFloat() }, modifier = Modifier.fillMaxWidth())
+                Text(tr(language, "Server-confirmed files: $verifiedFiles/${recording.artifacts.size}", "Подтверждено сервером файлов: $verifiedFiles/${recording.artifacts.size}"), style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = { onCheckServerRecording(recording.id) }, enabled = serverReports[recording.id]?.second != true, modifier = Modifier.fillMaxWidth()) {
+                    Text(tr(language, "Check server transfer and files", "Проверить доставку и файлы на сервере"))
+                }
+                if (serverReports[recording.id]?.second == true) androidx.compose.material3.CircularProgressIndicator()
+                serverReports[recording.id]?.first?.let { report ->
+                    com.example.myapplication.sync.SyncDetails(tr(language, "Server delivery report", "Отчёт о доставке на сервер"), report)
+                }
+                val errorDetails = listOfNotNull(recording.captureErrorCode, recording.captureErrorMessage, recording.serverSyncError).joinToString("\n")
+                if (errorDetails.isNotBlank()) com.example.myapplication.sync.SyncDetails(tr(language, "Details", "Подробности"), errorDetails)
+                recordingEvidence(recording)
+                HorizontalDivider()
                 if (recording.status.value in setOf("completed", "failed", "interrupted")) {
                     OutlinedButton(onClick = { onEditQuestionnaire(recording) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text(tr(language, "Edit questionnaire", "Изменить анкету")) }
                     if (recording.questionnaire?.sessionKind == "heart" && !recording.questionnaire.readyForSync()) {
@@ -275,40 +311,6 @@ fun ProfilesOverview(
                     }
                     OutlinedButton(onClick = { onAddReference(recording.id) }, enabled = canSelectProfile && recording.serverSyncState != "uploading") { Text(tr(language, "Add ECG / heart rate / intervals", "Добавить ЭКГ / ЧСС / интервалы")) }
                 }
-                Text(
-                    "${recording.sessionLabel} · ${recordingDisplayTime(recording.startedAtUtc)}",
-                    fontWeight = FontWeight.Medium,
-                )
-                Text(
-                    "${selected?.numberOrName.orEmpty()} · ${recordingCaptureText(recording.status.value, recording.captureErrorCode, recording.captureErrorMessage, language)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (recording.status.value in setOf("failed", "interrupted") || recording.captureErrorCode != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(recordingSourceText(recording.source.value, language), style = MaterialTheme.typography.bodySmall)
-                Text(
-                    recordingUploadText(recording.serverSyncState, recording.serverSyncError, language),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (recording.serverSyncState in setOf("retryable_error", "permanent_error")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                val bytesTotal = recording.artifacts.sumOf { it.sizeBytes }
-                val bytesUploaded = recording.artifacts.sumOf { it.uploadedBytes.coerceIn(0, it.sizeBytes) }
-                val verifiedFiles = recording.artifacts.count { it.uploadState == "available" }
-                Text(tr(language, "Transferred: $bytesUploaded of $bytesTotal bytes. Server-confirmed files: $verifiedFiles/${recording.artifacts.size}.", "Передано: $bytesUploaded из $bytesTotal байт. Подтверждено сервером файлов: $verifiedFiles/${recording.artifacts.size}."), style = MaterialTheme.typography.bodySmall)
-                if (bytesTotal > 0) androidx.compose.material3.LinearProgressIndicator(progress = { (bytesUploaded.toDouble() / bytesTotal).toFloat() }, modifier = Modifier.fillMaxWidth())
-                OutlinedButton(onClick = { onCheckServerRecording(recording.id) }, enabled = serverReports[recording.id]?.second != true) {
-                    Text(tr(language, "Check server transfer and files", "Проверить доставку и файлы на сервере"))
-                }
-                if (serverReports[recording.id]?.second == true) androidx.compose.material3.CircularProgressIndicator()
-                serverReports[recording.id]?.first?.let { report ->
-                    androidx.compose.foundation.text.selection.SelectionContainer { Text(report, style = MaterialTheme.typography.bodySmall) }
-                }
-                val errorDetails = listOfNotNull(recording.captureErrorCode, recording.captureErrorMessage, recording.serverSyncError).joinToString("\n")
-                if (errorDetails.isNotBlank()) {
-                    var expanded by remember(recording.id) { mutableStateOf(false) }
-                    androidx.compose.material3.TextButton(onClick = { expanded = !expanded }) { Text(tr(language, "Error details", "Подробности ошибки")) }
-                    if (expanded) androidx.compose.foundation.text.selection.SelectionContainer { Text(errorDetails, style = MaterialTheme.typography.bodySmall) }
-                }
-
                 Text(
                     tr(
                         language,
@@ -1250,6 +1252,7 @@ private const val LIST_SEPARATOR = "\u001F"
 fun DogQuestionnaireDialog(
     initial: DogQuestionnaire?, required: Boolean, language: AppLanguage,
     onDismiss: () -> Unit, onSave: (DogQuestionnaire) -> Unit,
+    activeAccountId: String? = null,
 ) {
     val values = rememberSaveable(initial, saver = questionnaireValuesSaver) {
         mutableStateMapOf<String, String>().apply {
@@ -1284,7 +1287,12 @@ fun DogQuestionnaireDialog(
                 neckCircumferenceCm = values.sheetDouble("neckCircumferenceCm"),
             )
             errors = result.validate().errors
-            if (errors.isEmpty()) onSave(result)
+            if (errors.isEmpty()) {
+                try { onSave(result) }
+                catch (conflict: com.example.myapplication.data.LocalAnimalIdentityConflict) {
+                    errors = mapOf("animalId" to com.example.myapplication.sync.localAnimalIdentityConflictText(conflict, activeAccountId, language))
+                }
+            }
         },
     ) {
         Field(values, "animalId", "Номер/ID животного *", error = errors["animalId"])

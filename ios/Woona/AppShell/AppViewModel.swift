@@ -48,6 +48,11 @@ final class AppViewModel: ObservableObject {
     private var completeArchiveTask: Task<Void, Never>?
     private var completeArchiveWorker: Task<URL, Error>?
     @Published private(set) var dogProfiles: [DogProfile] = []
+    // Keyed by immutable profile version, never inferred from dog revision/name.
+    @Published private(set) var profileIdentityStatuses: [UUID: ProfileIdentityStatus] = [:]
+    @Published private(set) var profileIdentityErrors: [UUID: String] = [:]
+    @Published private(set) var profileIdentityCheckedAt: [UUID: String] = [:]
+
     @Published private(set) var selectedDogProfile: DogProfile? {
         didSet {
             if oldValue?.id != selectedDogProfile?.id || oldValue?.accountID != selectedDogProfile?.accountID {
@@ -140,6 +145,9 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var profileUploadFailed = 0
     @Published private(set) var profileUploadLastError: String?
     private var syncingProfileVersionIDs: Set<UUID> = []
+    private var profileUploadErrorOwner: UUID?
+    private var profileUploadErrorMessage: String?
+
     @Published private(set) var networkAvailable: Bool?
     @Published private(set) var networkUnmetered: Bool?
     @Published private(set) var connectionCheck = "not_checked"
@@ -270,6 +278,10 @@ final class AppViewModel: ObservableObject {
 
     var canStartNewSession: Bool { !hasOpenBLETransport && !isV2PreviewActive && !isLocalRecoveryRunning && localRecoveryError == nil && activeRecording == nil && !captureStopInProgress }
     var canSelectAnimal: Bool { !isV2PreviewActive && !isLocalRecoveryRunning && localRecoveryError == nil && !isBackgroundSyncRunning && activeRecording == nil && !isRecording && !isAccountOperationRunning && completeArchiveTask == nil }
+    private var hasServerSyncConfiguration: Bool {
+        !serverToken.isEmpty && (syncClientFactory != nil || !serverBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
     var transferNetworkAllowsWork: Bool {
         !isLocalRecoveryRunning && localRecoveryError == nil && networkAvailable == true && (!serverWifiOnly || networkUnmetered == true) && !isCompleteArchiveExporting
     }
@@ -290,6 +302,7 @@ final class AppViewModel: ObservableObject {
         let wasAllowed = transferNetworkAllowsWork
         networkAvailable = available
         networkUnmetered = unmetered
+        reloadProfiles()
         if !wasAllowed && transferNetworkAllowsWork && !isBackgroundSyncRunning { schedulePendingSync() }
     }
 
@@ -347,6 +360,8 @@ final class AppViewModel: ObservableObject {
     private let packetIngressGate = PacketIngressGate()
     private let keychainTokenStore = KeychainTokenStore()
     private let store: WoonaStore?
+    /// Trusted repository root only; diagnostic previews resolve persisted recording artifacts read-only.
+    var captureDiagnosticRootDirectory: URL? { store?.rootDirectory }
     #if DEBUG
     private var didInjectProfileSaveFailure = false
     #endif
@@ -503,6 +518,9 @@ final class AppViewModel: ObservableObject {
         }
         #endif
         let saved = try store.saveProfile(questionnaire, replacing: profile, accountID: selectedAccountID)
+        if saved.profileVersionID != profile?.profileVersionID {
+            SyncActivityLog.shared.record(kind: "profile", id: saved.profileVersionID.uuidString, action: .localSaved, outcome: .succeeded)
+        }
         reloadProfiles(selecting: saved.id)
         uploadingProfileCount += 1
         Task {
@@ -695,7 +713,7 @@ final class AppViewModel: ObservableObject {
 
     @discardableResult
     func resumePendingSync() async -> Bool {
-        guard !Task.isCancelled, transferNetworkAllowsWork, !serverToken.isEmpty, let store else {
+        guard !Task.isCancelled, transferNetworkAllowsWork, hasServerSyncConfiguration, let store else {
 #if DEBUG
             tracePendingSyncForTesting("resume rejected: " + pendingSyncGuardStateForTesting)
 #endif
@@ -1550,9 +1568,11 @@ final class AppViewModel: ObservableObject {
                 canonical = answers; revision = latest.questionnaireRevision ?? 1
             }
             try store.saveSessionQuestionnaire(recordingID: displayedRecording.id, questionnaire: canonical, revision: revision)
+            SyncActivityLog.shared.record(kind: "recording", id: displayedRecording.id.uuidString, action: .localSaved, outcome: .succeeded)
             reloadRecentRecordings()
         } else {
             try store.saveSessionQuestionnaire(recordingID: displayedRecording.id, questionnaire: questionnaire)
+            SyncActivityLog.shared.record(kind: "recording", id: displayedRecording.id.uuidString, action: .localSaved, outcome: .succeeded)
             reloadRecentRecordings()
             if let updated = try store.recording(id: displayedRecording.id) { scheduleSync(updated) }
         }
@@ -1732,6 +1752,28 @@ final class AppViewModel: ObservableObject {
             let previousDogID = selectedDogProfile?.id
             let previousAccountID = selectedDogProfile?.accountID
             let allProfiles = try store.profiles()
+            var statuses: [UUID: ProfileIdentityStatus] = [:]
+            var errors: [UUID: String] = [:], checkedAt: [UUID: String] = [:]
+            for profile in allProfiles {
+                let details = try store.profileSyncDetails(versionID: profile.profileVersionID)
+                let id = profile.profileVersionID
+                if syncingProfileVersionIDs.contains(id) { statuses[id] = .checking }
+                else if details.state == "synced" {
+                    statuses[id] = networkAvailable == false ? .offline : .serverConfirmed
+                    checkedAt[id] = details.updatedAt
+                } else if details.state == "permanent_error" {
+                    let reason = details.error ?? ""
+                    statuses[id] = reason.contains("animal_id_already_exists") || reason.contains("animal ID already belongs") ? .conflict : .needsAttention
+                } else if networkAvailable != true || (serverWifiOnly && networkUnmetered != true) {
+                    statuses[id] = .offline
+                } else if details.state == "retryable_error" {
+                    statuses[id] = .needsAttention
+                } else { statuses[id] = .unverified }
+                errors[id] = details.error
+            }
+            profileIdentityStatuses = statuses
+            profileIdentityErrors = errors
+            profileIdentityCheckedAt = checkedAt
             let profileQueue = try store.profileSyncOverview()
             profileUploadPending = profileQueue.pending
             profileUploadFailed = profileQueue.failed
@@ -1855,12 +1897,20 @@ final class AppViewModel: ObservableObject {
 
     @discardableResult
     private func uploadProfile(_ profile: DogProfile) async -> Bool {
-        guard !Task.isCancelled, transferNetworkAllowsWork, !serverToken.isEmpty, let store,
+        guard !Task.isCancelled, transferNetworkAllowsWork, hasServerSyncConfiguration, let store,
               !syncingProfileVersionIDs.contains(profile.profileVersionID) else {
 #if DEBUG
             tracePendingSyncForTesting("profile rejected: alreadySyncing=\(syncingProfileVersionIDs.contains(profile.profileVersionID)); " + pendingSyncGuardStateForTesting)
 #endif
-            if !Task.isCancelled { scheduleBackgroundSync() }
+            if !Task.isCancelled, !syncingProfileVersionIDs.contains(profile.profileVersionID),
+               !hasServerSyncConfiguration || !transferNetworkAllowsWork {
+                let networkBlocked = networkAvailable != true || (serverWifiOnly && networkUnmetered != true)
+                SyncActivityLog.shared.record(kind: "profile", id: profile.profileVersionID.uuidString, action: .profileValidation,
+                    outcome: !hasServerSyncConfiguration ? .waitingServer : networkBlocked ? .waitingNetwork : .queued,
+                    code: !hasServerSyncConfiguration ? "server_not_configured" : networkBlocked ? "network_unavailable" : nil)
+                reloadProfiles()
+                scheduleBackgroundSync()
+            }
             return false
         }
 #if DEBUG
@@ -1868,6 +1918,7 @@ final class AppViewModel: ObservableObject {
 #endif
         uploadingProfileCount += 1
         syncingProfileVersionIDs.insert(profile.profileVersionID)
+        profileIdentityStatuses[profile.profileVersionID] = .checking
         defer {
             uploadingProfileCount -= 1
             syncingProfileVersionIDs.remove(profile.profileVersionID)
@@ -1877,6 +1928,10 @@ final class AppViewModel: ObservableObject {
         do {
             _ = try await serverClient(accountID: profile.accountID).upload(profile: profile, store: store)
             let state = try store.profileSyncState(versionID: profile.profileVersionID)
+            if state == "synced", profileUploadErrorOwner == profile.profileVersionID {
+                if errorMessage == profileUploadErrorMessage { errorMessage = nil; hasDogIdentityConflict = false }
+                profileUploadErrorOwner = nil; profileUploadErrorMessage = nil
+            }
             return !Task.isCancelled && state == "synced"
         } catch {
 #if DEBUG
@@ -1885,6 +1940,8 @@ final class AppViewModel: ObservableObject {
             if !Task.isCancelled {
                 let explanation = recordingUploadErrorText(error.localizedDescription, language: selectedLanguage)
                 showError(explanation == error.localizedDescription ? "Profile upload failed" : explanation, error: error)
+                profileUploadErrorOwner = profile.profileVersionID
+                profileUploadErrorMessage = errorMessage
             }
             return false
         }
@@ -2007,7 +2064,16 @@ final class AppViewModel: ObservableObject {
 
     @discardableResult
     private func sync(recording: WoonaRecording) async -> Bool {
-        guard !Task.isCancelled, transferNetworkAllowsWork, removingLocalRecordingID == nil, !isAccountOperationRunning, !serverToken.isEmpty, let store, recording.questionnaire?.readyForSync != false, !syncingRecordingIDs.contains(recording.id) else { return false }
+        guard !Task.isCancelled, transferNetworkAllowsWork, removingLocalRecordingID == nil, !isAccountOperationRunning, hasServerSyncConfiguration, let store, recording.questionnaire?.readyForSync != false, !syncingRecordingIDs.contains(recording.id) else {
+            if !Task.isCancelled, !syncingRecordingIDs.contains(recording.id),
+               !hasServerSyncConfiguration || !transferNetworkAllowsWork {
+                let networkBlocked = networkAvailable != true || (serverWifiOnly && networkUnmetered != true)
+                SyncActivityLog.shared.record(kind: "recording", id: recording.id.uuidString, action: .upload,
+                    outcome: !hasServerSyncConfiguration ? .waitingServer : networkBlocked ? .waitingNetwork : .queued,
+                    code: !hasServerSyncConfiguration ? "server_not_configured" : networkBlocked ? "network_unavailable" : nil)
+            }
+            return false
+        }
         syncingRecordingIDs.insert(recording.id)
         reloadRecentRecordings()
         defer { syncingRecordingIDs.remove(recording.id); reloadRecentRecordings() }

@@ -62,11 +62,12 @@ fun ServerSettingsDialog(
                     modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                Text(if (language == AppLanguage.RUSSIAN) "Подключение сервера" else "Server connection")
+                Text(if (language == AppLanguage.RUSSIAN) "Подключение сервера" else "Server connection", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                Text(if (language == AppLanguage.RUSSIAN) "Без сети файлы, анкеты и очередь сохраняются на телефоне. Подключение сервера возобновит доставку; оно не удаляет локальные данные." else "Offline, files, questionnaires and the queue remain on this phone. Connecting resumes delivery; it does not delete local data.")
                 OutlinedTextField(
                     value = draft.baseUrl,
                     onValueChange = { draft.baseUrl = it },
-                    label = { Text("Server URL") },
+                    label = { Text(if (language == AppLanguage.RUSSIAN) "Адрес сервера" else "Server URL") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -85,9 +86,10 @@ fun ServerSettingsDialog(
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
                     isError = error != null,
-                    supportingText = error?.let { { Text(it) } },
+                    supportingText = error?.let { { Text(syncFailureSummary(it, language)) } },
                     modifier = Modifier.fillMaxWidth(),
                 )
+                error?.let { SyncDetails(if (language == AppLanguage.RUSSIAN) "Подробности" else "Details", it) }
                 if (!canSave) Text(if (language == AppLanguage.RUSSIAN) "Изменение подключения доступно после завершения текущей операции. Отключить сервер можно, не удаляя локальные данные." else "Connection changes are available after the current operation. You can disconnect without deleting local data.")
                 if (current.isConfigured && onDisconnect != null) TextButton(onClick = { confirmingDisconnect = true }, enabled = canDisconnect) {
                     Text(if (language == AppLanguage.RUSSIAN) "Отключить сервер и удалить токен" else "Disconnect server and remove token")

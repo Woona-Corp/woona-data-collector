@@ -129,8 +129,11 @@ class AppShellNavigationTest {
 
         navTab("Settings").performClick()
         scrollToServerSettings()
-        composeRule.onNodeWithText(message).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(message, substring = true).assertDoesNotExist()
+        composeRule.onNodeWithText("Upload not completed:", substring = true).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Retry uploads").performScrollTo().assertIsEnabled()
+        composeRule.onNodeWithText("+ Details").performScrollTo().performClick()
+        composeRule.onNodeWithText(message, substring = true).performScrollTo().assertIsDisplayed()
     }
 
     @Test

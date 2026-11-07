@@ -6,7 +6,7 @@ import java.time.LocalTime
 /** V2 follows the supplied sheets. Blank optional answers stay blank/null. */
 fun DogQuestionnaire.validateSheet(): QuestionnaireValidation {
     val errors = linkedMapOf<String, String>()
-    if (animalId.isNullOrBlank() || animalId.length > 100) errors["animalId"] = "Укажите ID животного (до 100 символов)"
+    if (animalId == null || stripAnimalIdentity(animalId).isEmpty() || animalId.codePointCount(0, animalId.length) > 100) errors["animalId"] = "Укажите ID животного (до 100 символов)"
     if (numberOrName.isBlank() || numberOrName.length > 100) errors["numberOrName"] = "Укажите кличку (до 100 символов)"
     for ((key, value, max) in listOf(
         Triple("shelterOrPlace", shelterOrPlace, 200), Triple("breedName", breedName, 100), Triple("resembles", resembles, 200),

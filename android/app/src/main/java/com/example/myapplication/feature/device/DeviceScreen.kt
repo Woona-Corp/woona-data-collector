@@ -791,112 +791,16 @@ private fun ServerSyncSettingsCard(
     onCheck: () -> Unit,
     onStorageCheck: () -> Unit,
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth().testTag("server.sync.settings"),
-        colors = appCardColors(),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text(
-                if (language == AppLanguage.RUSSIAN) "Серверное хранилище" else "Server storage",
-                style = MaterialTheme.typography.labelMedium,
-            )
-            if (!state.mutationsAllowed) Text(state.mutationBlockExplanation(language), style = MaterialTheme.typography.bodySmall)
-            Text(if (language == AppLanguage.RUSSIAN) "Очередь всех локальных аккаунтов. Каждая анкета и запись отправляется в свой аккаунт." else "Queue for all local accounts. Each profile and recording uploads to its own account.", style = MaterialTheme.typography.bodySmall)
-            Text(state.queueExplanation(language), style = MaterialTheme.typography.bodySmall)
-            state.operationMessage?.let { message -> androidx.compose.foundation.text.selection.SelectionContainer { Text(message, style = MaterialTheme.typography.bodySmall) } }
-            Text((if (language == AppLanguage.RUSSIAN) "Аккаунт: " else "Account: ") + (state.accountId ?: (if (language == AppLanguage.RUSSIAN) "без аккаунта" else "unassigned")))
-            Text(state.connectionCheck.label(language), style = MaterialTheme.typography.bodySmall)
-            state.checkedAtUtc?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            state.connectionError?.let { androidx.compose.foundation.text.selection.SelectionContainer { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) } }
-            OutlinedButton(onClick = onCheck, enabled = state.isConfigured && state.connectionCheck != com.example.myapplication.sync.ConnectionCheck.CHECKING) {
-                Text(if (language == AppLanguage.RUSSIAN) "Проверить соединение" else "Check connection")
-            }
-            com.example.myapplication.sync.ServerStorageSection(state.storage, state.isConfigured, language, onStorageCheck)
-            Text(if (language == AppLanguage.RUSSIAN) "Фоновые задачи: ${state.workersRunning} выполняются, ${state.workersQueued} ожидают. Счётчики ниже включают анкеты и сессии." else "Background jobs: ${state.workersRunning} running, ${state.workersQueued} queued. Counts below include profiles and sessions.", style = MaterialTheme.typography.bodySmall)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = if (state.isConfigured) state.baseUrl else {
-                        if (language == AppLanguage.RUSSIAN) "Не настроено" else "Not configured"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedButton(
-                    onClick = onConfigure,
-                    enabled = state.connectionEditorAllowed,
-                ) {
-                    Text(
-                        if (state.isConfigured) {
-                            if (language == AppLanguage.RUSSIAN) "Переподключить" else "Reconnect"
-                        } else {
-                            if (language == AppLanguage.RUSSIAN) "Подключить" else "Connect"
-                        },
-                    )
-                }
-            }
-            ServerSyncSwitchRow(
-                title = if (language == AppLanguage.RUSSIAN) "Только по Wi‑Fi" else "Wi-Fi only",
-                checked = state.wifiOnly,
-                enabled = state.isConfigured && state.networkPolicyAllowed,
-                onCheckedChange = onWifiOnlyChange,
-            )
-            Text(
-                text = if (language == AppLanguage.RUSSIAN) {
-                    "Ожидают: ${state.pending} · выгружаются: ${state.uploading} · синхронизированы: ${state.synced}"
-                } else {
-                    "Pending: ${state.pending} · uploading: ${state.uploading} · synced: ${state.synced}"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = supportingTextColor(),
-            )
-            if (state.failed > 0) {
-                Text(
-                    text = if (language == AppLanguage.RUSSIAN) {
-                        "Ошибки: ${state.failed}"
-                    } else {
-                        "Failed: ${state.failed}"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                state.lastErrorMessage?.let { message ->
-                    ErrorCard(com.example.myapplication.sync.serverSyncErrorText(message, language))
-                }
-            }
-            if (state.status == ServerSyncStatus.UPLOADING) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            OutlinedButton(
-                onClick = onRetryPending,
-                enabled = state.isConfigured && state.mutationsAllowed && state.pending + state.failed > 0,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (language == AppLanguage.RUSSIAN) "Повторить выгрузку" else "Retry uploads")
-            }
-            OutlinedButton(
-                onClick = onRestore,
-                enabled = state.isConfigured && state.mutationsAllowed && !state.restoring,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    if (state.restoring) {
-                        if (language == AppLanguage.RUSSIAN) "Восстановление…" else "Restoring…"
-                    } else {
-                        if (language == AppLanguage.RUSSIAN) "Восстановить с сервера" else "Restore from server"
-                    },
-                )
-            }
-        }
-    }
+    com.example.myapplication.sync.ServerSyncSettingsCard(
+        state = state,
+        language = language,
+        onConfigure = onConfigure,
+        onWifiOnlyChange = onWifiOnlyChange,
+        onRetryPending = onRetryPending,
+        onRestore = onRestore,
+        onCheck = onCheck,
+        onStorageCheck = onStorageCheck,
+    )
 }
 
 @Composable
