@@ -336,7 +336,66 @@ and token carets ON in five, absent in two, obscured in one. Seven fully
 inspectable keyboards show no raw-token suggestions. These artifacts are not
 replaced with earlier clear frames. The preceding `ba6c57f` full-CI set also
 had two white-obscured server images. Graphics causation remains unresolved;
-new full CI and physical verification remain required before publication.
+new full CI and physical verification were still required at that stage.
+
+### Final physical gate on `b5f1784` — 2026-11-08
+
+One newly authorized run passed **5/5 API** (64.756 seconds) and **17/17 UI**
+(86.812 seconds), zero failures/skips, with ordinary animations and no emulator
+flag, retries, experiments or tolerance changes. The retained instrumentation
+logs independently confirm these totals; this physical evidence has no XML.
+Fresh guarded review app/test APKs targeted only the isolated review package.
+The app SHA-256 was
+`ae95b0e70c478154cb0d90399de018797d2c677ffa492dbc7b40c62923614d5f`.
+
+Independent review inspected **all 24 fresh standard images**, without replacing
+any with older frames: Notes actual `End` and insertion caret ON **8/8**; complete
+focused token outline/label/mask and insertion caret ON **8/8**; private keyboards
+without raw-token suggestions **8/8**; readable titles/actions **24/24**. All eight
+initial token fields were empty and complete. White obstructions and personal
+notification overlays were **0/24**. The formerly failing landscape 1.1 RU case
+passed both strict automated containment and this separate visual check. This
+closes that physical gate for the measured-viewport candidate; it does not prove
+the specific transient cause of the earlier two-pixel placement overrun.
+
+Fresh **current** review domain/preferences were restored byte-for-byte;
+protected production/manual metadata and system settings were unchanged. Own
+reverse mappings and isolated services were removed. **Disconnect-safe was
+confirmed at 14:23:48 UTC**, before the 14:24:51 deadline; no phone commands
+followed. The owner reported enabling DND, but actual `zen_mode` was **0 before
+and after**: activation is not claimed, and the test did not change it. Absence
+of notifications is established from the images, not inferred from that setting.
+The private read-only proof SHA-256 is
+`290d512c3e3acf7f9505519e9edc48617cd2f41ac86265159c730f0d62c0d0f2`.
+
+CI [42486671341](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42486671341)
+on the same code passed Android **fast** checks (368 JVM plus lint/build), server
+checks and native iOS **355 unit +18 UI**, zero failures. That default PR run did
+**not** execute Android instrumentation. Explicit full Android CI
+[42490002092](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42490002092)
+was therefore requested on the same code; its result must be checked separately.
+No release, tag, TestFlight publication or production installation is implied.
+
+### Emulator obstruction: identified test surfaces, not an app graphics fix
+
+One private, fixed-protocol eight-case diagnostic retained each original global
+image, one public dialog-window capture and one fixed subsequent global image,
+plus bounded native layer/window dumps. Both global sets retained the same three
+white-obscured landscape 1.8 RU stages. SurfaceFlinger showed portrait
+**1080×1920** `InstrumentationActivityInvoker$EmptyActivity` and test-APK splash
+surfaces, alpha1, still composed above the app and IME across the exact white
+rectangle. WindowManager marked the old portrait splash `EXITING` with
+`mAnimatingExit=true`. This identifies retained test-harness transition surfaces
+as the obstruction origin **in that private run**; why they remained composed is
+not established. It is not a universal attribution for every historical image.
+
+Public `captureToImage()` invokes `decorView.forceRedraw()` before PixelCopy;
+its clear root images are neither passive/simultaneous observations nor
+substitutes for the obstructed global frames. No renderer workaround, dependency,
+assertion relaxation or production graphics change was added. The private
+benchmark scope stopped after that single run. The independently clear final
+physical batch establishes its own device acceptance, not an emulator graphics
+fix, sensor/camera verification or a physical-iPhone result.
 
 A disposable API 31 emulator also displayed Android's first-use immersive hint.
 The optional `woonaDisposableEmulator=true` matrix fixture independently requires
