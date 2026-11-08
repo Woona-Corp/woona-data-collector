@@ -215,6 +215,79 @@ is claimed. Final-source full CI, independent visual evidence and physical revie
 remain publication gates; the automated eight-pass result alone does not close
 them.
 
+Full Android CI [42474744936](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42474744936)
+on `102f175` subsequently passed: XML records **368 JVM tests** with no failures
+or skips and **248 instrumentation tests**, zero failures/errors, **8 explicit
+skips** (240 passed). Independent review of its 24 fresh images confirms actual
+`End` and caret ON in **8/8 Notes** configurations. Seven server fields are fully
+inspectable; both server landscape 1.8 RU frames have the white obstruction
+(2/24 CI images). The clear English CI frames supplement the earlier local
+English-obscured frames without erasing them or establishing a graphics fix.
+This does not override the physical failures below.
+
+The fresh owner-authorized physical run on **2026-11-08**, using only the isolated
+review package and ordinary animations, ended with **4/5 API** and **15/17 UI**
+checks passed, zero skips. The API WorkManager case timed out at Settings
+navigation before reaching Details/retry/upload; that failure alone does not
+establish a server-upload failure. Both UI failures are landscape 1.8 EN/RU:
+a 209-pixel token editor has only 200 pixels of rendered viewport. Its mask line
+and caret are visible in the primary frames, but the full-field clipping check
+correctly remains failed.
+
+Only **20/24 standard matrix frames** were reached, plus two primary-failure
+frames; Notes landscape 1.8 EN/RU was not reached. Independent review confirms
+`End` and caret ON in all six available Notes frames, private token IMEs in all
+eight available focused-token frames, and no white obstruction in these 22
+physical images. This is not complete matrix acceptance or an emulator graphics
+fix. Original preferences/eight fixtures were restored byte-for-byte; protected
+production/manual package metadata, font/orientation/stay-awake and ordinary
+animation settings matched the fresh baseline. Restoration completed at
+`11:19:52 UTC`; that phone window is closed and no extra runs were performed.
+
+A separate private, IME-isolated Compose 1.7.0 component experiment directly
+reproduced the bounded-editor defect in both root PixelCopy and global
+UiAutomation images. Only the cap changed (1731 to 865.5 pixels); field height
+changed from 1428 to 866 while raw text, collapsed selection `123..123`, the
+21-line paragraph and cursor coordinates stayed unchanged. `End`/caret were
+visible before the shrink and hidden afterward. A public platform-input
+interceptor prevented native IME delegation in this diagnostic fixture; native
+IME was absent in both phases. This isolates the viewport-height mechanism but
+is not an app acceptance, real-IME or physical-device gate. Publication remains
+blocked pending the physical layout/navigation issues and required verification.
+
+The next targeted layout candidate removes only decorative vertical padding in
+existing wide-and-compact headers, retaining horizontal padding, header spacing,
+fonts, minimum action targets and safe insets. The observed phone budget was
+355 pixels: 20 outer-padding pixels + 125 header + 10 spacing left only 200 for
+the 209-pixel editor. Removing that outer vertical decoration would leave 220;
+this is a measured layout rationale, **not a renewed physical pass**.
+
+The Settings test now uses the existing `tab.settings` identity, checks displayed
+and enabled state, performs one click and asserts selection. The existing BLE
+content postcondition and 10-second timeout remain unchanged; all later API
+assertions remain. Post-action failure screenshot/tree diagnostics are bounded
+and redacted without replacing the primary failure. This removes an ambiguous
+accessibility-text/ancestor bridge from the test; it does not prove the runtime
+cause of the earlier accepted-but-unobserved action. Further physical testing
+requires a fresh explicit owner window.
+
+On that follow-up candidate, local software checks passed **368 JVM + lint**,
+**17/17 managed-device UI** (zero skips, `11:51:15 UTC`, 115.714 seconds), and
+**5/5 actual API/WorkManager managed-device tests** against a fresh isolated local
+API/proxy (zero skips, `11:54:58 UTC`, 55.589 seconds). No phone commands were used
+for these follow-up runs. The stable Settings tag/selection path reached the
+existing human-error, Details, retry, 503 and upload checks on the emulator; it
+does not retroactively explain the earlier physical accessibility-action failure.
+
+Independent inspection of the new 24 UI frames found **no white obstruction in
+that set**, readable title/actions in all 24, complete `End` and caret ON in 8/8
+Notes frames, and complete token-mask lines/private keyboards in 8/8 token
+frames. Seven token stills capture the caret ON; landscape 1.1 EN does not and is
+not counted as positive caret-ON evidence. Initial nonfocused landscape 1.8
+fields can require scrolling. No earlier image was substituted. A clear new set
+is not a causal explanation or claimed fix for the historical white artifact;
+final-source full CI and renewed physical verification remain outstanding.
+
 A disposable API 31 emulator also displayed Android's first-use immersive hint.
 The optional `woonaDisposableEmulator=true` matrix fixture independently requires
 `ro.kernel.qemu=1`, snapshots the original nullable secure confirmation value,

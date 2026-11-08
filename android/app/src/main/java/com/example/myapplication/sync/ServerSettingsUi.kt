@@ -104,8 +104,10 @@ fun ServerSettingsDialog(
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                 ) { Text(if (language == AppLanguage.RUSSIAN) "Сохранить" else "Save") }
             }
+            // In wide compact windows, reserve scarce height for the complete
+            // editor instead of decorative outer padding; safe insets stay intact.
             Column(
-                modifier = Modifier.fillMaxSize().padding(horizontal = if (compact) 12.dp else 20.dp, vertical = if (compact) 4.dp else 20.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = if (compact) 12.dp else 20.dp, vertical = if (wide) 0.dp else if (compact) 4.dp else 20.dp),
                 verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 12.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -812,7 +812,9 @@ private fun QuestionnaireDialog(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = if (compactHeader) 4.dp else 10.dp),
+                        // Match server settings: wide compact headers spend
+                        // height on editor visibility, not decorative padding.
+                        .padding(horizontal = 16.dp, vertical = if (wideHeader) 0.dp else if (compactHeader) 4.dp else 10.dp),
                     verticalArrangement = Arrangement.spacedBy(if (compactHeader) 4.dp else 6.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
