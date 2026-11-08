@@ -25,6 +25,7 @@ set -euo pipefail
 QA_ID=com.woona.drivetest.diagnostics
 APK_ANALYZER="${ANDROID_HOME:?Set ANDROID_HOME}/cmdline-tools/latest/bin/apkanalyzer"
 test "$("$APK_ANALYZER" manifest application-id android/app/build/outputs/apk/debug/app-debug.apk)" = "$QA_ID"
+test "$("$APK_ANALYZER" manifest application-id android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk)" = "${QA_ID}.test"
 "$APK_ANALYZER" manifest print android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk | python3 -c 'import sys,xml.etree.ElementTree as E; r=E.parse(sys.stdin).getroot(); assert r.find("instrumentation").get("{http://schemas.android.com/apk/res/android}targetPackage") == sys.argv[1]' "$QA_ID"
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
@@ -49,3 +50,25 @@ devices, add the explicit test-device `-s SERIAL` to every ADB command.
 
 Run the Android software checks separately: `./android/tools/check.sh fast`
 and `./android/tools/check.sh full`.
+
+## Focused editing and managed-emulator setup
+
+`QaUiViewportMatrixTest` covers RU/EN, portrait/landscape and system font scales
+1.1/1.8 with a real regular IME. It checks action readability, retained focus,
+value/selection and the complete editable field above the IME. Its 24 end-state
+screenshots also require independent visual review: confirm the active masked
+token and the final `End`/caret in all eight Notes cases. A green action/field
+suite alone is not that manual caret acceptance. Compose 1.7 native character
+extra-data is diagnostic only: its outer-node mapping can omit inner scrolling.
+Use a fresh additional-output directory so stale failure frames cannot be
+mistaken for the current run; preserve primary failure evidence before cleanup.
+
+Managed `full` mode explicitly passes `woonaDisposableEmulator=true`. Only the
+matrix's class fixture uses it: it independently verifies `ro.kernel.qemu=1`,
+snapshots Android's first-use immersive confirmation value, acknowledges that
+known hint before testing, then restores and verifies the original after the
+class. It never dismisses an ANR, permission prompt or arbitrary modal. Do not
+pass this argument to a physical phone. Direct physical instrumentation without
+the argument performs no such secure-setting mutation. Keep ordinary animations
+for final physical acceptance; `--no-window-animation` is a separately reported
+controlled comparison, not a production fix or substitute for that acceptance.

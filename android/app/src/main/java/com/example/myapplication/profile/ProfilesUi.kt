@@ -31,6 +31,23 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.error as semanticsError
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -60,6 +77,10 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -759,42 +780,13 @@ private fun QuestionnaireDialog(
             // On short windows (including IME-resized dialogs) reserve enough
             // space for the form instead of allowing the header to consume it.
             val compactHeader = maxHeight < 360.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale
+            val wideHeader = compactHeader && maxWidth > maxHeight * 2
             LaunchedEffect(conflict, operationError, externalError) {
                 if (conflict != null || operationError != null || externalError != null) scrollState.scrollTo(0)
             }
-            Column {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(questionnaireText(title, language), style = if (compactHeader) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    if (!compactHeader) {
-                        Text(questionnaireText(subtitle, language), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(
-                            tr(
-                                language,
-                                "Answered: ${progress.first} of ${progress.second}",
-                                "Заполнено: ${progress.first} из ${progress.second}",
-                            ),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    if (errorCount > 0) {
-                        Text(
-                            tr(
-                                language,
-                                if (errorCount == 1) "1 field needs attention" else "$errorCount fields need attention",
-                                "Проверьте поля: $errorCount",
-                            ),
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
                         if (canDismiss) {
-                            TextButton(onClick = onDismiss, enabled = !isSaving, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                            TextButton(onClick = onDismiss, enabled = !isSaving, modifier = Modifier.weight(if (wideHeader) 0.7f else 1f).heightIn(min = 48.dp)) {
                                 Text(tr(language, "Cancel", "Отмена"))
                             }
                         }
@@ -812,18 +804,57 @@ private fun QuestionnaireDialog(
                                         "Сохранение не подтверждено. Черновик остаётся открытым; проверьте причину и повторите.") + "\n" + error.toString()
                                 } finally { isSaving = false }
                             }
-                        }, enabled = !isSaving && conflict == null, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                        }, enabled = !isSaving && conflict == null, modifier = Modifier.weight(if (wideHeader) 1.8f else 1f).heightIn(min = 48.dp)) {
                             Text(tr(language, "Validate and save", "Проверить и сохранить"))
                         }
+            }
+            Column {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = if (compactHeader) 4.dp else 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (compactHeader) 4.dp else 6.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(questionnaireText(title, language), style = if (compactHeader) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        if (wideHeader) actions()
                     }
+                    if (!compactHeader) {
+                        Text(questionnaireText(subtitle, language), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            tr(
+                                language,
+                                "Answered: ${progress.first} of ${progress.second}",
+                                "Заполнено: ${progress.first} из ${progress.second}",
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (errorCount > 0 && !compactHeader) {
+                        Text(
+                            tr(
+                                language,
+                                if (errorCount == 1) "1 field needs attention" else "$errorCount fields need attention",
+                                "Проверьте поля: $errorCount",
+                            ),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (!wideHeader) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), content = actions)
                     if (isSaving) Text(tr(language, "Saving and checking the result…", "Сохраняем и проверяем результат…"), modifier = Modifier.testTag("questionnaire.saving"))
                 }
-                Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    val editorMaxHeight = (maxHeight - if (compactHeader) 8.dp else 24.dp).coerceAtLeast(56.dp)
                     Column(modifier = Modifier.fillMaxSize().verticalScroll(scrollState).testTag("questionnaire.scroll")) {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            if (compactHeader && errorCount > 0) Text(
+                                tr(language, "$errorCount fields need attention", "Проверьте поля: $errorCount"),
+                                color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+                            )
                             conflict?.let { latest ->
                                 Text(tr(language, "HTTP 409: server revision ${latest.revision}. Your draft remains in this window. Review the server answers before choosing a version. Original capture files are preserved.",
                                     "HTTP 409: на сервере версия ${latest.revision}. Ваш черновик остаётся в этом окне. Проверьте ответы сервера перед выбором версии. Исходные файлы записи сохраняются."), color = MaterialTheme.colorScheme.error)
@@ -845,9 +876,10 @@ private fun QuestionnaireDialog(
                                 }
                             }
                         }
-                        CompositionLocalProvider(LocalFirstErrorKey provides firstErrorKey, LocalQuestionnaireLanguage provides language) {
+                        CompositionLocalProvider(LocalFirstErrorKey provides firstErrorKey, LocalQuestionnaireLanguage provides language,
+                            LocalQuestionnaireEditorMaxHeight provides editorMaxHeight) {
                             Column(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = if (compactHeader) 4.dp else 12.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp),
                             ) { content() }
                         }
@@ -872,6 +904,7 @@ private fun SectionTitle(text: String) {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun Field(
     values: MutableMap<String, String>,
@@ -883,18 +916,100 @@ private fun Field(
     bringIntoViewKey: String = key,
 ) {
     val errorModifier = firstErrorModifier(bringIntoViewKey)
-    OutlinedTextField(
-        value = values[key].orEmpty(),
-        onValueChange = { values[key] = it },
-        label = { Text(questionnaireLabel(label)) },
-        supportingText = error?.let { { Text(questionnaireLabel(it)) } },
-        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-        singleLine = singleLine,
-        isError = error != null,
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(errorModifier),
-    )
+    val editorMaxHeight = LocalQuestionnaireEditorMaxHeight.current
+    val requester = remember { BringIntoViewRequester() }
+    var focused by remember { mutableStateOf(false) }
+    var editorSize by remember { mutableStateOf(IntSize.Zero) }
+    val editorModifier = Modifier.fillMaxWidth()
+        .bringIntoViewRequester(requester)
+        .onSizeChanged { editorSize = it }
+        .onFocusChanged { focused = it.isFocused }
+        .then(errorModifier)
+    if (singleLine) {
+        LaunchedEffect(focused, editorMaxHeight, editorSize) {
+            if (focused && editorSize.width > 0 && editorSize.height > 0) requester.bringIntoView()
+        }
+        OutlinedTextField(
+            value = values[key].orEmpty(),
+            onValueChange = { values[key] = it },
+            label = { Text(questionnaireLabel(label)) },
+            supportingText = error?.let { { Text(questionnaireLabel(it)) } },
+            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+            singleLine = true,
+            isError = error != null,
+            modifier = editorModifier,
+        )
+        return
+    }
+
+    // Compose 1.7.0 (also 1.7.8) only adjusts its internal scroll offset when
+    // cursor X/Y changes, NOT when the IME shrinks its viewport. Leave this
+    // multiline editor natural-height in the unbounded parent verticalScroll:
+    // internal scroll maximum is zero; the form is the only scrolling owner.
+    // BasicTextField + the public Material decoration exposes onTextLayout,
+    // which OutlinedTextField 1.3.0 does not expose.
+    var valueState by remember(key) { mutableStateOf(TextFieldValue(values[key].orEmpty())) }
+    val value = valueState.copy(text = values[key].orEmpty())
+    // Match BasicTextField's String wrapper: external replacement clamps both
+    // selection and composition, without resetting a live IME composition.
+    SideEffect {
+        if (valueState != value) valueState = value
+    }
+    var textLayout by remember(key) { mutableStateOf<TextLayoutResult?>(null) }
+    LaunchedEffect(focused, editorMaxHeight, editorSize, value.selection, textLayout) {
+        val layout = textLayout
+        if (focused && layout != null && layout.layoutInput.text.text == value.text &&
+            editorSize.width > 0 && editorSize.height >= layout.size.height) {
+            val cursor = layout.getCursorRect(value.selection.end)
+            // All non-text height (label top inset, vertical padding, support)
+            // bounds the unknown text origin. This interval conservatively
+            // contains the complete caret line without guessing that origin.
+            val nonTextHeight = editorSize.height - layout.size.height
+            requester.bringIntoView(Rect(0f, cursor.top, editorSize.width.toFloat(), cursor.bottom + nonTextHeight))
+        }
+    }
+    val interactionSource = remember { MutableInteractionSource() }
+    val colors = OutlinedTextFieldDefaults.colors()
+    val textColor = when {
+        error != null -> colors.errorTextColor
+        focused -> colors.focusedTextColor
+        else -> colors.unfocusedTextColor
+    }
+    val errorText = error?.let { questionnaireLabel(it) }
+    val labelTopPadding = with(LocalDensity.current) { 8.sp.toDp() } // Material 1.3 body-small half-line inset.
+    CompositionLocalProvider(LocalTextSelectionColors provides colors.textSelectionColors) {
+        BasicTextField(
+            value = value,
+            onValueChange = { updated ->
+                valueState = updated
+                values[key] = updated.text // Synchronous raw draft update, including IME edits.
+            },
+            modifier = editorModifier
+                .semantics(mergeDescendants = true) { if (errorText != null) semanticsError(errorText) }
+                .padding(top = labelTopPadding)
+                .defaultMinSize(minWidth = OutlinedTextFieldDefaults.MinWidth, minHeight = OutlinedTextFieldDefaults.MinHeight),
+            textStyle = LocalTextStyle.current.merge(TextStyle(color = textColor)),
+            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+            singleLine = false,
+            onTextLayout = { textLayout = it },
+            interactionSource = interactionSource,
+            cursorBrush = SolidColor(if (error != null) colors.errorCursorColor else colors.cursorColor),
+            decorationBox = { innerTextField ->
+                OutlinedTextFieldDefaults.DecorationBox(
+                    value = value.text,
+                    innerTextField = innerTextField,
+                    enabled = true,
+                    singleLine = false,
+                    visualTransformation = VisualTransformation.None,
+                    interactionSource = interactionSource,
+                    isError = error != null,
+                    label = { Text(questionnaireLabel(label)) },
+                    supportingText = errorText?.let { { Text(it) } },
+                    colors = colors,
+                )
+            },
+        )
+    }
 }
 
 @Composable
@@ -998,6 +1113,9 @@ private fun Measurement(
 
 private val LocalFirstErrorKey = staticCompositionLocalOf<String?> { null }
 private val LocalQuestionnaireLanguage = staticCompositionLocalOf { AppLanguage.ENGLISH }
+// Measured form viewport after fixed header/actions/insets. Natural multiline
+// editors use its changes to re-request their caret region, never as a height cap.
+private val LocalQuestionnaireEditorMaxHeight = staticCompositionLocalOf { Dp.Unspecified }
 
 @Composable
 private fun questionnaireLabel(text: String): String = questionnaireText(text, LocalQuestionnaireLanguage.current)

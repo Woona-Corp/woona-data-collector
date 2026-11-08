@@ -41,10 +41,13 @@ Times below are UTC. Check the PR's latest checks for subsequent results.
   instrumentation XML confirms **248 cases, zero failures/errors, eight skips**.
   Gradle's live progress counter exceeded its expected count; XML totals, not that
   progress counter, are used here. This predates the final inset correction.
-- Native iOS on `bb5118c` compiled and ran **355 unit cases, all passed**, including
-  Storage and AppShell, plus **18 UI cases: 16 passed, two failed, zero skipped**:
-  [run 42411110881](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42411110881).
-  It is **not** a green suite. See the production correction below.
+- Native iOS on `8e517cc` **passed all 355 unit and 18 UI cases, zero failures or
+  skips**: [run 42425416880](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42425416880).
+  Compilation, Storage/AppShell, history removal/cancellation and accessibility
+  landscape checks all ran on macOS/iPhone Simulator, not Linux or a physical iPhone.
+- Earlier native iOS on `bb5118c` compiled and passed 355 unit cases, but only
+  16 of 18 UI cases: [42411110881](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42411110881).
+  That earlier run is not reported as green.
 - All 240 shared display translations match Android/iOS. Earlier iOS Python
   tooling ran 32 cases with one macOS-only class skipped on Linux.
 - Kotlin/Swift LSP probes were inconclusive; auxiliary style warnings do not
@@ -142,10 +145,86 @@ comparison flag, and passed **all 17 cases, zero failures/skips**, 70.138 second
 Domain files and preferences compared byte-for-byte unchanged before/after this
 run. Font **1.1**, auto-rotation **1**, user rotation **0** and USB keep-awake **0**
 were verified restored; the review process was stopped. The owner was told the
-phone could be disconnected. This closes those tested viewport configurations,
-not every theme/device combination.
+phone could be disconnected. This verifies action visibility in those tested
+configurations, not every editing end state or theme/device combination.
 
-## iOS layout correction requiring native rerun
+### Focused-editor acceptance, beyond passing action tests
+
+Independent visual review of the 24 saved matrix frames found an additional
+blind spot: all eight Notes end states failed to show the insertion end after
+multiline input; several landscape server frames hid or clipped the active
+field. The action-only 17-pass result above is therefore **not evidence that
+focused editing was fully usable**.
+
+The follow-up uses a compact, wide title/actions row and preserves one stable
+form composition. A bounded multiline trial exposed a Compose 1.7 internal-scroll
+limitation: an unchanged cursor can remain below the viewport when only its
+container shrinks. The inspected 1.7.8 implementation has the same update logic;
+a blind patch-version bump is not presented as a fix.
+
+The multiline candidate instead keeps natural text height with one parent form
+scroll owner. Public `BasicTextField` plus Material decoration supplies the actual
+text layout; synchronous raw draft updates preserve selection/composition. A
+geometry-driven request brings a conservative cursor interval (actual cursor line
+plus measured non-text height) into view on selection/layout/viewport changes.
+Single-line fields retain their existing implementation. Long Notes labels can
+legitimately scroll above the viewport; the current insertion line must remain
+visible, with title/actions reachable. No selection pokes, timer-driven fixes,
+internal tooling APIs or new dependencies are used.
+
+The stronger matrix verifies focus, exact value/selection and password masking;
+token checks require full field geometry above the IME, while natural Notes
+checks require actual cursor-interval containment in the rendered clip and native
+IME-safe window. Password Save separately checks the exact raw synthetic token.
+The token now requests a password keyboard with autocorrection disabled: visual
+masking alone had left the raw test word visible in IME suggestions.
+
+Caret acceptance has a separate mandatory visual gate: inspect all eight token
+and eight Notes end-state frames, including the final `End`/insertion line. A
+`manual-caret-review-required.txt` output makes clear that automated success is
+not this visual acceptance. Compose 1.7 character extra-data proved unreliable:
+whole arrays can be absent, and raw paragraph coordinates omit internal scroll
+translation, reporting a null glyph even when `End` and its caret are visibly
+rendered. That API remains nonsecret diagnostic evidence, not a false pass/fail
+oracle. No reflection, Kotlin-internal tooling APIs or new dependencies were
+introduced to manufacture automatic caret proof. Primary screenshots and bounds
+metadata are preserved; unsupported provider output is not counted as a skipped
+test or as proof that a caret is visible.
+
+The natural-editor follow-up continued on **2026-11-08 UTC**. Its local API 31
+matrix passed **8/8**, zero skips, at `01:10:47` (90.338 seconds); JVM XML totals
+are **368 passed**, and lint passed. All 16 Notes early/late samples validate an
+independent native-decor root anchor and conservative cursor-interval containment.
+These are not 32 root-anchor checks: the 16 token samples use their separate
+whole-field geometry criteria.
+
+Independent review of all 24 exact-source frames remains **incomplete**: all three
+landscape 1.8 EN images contain an unexplained opaque white region spanning app
+and keyboard pixels. Seven Notes configurations show the complete final `End`
+line; six of those capture the caret ON and one does not. Seven focused token
+frames show the complete mask line and no raw-token suggestions; five capture the
+caret ON, two do not, and the eighth configuration is obscured. An absent cursor
+in a still frame is not positive caret evidence. Initial nonfocused content may
+legitimately extend below the scroll viewport.
+
+An earlier trial showed the white region in RU instead. Native roots/window
+geometry and lifecycle logs did not establish a late Activity replacement or the
+cause of those pixels; recorded emulator graphics fallback/jank also occurred in
+good cases. No speculative renderer/AVD mitigation was added and no graphics fix
+is claimed. Final-source full CI, independent visual evidence and physical review
+remain publication gates; the automated eight-pass result alone does not close
+them.
+
+A disposable API 31 emulator also displayed Android's first-use immersive hint.
+The optional `woonaDisposableEmulator=true` matrix fixture independently requires
+`ro.kernel.qemu=1`, snapshots the original nullable secure confirmation value,
+acknowledges only that known onboarding before any per-case activity, then
+restores and verifies the original after all cases. Only managed full mode opts
+in. Physical direct instrumentation without the argument changes no such setting.
+This is not dismissal of an ANR, permission prompt or arbitrary failed-test modal,
+and does not claim prevention of SystemUI crashes.
+
+## iOS layout correction and native rerun
 
 The two remaining `bb5118c` UI failures were investigated from native frames and
 screenshots, not dismissed as fixtures:
@@ -160,9 +239,17 @@ screenshots, not dismissed as fixtures:
   and require the full target frame plus actual hittability. Confirmation,
   cancellation, raw-diagnostic, large-text and landscape assertions remain.
 
-At this checkpoint, a new full native run and full Android regression after the
-inset/layout correction are required. Successful earlier-source runs must not be
-reported as corrected-source passes; use the PR's checks and linked final run.
+The first root-layout reruns passed history removal and all 355 unit cases, but
+one landscape test still failed: its flick moved the heading between y336 and
+approximately y0, skipping the valid y78–296 viewport. `8e517cc` replaces that
+flick with a frame-guided, bounded slow drag and finger hold at the destination,
+not extra sleeps, more attempts or weaker assertions. The subsequent full native
+run passed all 373 cases as linked above.
+
+Final Android regression and physical focused-editor review after the additional
+editing correction remain separate requirements. Successful earlier-source or
+action-only runs must not be reported as passes of the stronger corrected-source
+editing criteria; use the PR's checks and linked final evidence.
 
 ## Limits and release gate
 

@@ -19,6 +19,13 @@
   Process exit may lose pending journal writes without losing the domain queue.
 - Account linking invalidates the former scope's profile confirmation and queues
   validation of the current version. Existing recordings/files remain intact.
+- Keep editing actions reachable around the keyboard and large-text landscape
+  layouts. Android multiline editing uses the parent form scroll and actual
+  cursor-region relocation instead of relying on a stale nested-editor offset;
+  iOS content reserves the actual custom-navigation height.
+- Android token entry requests a password keyboard with autocorrection disabled,
+  in addition to visual masking; ordinary text-keyboard suggestions must not echo
+  the entered credential.
 
 ### Candidate verification and release gate
 

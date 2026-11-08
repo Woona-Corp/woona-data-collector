@@ -36,8 +36,15 @@ if [[ "$mode" == full ]]; then
 fi
 
 tasks=(testDebugUnitTest lintDebug assembleDebug)
-[[ "$mode" == full ]] && tasks+=(woonaApi31DebugAndroidTest)
-./gradlew "${tasks[@]}" --max-workers=4 --no-daemon --console=plain
+managed_args=()
+if [[ "$mode" == full ]]; then
+    tasks+=(woonaApi31DebugAndroidTest)
+    # A disposable emulator may show Android's first-use immersive hint over
+    # the matrix. Its class fixture verifies qemu independently, acknowledges
+    # only that hint before testing, then restores the original secure value.
+    managed_args+=(-Pandroid.testInstrumentationRunnerArguments.woonaDisposableEmulator=true)
+fi
+./gradlew "${tasks[@]}" "${managed_args[@]}" --max-workers=4 --no-daemon --console=plain
 
 apk="app/build/outputs/apk/debug/app-debug.apk"
 apksigner="$(find "$sdk_root/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner | sort -V | tail -n 1)"
