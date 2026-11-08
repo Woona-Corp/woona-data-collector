@@ -11,6 +11,9 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.window.DialogProperties
@@ -79,12 +82,21 @@ fun ServerSettingsDialog(
             val urlRequester = remember { BringIntoViewRequester() }
             val tokenRequester = remember { BringIntoViewRequester() }
             var focusedField by remember { mutableStateOf<String?>(null) }
-            // A viewport change can occur after the focus/text event, when the
-            // IME animates in. Re-request for that geometry, not on a timer.
-            LaunchedEffect(maxHeight, focusedField) {
-                when (focusedField) {
-                    "url" -> urlRequester.bringIntoView()
-                    "token" -> tokenRequester.bringIntoView()
+            var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+            var urlEditorSize by remember { mutableStateOf(IntSize.Zero) }
+            var tokenEditorSize by remember { mutableStateOf(IntSize.Zero) }
+            // The measured body can change while the outer Box height does not.
+            // Either editor's remeasurement can also move the focused field.
+            // Request its complete measured rectangle, never its scroll position.
+            LaunchedEffect(focusedField, viewportSize, urlEditorSize, tokenEditorSize) {
+                if (viewportSize.width <= 0 || viewportSize.height <= 0) return@LaunchedEffect
+                val (requester, size) = when (focusedField) {
+                    "url" -> urlRequester to urlEditorSize
+                    "token" -> tokenRequester to tokenEditorSize
+                    else -> return@LaunchedEffect
+                }
+                if (size.width > 0 && size.height > 0) {
+                    requester.bringIntoView(Rect(0f, 0f, size.width.toFloat(), size.height.toFloat()))
                 }
             }
             val actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
@@ -117,7 +129,9 @@ fun ServerSettingsDialog(
                     if (wide) actions()
                 }
                 Column(
-                    modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                    modifier = Modifier.weight(1f, fill = false)
+                        .onSizeChanged { viewportSize = it }
+                        .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                 Text(if (language == AppLanguage.RUSSIAN) "Без сети файлы, анкеты и очередь сохраняются на телефоне. Подключение сервера возобновит доставку; оно не удаляет локальные данные." else "Offline, files, questionnaires and the queue remain on this phone. Connecting resumes delivery; it does not delete local data.")
@@ -126,7 +140,8 @@ fun ServerSettingsDialog(
                     onValueChange = { draft.baseUrl = it },
                     label = { Text(if (language == AppLanguage.RUSSIAN) "Адрес сервера" else "Server URL") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth().bringIntoViewRequester(urlRequester).onFocusChanged {
+                    modifier = Modifier.fillMaxWidth().bringIntoViewRequester(urlRequester)
+                        .onSizeChanged { urlEditorSize = it }.onFocusChanged {
                         if (it.isFocused) focusedField = "url" else if (focusedField == "url") focusedField = null
                     },
                 )
@@ -149,7 +164,8 @@ fun ServerSettingsDialog(
                     singleLine = true,
                     isError = error != null,
                     supportingText = error?.let { { Text(syncFailureSummary(it, language)) } },
-                    modifier = Modifier.fillMaxWidth().bringIntoViewRequester(tokenRequester).onFocusChanged {
+                    modifier = Modifier.fillMaxWidth().bringIntoViewRequester(tokenRequester)
+                        .onSizeChanged { tokenEditorSize = it }.onFocusChanged {
                         if (it.isFocused) focusedField = "token" else if (focusedField == "token") focusedField = null
                     },
                 )

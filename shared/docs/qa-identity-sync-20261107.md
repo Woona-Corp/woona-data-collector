@@ -288,6 +288,56 @@ fields can require scrolling. No earlier image was substituted. A clear new set
 is not a causal explanation or claimed fix for the historical white artifact;
 final-source full CI and renewed physical verification remain outstanding.
 
+Full Android CI [42478361692](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42478361692)
+on `ba6c57f` then passed with XML totals **368 JVM**, zero failures/skips, and
+**248 instrumentation**, zero failures/errors, **8 explicit skips**. A fresh
+owner-authorized physical run on that source passed **5/5 API** (64.225 seconds)
+and **16/17 UI** (81.712 seconds), zero skips. The earlier landscape 1.8 EN/RU
+containment cases passed in that run, but landscape 1.1 RU failed its **early**
+token check: full height 163 pixels versus 161 rendered pixels.
+
+This time space was sufficient: safe height 443, header 117 and gap 10 left a
+316-pixel body. The field occupied root Y282–445 while the clip ended at443;
+the English control ended at443. Native accessibility overreported the complete
+rectangle. These measurements establish a two-pixel placement overrun, not a
+need for more padding changes. They do not establish rounding, ongoing IME
+animation or competing relocation requests as the cause.
+
+The run reached **22/24 standard images plus one primary failure capture**.
+Seven available Notes frames show `End`/caret ON; the missing landscape 1.1 RU
+Notes slot is not inferred. Mask/caret content is visible in all eight available
+token-focused frames, including the post-assertion primary, without raw-token
+suggestions. No white obstruction is present in those 23 frames. Two frames
+also contain incidental incoming-message overlays obscuring title/actions;
+immutable originals are access-restricted and **not publication-safe**. No
+personal notification content is included in this report. The primary picture
+cannot negate the two-pixel containment failure.
+
+All current review data/preferences, protected package metadata and system
+settings were restored and verified at **12:12:00 UTC**. That phone window is
+closed; no retries or extra experiments were performed. Publication remains
+blocked by the incomplete physical gate.
+
+The next relocation candidate replaces the server dialog's outer-Box-height
+key with actual measured scroll-viewport and URL/token editor sizes, requesting
+the explicit complete rectangle for the focused editor. It preserves spacing,
+fonts, insets, keyboard settings and raw values. This addresses a confirmed
+controller dependency omission without claiming the specific transient cause
+proven. The matrix also adds the existing independent four-edge root anchor to
+token checks, plus public scroll-ancestor bounds/value/max diagnostics before
+clipping guards. Existing containment assertions/tolerances are not loosened.
+Fresh managed software checks passed: **17/17 UI**, zero skips, 113.606 seconds
+(XML `2026-11-08T12:34:05`), plus 368 JVM and lint. All **32** recorded mapped
+roots (16 Token, 16 Notes) matched all four native-decor edges; public scroll
+bounds/value/max were recorded before clipping assertions. The fresh 24-image
+review is nevertheless incomplete: three landscape 1.8 RU images are
+white-obscured; Notes End/caret are confirmed in seven, token fields in seven,
+and token carets ON in five, absent in two, obscured in one. Seven fully
+inspectable keyboards show no raw-token suggestions. These artifacts are not
+replaced with earlier clear frames. The preceding `ba6c57f` full-CI set also
+had two white-obscured server images. Graphics causation remains unresolved;
+new full CI and physical verification remain required before publication.
+
 A disposable API 31 emulator also displayed Android's first-use immersive hint.
 The optional `woonaDisposableEmulator=true` matrix fixture independently requires
 `ro.kernel.qemu=1`, snapshots the original nullable secure confirmation value,

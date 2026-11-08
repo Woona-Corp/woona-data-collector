@@ -198,6 +198,66 @@ class QaUiViewportMatrixTest(private val landscape: Boolean, private val font: F
             ?: InstrumentationRegistry.getInstrumentation().targetContext.filesDir
         java.io.File(outputBase, "focused-input-geometry.txt").apply { parentFile?.mkdirs(); appendText(geometry + "\n") }
         val composeEditor = editable.fetchSemanticsNode()
+        // Unmerged ancestry retains scroll containers that merged editor semantics can skip.
+        val unmergedEditor = compose.onNode(isFocused() and hasSetTextAction(), useUnmergedTree = true)
+            .fetchSemanticsNode()
+        // AccessibilityWindowInfo bounds are the visible window frame,
+        // NOT the window-coordinate origin (status bars can be excluded).
+        // Independently measure the focused Dialog decor's window->screen
+        // translation; never derive it from the expected native editor.
+        val (windowToScreen, decorBounds, mappedRoot) = compose.runOnIdle {
+            val focusedViews = if (android.os.Build.VERSION.SDK_INT >= 29) {
+                android.view.inspector.WindowInspector.getGlobalWindowViews().filter { it.hasWindowFocus() }
+            } else throw AssertionError("Independent matrix window geometry requires API 29+")
+            assertEquals("Exactly one decor must own window focus", 1, focusedViews.size)
+            val decor = focusedViews.single()
+            val screen = IntArray(2).also(decor::getLocationOnScreen)
+            val inWindow = IntArray(2).also(decor::getLocationInWindow)
+            val offset = androidx.compose.ui.geometry.Offset((screen[0] - inWindow[0]).toFloat(), (screen[1] - inWindow[1]).toFloat())
+            val nativeDecor = android.graphics.RectF(screen[0].toFloat(), screen[1].toFloat(),
+                (screen[0] + decor.width).toFloat(), (screen[1] + decor.height).toFloat())
+            var rootInfo = composeEditor.layoutInfo
+            while (rootInfo.parentInfo != null) rootInfo = requireNotNull(rootInfo.parentInfo)
+            val rootCoordinates = rootInfo.coordinates
+            assertTrue("Compose root coordinates must remain attached", rootCoordinates.isAttached)
+            val rootOrigin = rootCoordinates.localToWindow(androidx.compose.ui.geometry.Offset.Zero) + offset
+            val rootBounds = android.graphics.RectF(rootOrigin.x, rootOrigin.y,
+                rootOrigin.x + rootCoordinates.size.width, rootOrigin.y + rootCoordinates.size.height)
+            java.io.File(outputBase, "focused-input-geometry.txt").appendText(
+                "focusedDecorCount=${focusedViews.size} decorScreen=${screen.toList()} decorInWindow=${inWindow.toList()} independentWindowToScreen=$offset nativeDecor=$nativeDecor mappedComposeRoot=$rootBounds\n",
+            )
+            // Observe all relevant PUBLIC scroll ancestors before any field-clip guard.
+            // A range remainder is evidence, not proof of rounding, animation or a Core BIV defect.
+            val scrollGeometry = buildString {
+                var ancestor = unmergedEditor.parent
+                var scrollCount = 0
+                while (ancestor != null && scrollCount < 8) {
+                    val current = ancestor
+                    val axisKey = androidx.compose.ui.semantics.SemanticsProperties.VerticalScrollAxisRange
+                    if (current.config.contains(axisKey)) {
+                        val axis = current.config[axisKey]
+                        val value = axis.value()
+                        val maximum = axis.maxValue()
+                        appendLine("scrollAncestor[$scrollCount] viewportBoundsInRoot=${current.boundsInRoot} viewportBoundsInWindow=${current.boundsInWindow} " +
+                            "unclippedSemanticsSize=${current.size} unclippedLayoutSize=${current.layoutInfo.width}x${current.layoutInfo.height} " +
+                            "positionInRoot=${current.positionInRoot} positionInWindow=${current.positionInWindow} " +
+                            "verticalScrollValue=$value max=$maximum reverseScrolling=${axis.reverseScrolling} remaining=${maximum - value}")
+                        scrollCount++
+                    }
+                    ancestor = current.parent
+                }
+                appendLine("scrollAncestorCount=$scrollCount limit=8 ancestorTraversalTruncated=${ancestor != null}; clip cause undetermined")
+            }
+            java.io.File(outputBase, "focused-input-geometry.txt").appendText(scrollGeometry)
+            Triple(offset, nativeDecor, rootBounds)
+        }
+        // Validate all four ROOT edges against the independently measured
+        // native decor. Accessibility editable bounds are NOT guaranteed to
+        // equal rendering clip bounds: Compose 1.7 may overreport their top.
+        assertEquals("Native decor/Compose root left must agree", decorBounds.left, mappedRoot.left, 1f)
+        assertEquals("Native decor/Compose root top must agree", decorBounds.top, mappedRoot.top, 1f)
+        assertEquals("Native decor/Compose root right must agree", decorBounds.right, mappedRoot.right, 1f)
+        assertEquals("Native decor/Compose root bottom must agree", decorBounds.bottom, mappedRoot.bottom, 1f)
         val visible = android.graphics.Rect().also(window::getBoundsInScreen)
         val editorBounds = android.graphics.Rect().also(nativeEditor::getBoundsInScreen)
         assertFalse("Focused native editor must have nonempty bounds", editorBounds.isEmpty)
@@ -240,41 +300,7 @@ class QaUiViewportMatrixTest(private val landscape: Boolean, private val font: F
                 nonTextHeight >= verticalPadding - 1f)
             assertEquals("Native focus must retain the exact caret start", expected.length, nativeEditor.textSelectionStart)
             assertEquals("Native focus must retain the exact caret end", expected.length, nativeEditor.textSelectionEnd)
-            // AccessibilityWindowInfo bounds are the visible window frame,
-            // NOT the window-coordinate origin (status bars can be excluded).
-            // Independently measure the focused Dialog decor's window->screen
-            // translation; never derive it from the expected native editor.
-            val (windowToScreen, decorBounds, mappedRoot) = compose.runOnIdle {
-                val focusedViews = if (android.os.Build.VERSION.SDK_INT >= 29) {
-                    android.view.inspector.WindowInspector.getGlobalWindowViews().filter { it.hasWindowFocus() }
-                } else throw AssertionError("Independent matrix window geometry requires API 29+")
-                assertEquals("Exactly one decor must own window focus", 1, focusedViews.size)
-                val decor = focusedViews.single()
-                val screen = IntArray(2).also(decor::getLocationOnScreen)
-                val inWindow = IntArray(2).also(decor::getLocationInWindow)
-                val offset = androidx.compose.ui.geometry.Offset((screen[0] - inWindow[0]).toFloat(), (screen[1] - inWindow[1]).toFloat())
-                val nativeDecor = android.graphics.RectF(screen[0].toFloat(), screen[1].toFloat(),
-                    (screen[0] + decor.width).toFloat(), (screen[1] + decor.height).toFloat())
-                var rootInfo = composeEditor.layoutInfo
-                while (rootInfo.parentInfo != null) rootInfo = requireNotNull(rootInfo.parentInfo)
-                val rootCoordinates = rootInfo.coordinates
-                assertTrue("Compose root coordinates must remain attached", rootCoordinates.isAttached)
-                val rootOrigin = rootCoordinates.localToWindow(androidx.compose.ui.geometry.Offset.Zero) + offset
-                val rootBounds = android.graphics.RectF(rootOrigin.x, rootOrigin.y,
-                    rootOrigin.x + rootCoordinates.size.width, rootOrigin.y + rootCoordinates.size.height)
-                java.io.File(outputBase, "focused-input-geometry.txt").appendText(
-                    "focusedDecorCount=${focusedViews.size} decorScreen=${screen.toList()} decorInWindow=${inWindow.toList()} independentWindowToScreen=$offset nativeDecor=$nativeDecor mappedComposeRoot=$rootBounds\n",
-                )
-                Triple(offset, nativeDecor, rootBounds)
-            }
             val clipped = composeEditor.boundsInWindow
-            // Validate all four ROOT edges against the independently measured
-            // native decor. Accessibility editable bounds are NOT guaranteed to
-            // equal rendering clip bounds: Compose 1.7 may overreport their top.
-            assertEquals("Native decor/Compose root left must agree", decorBounds.left, mappedRoot.left, 1f)
-            assertEquals("Native decor/Compose root top must agree", decorBounds.top, mappedRoot.top, 1f)
-            assertEquals("Native decor/Compose root right must agree", decorBounds.right, mappedRoot.right, 1f)
-            assertEquals("Native decor/Compose root bottom must agree", decorBounds.bottom, mappedRoot.bottom, 1f)
             val mappedClip = android.graphics.RectF(
                 clipped.left + windowToScreen.x, clipped.top + windowToScreen.y,
                 clipped.right + windowToScreen.x, clipped.bottom + windowToScreen.y,
