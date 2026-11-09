@@ -450,3 +450,30 @@ Keep the PR as a candidate until corrected-source Android/native iOS checks and
 required visual/integration checks pass. Publish Android and iOS independently
 only after their distribution gates. A prepared version number is not a release,
 TestFlight upload, tester invitation or physical-device verification.
+
+
+## Final software gate and authorized release execution — 2026-11-08
+
+The owner authorized merge and independent platform distribution. Full Android
+CI [42490002092](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42490002092)
+**passed** on `b5f17842c931a2c7d714223e11e463bb7179a502`. Downloaded JUnit
+XML confirms **368 JVM cases, zero failures/errors/skips**, and **248 managed
+API 31 cases: 240 passed, eight opt-in skips, zero failures/errors**. The later
+`174346565f7b2c547dfd5be2e253bf56dbb118ed` changes only this evidence document;
+Android/iOS production and test sources are identical.
+
+Latest PR CI
+[42490412345](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42490412345)
+passed Android fast, server and native macOS iOS checks. The native log confirms
+**355 unit +18 UI cases, zero failures**, plus successful export verification.
+`./android/tools/check.sh fast` was rerun locally successfully before release.
+Together with the final physical and independent visual gate above, these close
+the candidate's required corrected-source regression gates. Historical failures
+and the physical BLE/camera/iPhone limitations above remain unchanged.
+
+The candidate diff from `origin/main` has **no `shared/server` or Compose changes**.
+No new API/schema migration is needed; this release does not require a server
+deployment. No production server, SQL, user data, backups or physical phone was
+changed during this release execution. Android signed-asset publication and iOS
+Apple processing/internal availability remain separate distribution gates until
+observed below.
