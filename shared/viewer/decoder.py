@@ -74,6 +74,18 @@ def stream_sample_rate_hz(sensor_type: int) -> int:
     return STREAM_SAMPLE_RATES_HZ.get(sensor_type, 1000)
 
 
+def stream_unit(sensor_type: int) -> str:
+    if sensor_type in (7, 8):
+        return "°C"
+    if sensor_type == 6:
+        return "raw U16"
+    return "raw S16"
+
+
+def _display_value(sensor_type: int, value: float) -> float:
+    return value / 100.0 if sensor_type in (7, 8) else value
+
+
 def stream_label(sensor_type: int, channel: int) -> str:
     if sensor_type == 1:
         return f"Legacy temperature {channel}"
@@ -133,7 +145,11 @@ def _validate_packet(packet: bytes) -> tuple[int, int, dict[tuple[int, int], lis
             key = (sensor_type, channel_index + 1)
             values = streams.setdefault(key, [])
             for _ in range(samples_per_channel):
-                raw = int.from_bytes(packet[sample_offset:sample_offset + 2], "little", signed=True)
+                raw = int.from_bytes(
+                    packet[sample_offset:sample_offset + 2],
+                    "little",
+                    signed=(sensor_type != 6),
+                )
                 values.append(float(raw))
                 sample_offset += 2
         offset = next_offset
@@ -389,7 +405,7 @@ def query_signals(
                 for sample_index, value in enumerate(series):
                     t_ms = entry.start_ms + sample_index * step_ms
                     if start_ms <= t_ms <= end_ms:
-                        collector.add(t_ms, value)
+                        collector.add(t_ms, _display_value(key[0], value))
 
     signals = []
     for sensor_type, channel in sorted(selected):
@@ -400,6 +416,7 @@ def query_signals(
             "channel": channel,
             "label": stream_label(sensor_type, channel),
             "sampleRateHz": stream_sample_rate_hz(sensor_type),
+            "unit": stream_unit(sensor_type),
             "rawCount": collector.count,
             "points": collector.points(),
         })
