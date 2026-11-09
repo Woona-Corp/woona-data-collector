@@ -49,22 +49,36 @@ def available_file(path: Path, expected_size: int) -> bool:
 
 def require_label_user(request: Request) -> None:
     cookie = request.headers.get("cookie", "")
-    if not cookie:
-        raise HTTPException(401, "Sign in to Label Studio first")
-    url = os.environ.get("LABEL_STUDIO_URL", "http://label_studio:8080") + "/api/current-user/whoami"
-    try:
-        check = UrlRequest(url, headers={
-            "Cookie": cookie,
-            "Host": os.environ.get("LABEL_STUDIO_HOST_HEADER", "cool-trams.digital"),
-        })
-        with urlopen(check, timeout=5) as response:
-            user = json.load(response)
-    except HTTPError as error:
-        raise HTTPException(401 if error.code in (401, 403) else 503, "Label Studio authentication failed") from error
-    except (URLError, ValueError, TimeoutError) as error:
-        raise HTTPException(503, "Label Studio authentication unavailable") from error
-    if "projects.view" not in user.get("permissions", []):
-        raise HTTPException(403, "Project access required")
+    status, detail = 401, "Sign in to Label Studio first"
+    if cookie:
+        url = os.environ.get("LABEL_STUDIO_URL", "http://label_studio:8080") + "/api/current-user/whoami"
+        try:
+            check = UrlRequest(url, headers={
+                "Cookie": cookie,
+                "Host": os.environ.get("LABEL_STUDIO_HOST_HEADER", "cool-trams.digital"),
+            })
+            with urlopen(check, timeout=5) as response:
+                user = json.load(response)
+        except HTTPError as error:
+            status = 401 if error.code in (401, 403) else 503
+            detail = "Label Studio authentication failed"
+        except (URLError, ValueError, TimeoutError):
+            status, detail = 503, "Label Studio authentication unavailable"
+        else:
+            if "projects.view" not in user.get("permissions", []):
+                raise HTTPException(403, "Project access required", headers={"Cache-Control": "no-store"})
+            return
+    headers = {"Cache-Control": "no-store"}
+    # Only HTML GET pages navigate to login. JSON, upload and range clients keep
+    # their original status; a permission denial or outage must not loop via login.
+    if (status == 401 and request.method == "GET" and
+            getattr(request.scope.get("route"), "response_class", None) is HTMLResponse and
+            ("text/html" in request.headers.get("accept", "").lower() or
+             request.headers.get("sec-fetch-mode") == "navigate")):
+        destination = request.url.path + ('?' + request.url.query if request.url.query else '')
+        headers["Location"] = "/user/login/?" + urlencode({"next": destination})
+        raise HTTPException(303, "Sign in to Label Studio first", headers=headers)
+    raise HTTPException(status, detail, headers=headers)
 
 
 def records_from_sources() -> tuple[list[dict], dict]:

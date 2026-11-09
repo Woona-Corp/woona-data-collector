@@ -67,7 +67,12 @@ problem. Annotation class/interval counts remain available in the collapsed
 project-wide summary; they are not scoped by catalog filters.
 
 All pages retain the existing Label Studio authentication and `Cache-Control:
-no-store`. This does **not** grant access using the separate pgweb/FileBrowser
+no-store`. Anonymous HTML navigation or an expired session redirects to the
+existing `/user/login/` page, with a local `next` destination retaining the
+requested dashboard page and query. JSON/data and write requests still return
+401, not a login document. Permission denials remain 403 and authentication
+outages remain 503 rather than causing a login loop. This does **not** grant
+access using the separate pgweb/FileBrowser
 HTTP Basic credentials. An unavailable Label Studio summary is shown as unknown,
 not as zero tasks or missing annotations. Annotation-only filters then show an
 unavailable selection, not an empty zero-count result, with a recovery link that
@@ -87,7 +92,8 @@ Targeted local checks from `shared/`:
 server/.venv/bin/python -m unittest -v server.tests.test_dashboard \
   server.tests.test_dashboard_catalog server.tests.test_dashboard_catalog_routes \
   server.tests.test_dashboard_budget server.tests.test_dashboard_workspace \
-  server.tests.test_dashboard_review server.tests.test_dashboard_detail_review
+  server.tests.test_dashboard_review server.tests.test_dashboard_detail_review \
+  server.tests.test_dashboard_login
 ```
 
 A deployment still needs separate verification with real Label Studio sessions,
