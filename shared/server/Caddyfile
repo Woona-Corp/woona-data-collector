@@ -3,6 +3,7 @@ cool-trams.digital {
 
 	redir /files /files/ 308
 	redir /db /db/ 308
+	redir /viewer /viewer/ 308
 
 	handle /files/* {
 		reverse_proxy filebrowser:80 {
@@ -12,6 +13,10 @@ cool-trams.digital {
 
 	handle /db/* {
 		reverse_proxy cloudbeaver:8978
+	}
+
+	handle_path /viewer/* {
+		reverse_proxy viewer:8090
 	}
 
 	handle {
