@@ -342,14 +342,42 @@
         ctx.strokeStyle = css("--accent");
         ctx.fillStyle = css("--accent");
         ctx.lineWidth = 1.2;
+        const signalGaps = signal.gaps || [];
+        let gapIndex = 0;
+        let previous = null;
         ctx.beginPath();
-        points.forEach((point, index) => {
+        for (const point of points) {
+          while (gapIndex < signalGaps.length && signalGaps[gapIndex].toMs < point[0]) {
+            gapIndex++;
+          }
+          const activeGap = signalGaps[gapIndex];
+          const crossesGap = previous && activeGap &&
+            previous[0] < activeGap.toMs &&
+            point[0] >= activeGap.toMs &&
+            previous[0] <= activeGap.fromMs;
+
           const x = xFor(point[0]);
           const y = yFor(point[1]);
-          if (index === 0) ctx.moveTo(x, y);
+          if (previous === null || crossesGap) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
-        });
+          previous = point;
+        }
         ctx.stroke();
+
+        for (const gap of signalGaps) {
+          const x0 = xFor(gap.fromMs);
+          const x1 = xFor(gap.toMs);
+          if (x1 < left || x0 > width - right) continue;
+          ctx.fillStyle = css("--danger");
+          ctx.globalAlpha = 0.08;
+          ctx.fillRect(
+            Math.max(left, x0),
+            y0 + 2,
+            Math.max(1, Math.min(width - right, x1) - Math.max(left, x0)),
+            Math.max(1, laneHeight - 4),
+          );
+          ctx.globalAlpha = 1;
+        }
 
         // Preserve the "individual samples" view when there are few enough
         // rendered points. On wide/full-recording views the min/max envelope
@@ -361,6 +389,7 @@
           pointsPerPixel <= 0.9 ? 1.25 :
           0;
         if (pointRadius > 0) {
+          ctx.fillStyle = css("--accent");
           ctx.beginPath();
           for (const point of points) {
             const x = xFor(point[0]);
@@ -423,7 +452,14 @@
     const rows = [`t = ${formatDuration(state.cursorMs)}`];
     for (const signal of signals) {
       const point = nearestPoint(signal.points, state.cursorMs);
-      if (point) rows.push(`${signal.label}: ${point[1]} ${signal.unit || ""}`.trim());
+      if (point) {
+        const missing = signal.missingSamples
+          ? ` · missing ${signal.missingSamples}`
+          : "";
+        rows.push(
+          `${signal.label}: ${point[1]} ${signal.unit || ""}${missing}`.trim(),
+        );
+      }
     }
     els.cursorReadout.textContent = rows.join("\n");
     els.cursorReadout.classList.remove("hidden");
