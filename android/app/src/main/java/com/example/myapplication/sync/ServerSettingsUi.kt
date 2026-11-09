@@ -1,8 +1,21 @@
 package com.example.myapplication.sync
 
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -27,10 +40,12 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.window.DialogWindowProvider
 import android.view.WindowManager
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.example.myapplication.localization.AppLanguage
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ServerSettingsDialog(
     current: ServerSettings,
@@ -44,7 +59,7 @@ fun ServerSettingsDialog(
 ) {
     var error by remember { mutableStateOf<String?>(null) }
     var confirmingDisconnect by remember { mutableStateOf(false) }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(decorFitsSystemWindows = true)) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(decorFitsSystemWindows = false)) {
         val view = LocalView.current
         DisposableEffect(view) {
             (view.parent as? DialogWindowProvider)?.window?.apply {
@@ -53,22 +68,82 @@ fun ServerSettingsDialog(
             }
             onDispose {}
         }
-        Surface(modifier = Modifier.fillMaxSize()) {
+        // Own insets in Compose, not in DecorView: ADJUST_RESIZE alone leaves
+        // this dialog full-height on Android 16 / target 36. safeDrawing is the
+        // UNION of system bars, cutout and IME, so navigation/IME overlap is
+        // removed once, not added twice. Apply it outside the entire form and
+        // footer; only the weighted scroll body then shrinks for the keyboard.
+        // Keep native window measurement (default usePlatformDefaultWidth),
+        // not Compose 1.7's display-configuration-based fullscreen measurement.
+        Surface(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+            val compact = maxHeight < 360.dp * LocalDensity.current.fontScale
+            val wide = compact && maxWidth > maxHeight * 2
+            val urlRequester = remember { BringIntoViewRequester() }
+            val tokenRequester = remember { BringIntoViewRequester() }
+            var focusedField by remember { mutableStateOf<String?>(null) }
+            var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+            var urlEditorSize by remember { mutableStateOf(IntSize.Zero) }
+            var tokenEditorSize by remember { mutableStateOf(IntSize.Zero) }
+            // The measured body can change while the outer Box height does not.
+            // Either editor's remeasurement can also move the focused field.
+            // Request its complete measured rectangle, never its scroll position.
+            LaunchedEffect(focusedField, viewportSize, urlEditorSize, tokenEditorSize) {
+                if (viewportSize.width <= 0 || viewportSize.height <= 0) return@LaunchedEffect
+                val (requester, size) = when (focusedField) {
+                    "url" -> urlRequester to urlEditorSize
+                    "token" -> tokenRequester to tokenEditorSize
+                    else -> return@LaunchedEffect
+                }
+                if (size.width > 0 && size.height > 0) {
+                    requester.bringIntoView(Rect(0f, 0f, size.width.toFloat(), size.height.toFloat()))
+                }
+            }
+            val actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
+                TextButton(onClick = onDismiss, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                    Text(if (language == AppLanguage.RUSSIAN) "Отмена" else "Cancel")
+                }
+                Button(
+                    enabled = canSave,
+                    onClick = {
+                        error = runCatching {
+                            require(draft.token.isNotBlank()) {
+                                if (language == AppLanguage.RUSSIAN) "Введите токен" else "Enter token"
+                            }
+                            onSave(draft.baseUrl, draft.token)
+                        }.exceptionOrNull()?.let { it.message ?: it.toString() }
+                    },
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                ) { Text(if (language == AppLanguage.RUSSIAN) "Сохранить" else "Save") }
+            }
+            // In wide compact windows, reserve scarce height for the complete
+            // editor instead of decorative outer padding; safe insets stay intact.
             Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = if (compact) 12.dp else 20.dp, vertical = if (wide) 0.dp else if (compact) 4.dp else 20.dp),
+                verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 12.dp),
             ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (language == AppLanguage.RUSSIAN) "Подключение сервера" else "Server connection",
+                        style = if (compact) androidx.compose.material3.MaterialTheme.typography.titleSmall else androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.weight(1f))
+                    if (wide) actions()
+                }
                 Column(
-                    modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                    modifier = Modifier.weight(1f, fill = false)
+                        .onSizeChanged { viewportSize = it }
+                        .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                Text(if (language == AppLanguage.RUSSIAN) "Подключение сервера" else "Server connection")
+                Text(if (language == AppLanguage.RUSSIAN) "Без сети файлы, анкеты и очередь сохраняются на телефоне. Подключение сервера возобновит доставку; оно не удаляет локальные данные." else "Offline, files, questionnaires and the queue remain on this phone. Connecting resumes delivery; it does not delete local data.")
                 OutlinedTextField(
                     value = draft.baseUrl,
                     onValueChange = { draft.baseUrl = it },
-                    label = { Text("Server URL") },
+                    label = { Text(if (language == AppLanguage.RUSSIAN) "Адрес сервера" else "Server URL") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().bringIntoViewRequester(urlRequester)
+                        .onSizeChanged { urlEditorSize = it }.onFocusChanged {
+                        if (it.isFocused) focusedField = "url" else if (focusedField == "url") focusedField = null
+                    },
                 )
                 OutlinedTextField(
                     value = draft.token,
@@ -83,11 +158,18 @@ fun ServerSettingsDialog(
                         )
                     },
                     visualTransformation = PasswordVisualTransformation(),
+                    // Masking alone does not make the IME a password editor:
+                    // a text keyboard can suggest/learn the raw credential.
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
                     singleLine = true,
                     isError = error != null,
-                    supportingText = error?.let { { Text(it) } },
-                    modifier = Modifier.fillMaxWidth(),
+                    supportingText = error?.let { { Text(syncFailureSummary(it, language)) } },
+                    modifier = Modifier.fillMaxWidth().bringIntoViewRequester(tokenRequester)
+                        .onSizeChanged { tokenEditorSize = it }.onFocusChanged {
+                        if (it.isFocused) focusedField = "token" else if (focusedField == "token") focusedField = null
+                    },
                 )
+                error?.let { SyncDetails(if (language == AppLanguage.RUSSIAN) "Подробности" else "Details", it) }
                 if (!canSave) Text(if (language == AppLanguage.RUSSIAN) "Изменение подключения доступно после завершения текущей операции. Отключить сервер можно, не удаляя локальные данные." else "Connection changes are available after the current operation. You can disconnect without deleting local data.")
                 if (current.isConfigured && onDisconnect != null) TextButton(onClick = { confirmingDisconnect = true }, enabled = canDisconnect) {
                     Text(if (language == AppLanguage.RUSSIAN) "Отключить сервер и удалить токен" else "Disconnect server and remove token")
@@ -95,25 +177,9 @@ fun ServerSettingsDialog(
                 }
                 // Actions stay outside the focused field's scroll/bring-into-view
                 // region, so IME focus cannot immediately scroll them away again.
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onDismiss, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
-                        Text(if (language == AppLanguage.RUSSIAN) "Отмена" else "Cancel")
-                    }
-                    Button(
-                        enabled = canSave,
-                        onClick = {
-                            error = runCatching {
-                                require(draft.token.isNotBlank()) {
-                                    if (language == AppLanguage.RUSSIAN) "Введите токен" else "Enter token"
-                                }
-                                onSave(draft.baseUrl, draft.token)
-                            }.exceptionOrNull()?.let { it.message ?: it.toString() }
-                        },
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    ) {
-                        Text(if (language == AppLanguage.RUSSIAN) "Сохранить" else "Save")
-                    }
-                }
+                if (!wide) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), content = actions)
+            }
+
             }
         }
     }

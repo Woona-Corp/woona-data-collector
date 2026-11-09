@@ -5,12 +5,17 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.isRoot
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.printToString
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import com.example.myapplication.BuildConfig
@@ -194,26 +199,67 @@ class ServerApiClientIntegrationTest {
             assertTrue(database.serverSyncCounts().lastErrorMessage.orEmpty().contains("invalid_bearer_token"))
             ActivityScenario.launch(MainActivity::class.java).use {
                 val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
-                fun find(node: android.view.accessibility.AccessibilityNodeInfo?, label: String): android.view.accessibility.AccessibilityNodeInfo? {
-                    if (node == null) return null
-                    if (node.isVisibleToUser && node.text?.contains(label) == true) return node
-                    return (0 until node.childCount).firstNotNullOfOrNull { find(node.getChild(it), label) }
-                }
-                fun visible(label: String) = find(automation.rootInActiveWindow, label)
                 fun screenshot(name: String) = File(context.cacheDir, name).outputStream().use { output -> automation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output) }
+                fun safeNavigationDetails(value: String) = redactSyncDetails(
+                    redactSyncDetails(redactSyncDetails(value, token), "invalid-test-token"), original.token,
+                )
+                fun suppressDiagnosticFailure(primary: Throwable, diagnostic: Throwable) {
+                    // Exception messages can themselves contain a semantics dump; retain only a redacted copy.
+                    primary.addSuppressed(IllegalStateException(safeNavigationDetails(diagnostic.toString()).take(2048)).also {
+                        it.stackTrace = diagnostic.stackTrace
+                    })
+                }
                 // Drive Compose's test clock while asynchronous recovery changes the gate.
-                // UiAutomation polling alone can leave its first recovery frame frozen.
-                composeRule.waitUntil(10_000) { visible("Settings") != null || visible("Настройки") != null }
-                screenshot("actual-worker-before-settings.png")
-                var settingsNode = requireNotNull(visible("Settings") ?: visible("Настройки"))
-                while (!settingsNode.isClickable && settingsNode.parent != null) settingsNode = settingsNode.parent
-                assertTrue(settingsNode.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
                 composeRule.waitUntil(10_000) {
-                    composeRule.onAllNodes(hasText("BLE transport profile") or hasText("Профиль BLE-транспорта"))
-                        .fetchSemanticsNodes().isNotEmpty()
+                    composeRule.onAllNodes(hasTestTag("tab.settings")).fetchSemanticsNodes().isNotEmpty()
+                }
+                screenshot("actual-worker-before-settings.png")
+                val settingsTab = composeRule.onNodeWithTag("tab.settings").assertIsDisplayed().assertIsEnabled()
+                // Prior failure cause is UNDETERMINED: an accepted accessibility action did
+                // not acknowledge destination selection. Neither language nor a lost click was proven.
+                try {
+                    settingsTab.performClick() // Exactly one click; no navigation retries.
+                    settingsTab.assertIsSelected()
+                    composeRule.waitUntil(10_000) {
+                        composeRule.onAllNodes(hasText("BLE transport profile") or hasText("Профиль BLE-транспорта"))
+                            .fetchSemanticsNodes().isNotEmpty()
+                    }
+                } catch (primary: Throwable) {
+                    // Independent best-effort POST-action captures must not replace the failure.
+                    // No token editor is opened on this path; server-card details remain collapsed.
+                    runCatching {
+                        val image = checkNotNull(automation.takeScreenshot()) { "Missing post-navigation screenshot" }
+                        try {
+                            File(context.cacheDir, "actual-worker-after-settings-failure.png").outputStream().use { output ->
+                                check(image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output)) {
+                                    "Post-navigation PNG encoding failed"
+                                }
+                            }
+                        } finally { image.recycle() }
+                    }.onFailure { suppressDiagnosticFailure(primary, it) }
+                    runCatching {
+                        val roots = composeRule.onAllNodes(isRoot(), useUnmergedTree = true)
+                        val rootCount = roots.fetchSemanticsNodes().size
+                        val tree = buildString {
+                            appendLine("POST-action navigation failure; cause undetermined; roots=$rootCount (limit 8)")
+                            repeat(minOf(rootCount, 8)) { index ->
+                                appendLine("ROOT $index (depth limit 12, text limit 8192)")
+                                val raw = roots[index].printToString(maxDepth = 12)
+                                appendLine(safeNavigationDetails(raw).take(8192))
+                            }
+                        }
+                        File(context.cacheDir, "actual-worker-after-settings-failure-tree.txt").writeText(tree)
+                    }.onFailure { suppressDiagnosticFailure(primary, it) }
+                    throw primary
                 }
                 composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("server.sync.settings"))
-                val errorNode = composeRule.onNode(hasText("invalid_bearer_token", substring = true) and hasAnyAncestor(hasTestTag("server.sync.settings")))
+                val inServerSettings = hasAnyAncestor(hasTestTag("server.sync.settings"))
+                composeRule.onNode(hasText("invalid_bearer_token", substring = true) and inServerSettings).assertDoesNotExist()
+                composeRule.onNode((hasText("token", substring = true, ignoreCase = true) or hasText("токен", substring = true, ignoreCase = true)) and inServerSettings)
+                    .performScrollTo().assertIsDisplayed()
+                composeRule.onNode((hasText("+ Details") or hasText("+ Подробности")) and inServerSettings)
+                    .performScrollTo().performClick()
+                val errorNode = composeRule.onNode(hasText("invalid_bearer_token", substring = true) and inServerSettings)
                     .performScrollTo().assertIsDisplayed().fetchSemanticsNode()
                 composeRule.onNode(hasText("Retry uploads") or hasText("Повторить выгрузку"))
                     .performScrollTo().assertIsDisplayed().assertIsEnabled()

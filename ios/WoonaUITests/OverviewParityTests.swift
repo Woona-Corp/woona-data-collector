@@ -8,13 +8,13 @@ final class OverviewParityTests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing"]
-        if name.contains("testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions") {
+        if name.contains("testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions") || name.contains("testIdentityAndRecordingGroupsReflowWithLargeTextInLandscape") {
             app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
         }
         if name.contains("testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls") {
             app.launchArguments.append("--ui-testing-v2-charts")
         }
-        if name.contains("testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire") || name.contains("testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory") {
+        if name.contains("testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire") || name.contains("testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory") || name.contains("testIdentityAndRecordingGroupsReflowWithLargeTextInLandscape") {
             app.launchArguments.append("--ui-testing-preexisting-heart")
         }
         if name.contains("testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory") {
@@ -40,6 +40,37 @@ final class OverviewParityTests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [newDogReady], timeout: 15), .completed,
                        "New dog must become enabled and hittable after launch")
+    }
+
+    func testIdentityAndRecordingGroupsReflowWithLargeTextInLandscape() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        for _ in 0..<12 where !app.staticTexts["Data account"].isHittable { app.swipeDown() }
+        XCTAssertTrue(app.staticTexts["Data account"].isHittable)
+        XCTAssertTrue(app.buttons["account.apply"].exists)
+        let dog = app.buttons["UI Dog 2"]
+        for _ in 0..<12 where !dog.isHittable { app.swipeUp() }
+        XCTAssertTrue(dog.isHittable)
+        dog.tap()
+        let identity = app.staticTexts["identity.status"]
+        for _ in 0..<12 where !identity.isHittable { app.swipeUp() }
+        XCTAssertTrue(identity.exists)
+        XCTAssertTrue(identity.isHittable, "Identity status remains reachable at accessibility size")
+        XCTAssertNotEqual(identity.label, "Server confirmed", "Synthetic local fixtures have no exact-version server receipt")
+        attachScreen("Identity-LargeText-EnglishLight")
+        app.buttons["tab.recordings"].tap()
+        XCUIDevice.shared.orientation = .landscapeRight
+        let capture = app.staticTexts["Local capture"].firstMatch
+        XCTAssertTrue(revealOverviewElement(capture), "Local capture must be fully visible above the custom tabs")
+        XCTAssertTrue(capture.isHittable)
+        attachScreen("Recording-Capture-LargeText-Landscape-EnglishLight", fullDevice: true)
+        let delivery = app.staticTexts["Server delivery"].firstMatch
+        XCTAssertTrue(revealOverviewElement(delivery), "Server delivery must be fully visible above the custom tabs")
+        XCTAssertTrue(delivery.isHittable)
+        attachScreen("Recording-Delivery-LargeText-Landscape-EnglishLight", fullDevice: true)
+        let share = app.buttons["Share session ZIP"].firstMatch
+        XCTAssertTrue(revealOverviewElement(share), "Share must be fully visible above the custom tabs")
+        XCTAssertTrue(share.isHittable, "Existing actions remain reachable after the grouped summaries at accessibility size")
+        attachScreen("Recording-Groups-LargeText-Landscape-EnglishLight", fullDevice: true)
     }
 
     func testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions() {
@@ -256,16 +287,21 @@ final class OverviewParityTests: XCTestCase {
         }
         XCTAssertTrue(cause.exists)
         XCTAssertTrue(app.staticTexts["Upload: upload was confirmed; check the current server copy below"].exists)
-        let details = app.buttons["Error details"]
-        if !details.isHittable { app.swipeUp() }
+        let details = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "recording.error.")).firstMatch
+        let rawCause = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "GATT status 8")).firstMatch
+        XCTAssertFalse(rawCause.exists, "Raw capture diagnostics stay collapsed by default")
+        for _ in 0..<4 where !details.isHittable { app.swipeUp() }
+        XCTAssertTrue(details.isHittable)
         details.tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "GATT status 8")).firstMatch.exists)
+        XCTAssertTrue(rawCause.waitForExistence(timeout: 5), "Expanding recording details exposes the saved raw capture failure")
         let remove = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "recording.removeLocal.")).firstMatch
-        for _ in 0..<4 {
-            if remove.isHittable { break }
-            app.swipeUp()
-        }
+        XCTAssertTrue(revealOverviewElement(remove, maxSwipes: 4),
+                      "Remove must be fully visible above the custom navigation tabs before tapping")
         XCTAssertTrue(remove.isEnabled)
+        XCTAssertTrue(remove.isHittable)
+        XCTAssertLessThanOrEqual(remove.frame.maxY, app.buttons["tab.recordings"].frame.minY,
+                                 "Remove must be visibly above the custom navigation tabs before tapping")
+        attachScreen("Remove-local-action-visible-EnglishLight")
         remove.tap()
         let confirmation = app.alerts["Remove session files from this device?"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
@@ -468,6 +504,46 @@ final class OverviewParityTests: XCTestCase {
         XCTAssertTrue(app.buttons["chart.fullscreen.open"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.segmentedControls.buttons["Channel 2"].isSelected)
     }
+    // App-wide swipes start over the custom tabs in landscape, so they do not
+    // scroll history. Also, XCTest can call offscreen SwiftUI leaves hittable.
+    // Use the real unobscured viewport for both the gesture and visibility check.
+    private func revealOverviewElement(_ element: XCUIElement, maxSwipes: Int = 16) -> Bool {
+        for attempt in 0...maxSwipes {
+            let scroll = app.scrollViews.firstMatch
+            let navigation = app.navigationBars.firstMatch
+            let tabs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "tab."))
+            guard scroll.exists, navigation.exists, tabs.count == 5,
+                  let tabsTop = tabs.allElementsBoundByIndex.map({ $0.frame.minY }).min() else { return false }
+            let viewport = scroll.frame.intersection(app.frame).intersection(CGRect(
+                x: app.frame.minX, y: navigation.frame.maxY,
+                width: app.frame.width, height: max(0, tabsTop - navigation.frame.maxY)
+            ))
+            guard !viewport.isEmpty else { return false }
+            if element.exists && element.isHittable && viewport.contains(element.frame) { return true }
+            guard attempt < maxSwipes else { break }
+            // Center the target with a bounded drag, not a flick. CI's default
+            // 500pt/s release moved ~336pt in this 218pt landscape viewport,
+            // repeatedly throwing the same heading above then below the screen.
+            let maximumDrag = viewport.height * 0.6
+            let offset = element.exists ? element.frame.midY - viewport.midY : maximumDrag
+            let distance = min(abs(offset), maximumDrag)
+            let startY = viewport.minY + viewport.height * (offset < 0 ? 0.2 : 0.8)
+            let endY = startY + (offset < 0 ? distance : -distance)
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: viewport.midX, dy: startY))
+            let end = origin.withOffset(CGVector(dx: viewport.midX, dy: endY))
+            // Holding the finger at the destination stops inertial scrolling;
+            // this is part of the gesture, not a delay/retry after releasing it.
+            start.press(forDuration: 0, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+        }
+        attachScreen("Overview-unreachable-element", fullDevice: true)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "Overview-unreachable-element-native-bounds"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        return false
+    }
+
     private func attachScreen(_ name: String, fullDevice: Bool = false) {
         let screenshot = XCTAttachment(screenshot: fullDevice ? XCUIScreen.main.screenshot() : app.screenshot())
         screenshot.name = name

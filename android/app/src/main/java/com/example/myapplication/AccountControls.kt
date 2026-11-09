@@ -14,11 +14,14 @@ fun AccountControls(accountId: String?, language: AppLanguage, enabled: Boolean,
     fun label(en: String, ru: String) = if (language == AppLanguage.RUSSIAN) ru else en
     var identifier by rememberSaveable(accountId) { mutableStateOf(accountId.orEmpty()) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(value = identifier, onValueChange = { identifier = it }, label = { Text(label("Account", "Аккаунт")) },
-            supportingText = { Text(label("Unique identifier without a password. Leave empty to show unassigned data.", "Уникальный идентификатор без пароля. Пустое поле — данные без аккаунта.")) },
+        OutlinedTextField(value = identifier, onValueChange = { identifier = it }, label = { Text(label("Data account", "Аккаунт данных")) },
+            supportingText = { Text(label("Data scope, not sign-in. Empty means unassigned.", "Выбор данных, не вход в систему. Пусто — без аккаунта.")) },
             singleLine = true, enabled = enabled, modifier = Modifier.fillMaxWidth())
         Button(onClick = { onApply(identifier) }, enabled = enabled) { Text(label("Apply account", "Применить аккаунт")) }
-        localHistorySummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        Text(label("Active scope: ${accountId ?: "unassigned"}", "Активные данные: ${accountId ?: "без аккаунта"}"), style = MaterialTheme.typography.bodySmall)
+        localHistorySummary?.let { summary ->
+            com.example.myapplication.sync.SyncDetails(label("Data scope details", "Подробности выбора данных"), summary)
+        }
         if (accountId != null && unassigned.isNotEmpty()) {
             Text(label("Unassigned dogs. Linking moves all this dog’s sessions into this account.", "Собаки без аккаунта. Связывание перенесёт все сессии собаки в этот аккаунт."))
             unassigned.forEach { dog ->

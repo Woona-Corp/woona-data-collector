@@ -508,8 +508,17 @@ class ServerApiClient(
         }
         // The server echoes the request id it logged; keep it bounded because a
         // proxy or an unrelated server can return arbitrary header bytes.
-        val requestId = connection.getHeaderField("X-Request-ID")?.trim()?.take(64)?.takeIf { it.isNotEmpty() }
-        return ServerHttpException(status, body, connection.headerFields, requestId)
+        val requestId = connection.getHeaderField("X-Request-ID")?.let { redactSyncDetails(it, settings.token) }
+            ?.trim()?.take(64)?.takeIf { it.isNotEmpty() }
+        // Never put raw server reflections (including the configured token) on an exception
+        // that workers persist. Preserve JSON/code and Retry-After classification.
+        val safeBody = redactSyncDetails(body, settings.token)
+        val safeHeaders = connection.headerFields.orEmpty().mapValues { (key, values) ->
+            if (key?.equals("Authorization", ignoreCase = true) == true || key?.equals("Set-Cookie", ignoreCase = true) == true) {
+                listOf("[redacted]")
+            } else values.map { redactSyncDetails(it, settings.token) }
+        }
+        return ServerHttpException(status, safeBody, safeHeaders, requestId)
     }
 
     private fun profilePayload(record: ProfileSyncRecord): JSONObject = JSONObject().apply {

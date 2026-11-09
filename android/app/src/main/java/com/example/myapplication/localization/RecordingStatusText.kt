@@ -29,7 +29,7 @@ private val serverReasons = mapOf(
     "account_header_mismatch" to ("Аккаунт запроса не совпадает с аккаунтом животного" to "The request account does not match the animal account"),
     "dog_account_conflict" to ("Аккаунт запроса не совпадает с аккаунтом животного" to "The request account does not match the animal account"),
     "account_required" to ("Не выбран аккаунт" to "No account is selected"),
-    "animal_id_already_exists" to ("Этот ID животного уже занят другой карточкой. Восстановите анкеты и выберите существующее животное" to "This animal ID belongs to another profile. Restore profiles and select the existing animal"),
+    "animal_id_already_exists" to (com.example.myapplication.sync.animalIdentityConflictText(AppLanguage.RUSSIAN) to com.example.myapplication.sync.animalIdentityConflictText(AppLanguage.ENGLISH)),
     "invalid_account_identifier" to ("Недопустимый идентификатор аккаунта" to "The account identifier is invalid"),
     "invalid_bearer_token" to ("Токен устройства отсутствует или отклонён сервером. Переподключите сервер в настройках" to "The device token is missing or rejected. Reconnect the server in Settings"),
     "missing_bearer_token" to ("Токен устройства отсутствует или отклонён сервером. Переподключите сервер в настройках" to "The device token is missing or rejected. Reconnect the server in Settings"),
@@ -142,7 +142,7 @@ internal fun recordingUploadErrorText(message: String?, language: AppLanguage): 
         listOf("ssl", "tls", "certificate").any { it in normalized } -> errorText(language, "Не удалось проверить защищённое соединение с сервером", "The secure connection to the server could not be verified")
         listOf("unknownhost", "unable to resolve host", "failed to connect", "not connected", "offline", "could not connect", "network", "connection refused").any { it in normalized } -> errorText(language, "Сервер недоступен или нет подключения к сети", "The server is unreachable or the network is unavailable")
         listOf("missing", "changed", "sha-256", "checksum", "unreadable").any { it in normalized } -> errorText(language, "Локальный файл отсутствует, изменён или не прошёл проверку целостности", "A local file is missing, changed or failed integrity verification")
-        else -> errorText(language, "Результат операции не подтверждён. Причина не распознана: проверьте статус операции, сохраните полный архив и передайте подробности разработчику. Технические сведения: ", "The operation outcome is not confirmed. The cause is unrecognized: check the operation status, save a complete archive and send details to support. Technical details: ") + raw
+        else -> errorText(language, "Результат операции не подтверждён. Причина не распознана: проверьте статус операции, сохраните полный архив и передайте подробности разработчику. Подробности доступны ниже.", "The operation outcome is not confirmed. The cause is unrecognized: check the operation status, save a complete archive and send details to support. Details are available below.")
     }
 }
 
@@ -158,8 +158,8 @@ internal fun recordingCaptureText(status: String, code: String?, message: String
         "storage_error", "storage_failed" -> errorText(language, "не удалось сохранить файлы записи", "recording files could not be saved")
         "process_interrupted" -> errorText(language, "приложение завершилось до сохранения сессии; время окончания не подтверждено", "the app closed before session finalization; the end time is not verified")
         "no_sensor_data" -> errorText(language, "не получено ни одного корректного пакета датчика", "no valid sensor packets were received")
-        null -> message?.takeIf { it.isNotBlank() }
-        else -> listOfNotNull(code, message?.takeIf { it.isNotBlank() }).joinToString(": ")
+        null -> message?.takeIf { it.isNotBlank() }?.let { errorText(language, "причина не распознана; откройте подробности", "unrecognized cause; open Details") }
+        else -> errorText(language, "причина не распознана; откройте подробности", "unrecognized cause; open Details")
     }
     val value = if (reason != null) {
         val prefix = if (status == "completed") errorText(language, "завершена с проблемой", "completed with an issue") else errorText(language, "прервана", "interrupted")

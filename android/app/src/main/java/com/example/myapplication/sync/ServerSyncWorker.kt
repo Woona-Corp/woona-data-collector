@@ -68,20 +68,25 @@ class ProfileSyncWorker(
             if (!settings.isConfigured) {
                 database.markProfileSyncError(
                     profileVersionId,
-                    retryable = false,
+                    retryable = true,
                     code = "server_not_configured",
-                    message = "Server URL or token is missing",
+                    message = "Server URL or token is missing; local work is queued until server configuration is restored",
                 )
-                return Result.failure()
+                SyncActivityLog.record(applicationContext, "profile", profileVersionId,
+                    SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.WAITING_SERVER, "server_disabled")
+                // Resume on configuration change, without an unconfigured retry loop.
+                return Result.success()
             }
             val profile = database.profileSyncRecord(profileVersionId) ?: return Result.success()
+            database.markProfileUploading(profileVersionId)
+            SyncActivityLog.record(applicationContext, "profile", profileVersionId,
+                SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.STARTED)
             val transferContext = currentCoroutineContext()
             val client = ServerApiClient(settings.copy(accountId = database.profile(profile.dogId)?.accountId), checkCancelled = { transferContext.ensureActive() })
             val markers = client.fetchDeletions()
             if (!settings.sameRetirementServer(ServerSettingsStore(applicationContext).get())) return Result.retry()
             database.applyServerDeletions(markers)
             if (database.profileSyncRecord(profileVersionId) == null) return Result.success()
-            database.markProfileUploading(profileVersionId)
             val receipt = client.uploadProfile(profile)
             receipt.profileVersion?.let { database.acceptServerProfile(profile.dogId, it) }
             database.markProfileSynced(
@@ -89,12 +94,18 @@ class ProfileSyncWorker(
                 profile.dogId,
                 receipt.dogRevision,
             )
+            SyncActivityLog.record(applicationContext, "profile", profileVersionId,
+                SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.SUCCEEDED)
             Result.success()
         } catch (cancelled: CancellationException) {
+            SyncActivityLog.record(applicationContext, "profile", profileVersionId,
+                SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.QUEUED, "cancelled")
             database.markProfileSyncError(profileVersionId, true, "transfer_paused", "transfer_paused: Transfer paused; local data and confirmed progress are preserved for retry")
             throw cancelled
         } catch (exception: Exception) {
             if (!currentCoroutineContext().isActive) {
+                SyncActivityLog.record(applicationContext, "profile", profileVersionId,
+                    SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.QUEUED, "cancelled")
                 database.markProfileSyncError(profileVersionId,true,"transfer_paused","transfer_paused: Transfer paused; local data and confirmed progress are preserved")
                 throw CancellationException("Transfer cancelled").apply { initCause(exception) }
             }
@@ -105,6 +116,8 @@ class ProfileSyncWorker(
                 exception.errorCode(),
                 exception.message ?: exception.toString(),
             )
+            SyncActivityLog.record(applicationContext, "profile", profileVersionId,
+                SyncActivityAction.PROFILE_VALIDATION, exception.syncActivityOutcome(), exception.syncActivityCode())
             if (retryable) Result.retry() else Result.failure()
         } finally {
             serverOperationLock.unlock()
@@ -144,16 +157,20 @@ class RecordingSyncWorker(
             return Result.success()
         }
         serverOperationLock.lock()
+        var validatingProfileVersionId: String? = null
         return try {
             val settings = ServerSettingsStore(applicationContext).get()
             if (!settings.isConfigured) {
                 database.markRecordingSyncError(
                     recordingId,
-                    retryable = false,
+                    retryable = true,
                     code = "server_not_configured",
-                    message = "Server URL or token is missing",
+                    message = "Server URL or token is missing; local work is queued until server configuration is restored",
                 )
-                return Result.failure()
+                SyncActivityLog.record(applicationContext, "recording", recordingId,
+                    SyncActivityAction.UPLOAD, SyncActivityOutcome.WAITING_SERVER, "server_disabled")
+                // Resume on configuration change, without an unconfigured retry loop.
+                return Result.success()
             }
             var record = database.recordingSyncRecord(recordingId) ?: run {
                 // A missing row used to end this work as success, which hid the
@@ -167,8 +184,13 @@ class RecordingSyncWorker(
                     code = "sync_metadata_missing",
                     message = "Local synchronization metadata for this recording is missing. Its files are preserved; reopen the session so the metadata is rewritten, then retry the upload.",
                 )
+                SyncActivityLog.record(applicationContext, "recording", recordingId,
+                    SyncActivityAction.UPLOAD, SyncActivityOutcome.FAILED, "local_io")
                 return Result.failure()
             }
+            database.markRecordingUploading(recordingId)
+            SyncActivityLog.record(applicationContext, "recording", recordingId,
+                SyncActivityAction.UPLOAD, SyncActivityOutcome.STARTED)
             val transferContext = currentCoroutineContext()
             val client = ServerApiClient(settings.copy(accountId = database.profile(record.dogId)?.accountId), checkCancelled = { transferContext.ensureActive() })
             val markers = client.fetchDeletions()
@@ -184,16 +206,26 @@ class RecordingSyncWorker(
                     // for the current shell language.
                     database.markRecordingSyncError(recordingId, false, "metadata_conflict",
                         "Local files or metadata differ from the server version. Local files are preserved.")
+                    SyncActivityLog.record(applicationContext, "recording", recordingId,
+                        SyncActivityAction.UPLOAD, SyncActivityOutcome.FAILED, "integrity_error")
                     return Result.failure()
                 }
                 database.markRecordingSynced(recordingId,accepted.receiptSha256,requireNotNull(accepted.verifiedAtUtc))
-                if (record.artifacts.none { it.type in setOf("ecg","heart_rate","rr") && it.uploadState != "available" }) return Result.success()
+                if (record.artifacts.none { it.type in setOf("ecg","heart_rate","rr") && it.uploadState != "available" }) {
+                    SyncActivityLog.record(applicationContext, "recording", recordingId,
+                        SyncActivityAction.CHECK_DELIVERY, SyncActivityOutcome.SUCCEEDED)
+                    return Result.success()
+                }
                 record = database.recordingSyncRecord(recordingId) ?: return Result.success()
             }
             require(dogQuestionnaireFromJson(record.profile.questionnaireJson).validate().isValid &&
                 sessionQuestionnaireFromJson(record.sessionQuestionnaireJson).validate().isValid) {
                 "Questionnaire failed local validation"
             }
+            validatingProfileVersionId = record.profileVersionId
+            database.markProfileUploading(record.profileVersionId)
+            SyncActivityLog.record(applicationContext, "profile", record.profileVersionId,
+                SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.STARTED)
             val profileReceipt = client.uploadProfile(record.profile)
             profileReceipt.profileVersion?.let { database.acceptServerProfile(record.dogId, it) }
             database.markProfileSynced(
@@ -201,8 +233,10 @@ class RecordingSyncWorker(
                 record.dogId,
                 profileReceipt.dogRevision,
             )
+            SyncActivityLog.record(applicationContext, "profile", record.profileVersionId,
+                SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.SUCCEEDED)
+            validatingProfileVersionId = null
             record = database.recordingSyncRecord(recordingId) ?: return Result.failure()
-            database.markRecordingUploading(recordingId)
             val artifactsById = record.artifacts.associateBy { it.id }
             val receipt = client.uploadRecording(
                 record = record,
@@ -220,22 +254,51 @@ class RecordingSyncWorker(
                 receipt.receiptSha256,
                 receipt.verifiedAtUtc,
             )
-            if (database.recording(recordingId)?.serverSyncState == "pending") Result.retry() else Result.success()
+            if (database.recording(recordingId)?.serverSyncState == "pending") {
+                SyncActivityLog.record(applicationContext, "recording", recordingId,
+                    SyncActivityAction.UPLOAD, SyncActivityOutcome.QUEUED)
+                Result.retry()
+            } else {
+                SyncActivityLog.record(applicationContext, "recording", recordingId,
+                    SyncActivityAction.UPLOAD, SyncActivityOutcome.SUCCEEDED)
+                Result.success()
+            }
         } catch (cancelled: CancellationException) {
+            validatingProfileVersionId?.let { id ->
+                database.markProfileSyncError(id, true, "transfer_paused", "Transfer paused; local data is preserved")
+                SyncActivityLog.record(applicationContext, "profile", id,
+                    SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.QUEUED, "cancelled")
+            }
+            SyncActivityLog.record(applicationContext, "recording", recordingId,
+                SyncActivityAction.UPLOAD, SyncActivityOutcome.QUEUED, "cancelled")
             database.markRecordingSyncError(recordingId, true, "transfer_paused", "transfer_paused: Transfer paused; local data and confirmed progress are preserved for retry")
             throw cancelled
         } catch (exception: Exception) {
             if (!currentCoroutineContext().isActive) {
+                validatingProfileVersionId?.let { id ->
+                    database.markProfileSyncError(id, true, "transfer_paused", "Transfer paused; local data is preserved")
+                    SyncActivityLog.record(applicationContext, "profile", id,
+                        SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.QUEUED, "cancelled")
+                }
+                SyncActivityLog.record(applicationContext, "recording", recordingId,
+                    SyncActivityAction.UPLOAD, SyncActivityOutcome.QUEUED, "cancelled")
                 database.markRecordingSyncError(recordingId,true,"transfer_paused","transfer_paused: Transfer paused; local data and confirmed progress are preserved")
                 throw CancellationException("Transfer cancelled").apply { initCause(exception) }
             }
             val retryable = exception.isRetryable()
+            validatingProfileVersionId?.let { id ->
+                database.markProfileSyncError(id, retryable, exception.errorCode(), exception.message ?: exception.toString())
+                SyncActivityLog.record(applicationContext, "profile", id,
+                    SyncActivityAction.PROFILE_VALIDATION, exception.syncActivityOutcome(), exception.syncActivityCode())
+            }
             database.markRecordingSyncError(
                 recordingId,
                 retryable,
                 exception.errorCode(),
                 exception.message ?: exception.toString(),
             )
+            SyncActivityLog.record(applicationContext, "recording", recordingId,
+                SyncActivityAction.UPLOAD, exception.syncActivityOutcome(), exception.syncActivityCode())
             if (retryable) Result.retry() else Result.failure()
         } finally {
             serverOperationLock.unlock()
@@ -371,6 +434,11 @@ object ServerSyncScheduler {
     }
 
     fun enqueueProfile(context: Context, profileVersionId: String) {
+        if (!ServerSettingsStore(context).get().isConfigured) {
+            SyncActivityLog.record(context, "profile", profileVersionId,
+                SyncActivityAction.PROFILE_VALIDATION, SyncActivityOutcome.WAITING_SERVER, "server_disabled")
+            return
+        }
         synchronized(policyLock) {
             WorkManager.getInstance(context.applicationContext).enqueueUniqueWork("server-profile-$profileVersionId", ExistingWorkPolicy.KEEP, profileRequest(context, profileVersionId))
         }
@@ -386,6 +454,11 @@ object ServerSyncScheduler {
             .build()
 
     fun enqueueRecording(context: Context, recordingId: String) {
+        if (!ServerSettingsStore(context).get().isConfigured) {
+            SyncActivityLog.record(context, "recording", recordingId,
+                SyncActivityAction.UPLOAD, SyncActivityOutcome.WAITING_SERVER, "server_disabled")
+            return
+        }
         synchronized(policyLock) {
             WorkManager.getInstance(context.applicationContext).enqueueUniqueWork("server-sync-$recordingId", ExistingWorkPolicy.KEEP, recordingRequest(context, recordingId))
         }
@@ -421,11 +494,26 @@ object ServerSyncScheduler {
             .build()
 }
 
-private fun Exception.isRetryable(): Boolean = when (this) {
+internal fun Exception.isRetryable(): Boolean = when (this) {
     is ServerHttpException -> status in setOf(408, 425, 429) || status >= 500
     is ServerTransferException -> retryable
     is IOException -> true
     else -> false
+}
+
+internal fun Exception.syncActivityOutcome(): SyncActivityOutcome = when {
+    !isRetryable() -> SyncActivityOutcome.FAILED
+    this is IOException && this !is ServerHttpException && this !is ServerTransferException -> SyncActivityOutcome.WAITING_NETWORK
+    // A retryable HTTP refusal is still a failed real attempt, not missing configuration.
+    else -> SyncActivityOutcome.FAILED
+}
+
+internal fun Exception.syncActivityCode(): String = when (this) {
+    is ServerHttpException -> "http_$status".takeIf { it in SyncActivityLog.allowedCodes } ?: "server_error"
+    is ServerTransferException -> code.takeIf { it in SyncActivityLog.allowedCodes } ?: "local_io"
+    is IOException -> "network_error"
+    is IllegalArgumentException -> "validation_failed"
+    else -> "unknown_error"
 }
 
 private fun Exception.errorCode(): String = when (this) {

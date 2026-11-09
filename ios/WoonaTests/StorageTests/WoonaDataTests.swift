@@ -5,6 +5,263 @@ import CryptoKit
 @testable import Woona
 
 final class WoonaDataTests: XCTestCase {
+    func testAnimalIdentityKeyMatchesPythonStripCasefoldWithoutCanonicalOrLocaleCollisions() {
+        let equivalent = [
+            (" Straße\u{1C}", "STRASSE"), ("ẞ", "ss"), ("ΟΣ", "ος"), ("ος", "οσ"),
+            ("\u{85}\u{A0}ID\u{3000}", "id"), ("ﬃ", "FFI"), ("İ", "i\u{307}"),
+            ("\u{13A0}", "\u{AB70}"), ("\u{A7D0}", "\u{A7D1}"), ("\u{10570}", "\u{10597}")
+        ]
+        for (a, b) in equivalent { XCTAssertEqual(AnimalIdentityKey.bytes(a), AnimalIdentityKey.bytes(b), "\(a) / \(b)") }
+        // Unicode 16 folds must not collide on the live Unicode 15.1 server.
+        for (a, b) in [("é", "e\u{301}"), ("İ", "i"), ("ı", "i"), ("Ａ", "A"), ("\u{200B}id", "id"), ("\u{A7CB}", "\u{264}"), ("\u{1C89}", "\u{1C8A}")] {
+            XCTAssertNotEqual(AnimalIdentityKey.bytes(a), AnimalIdentityKey.bytes(b), "No NFKC, canonical, or locale equivalence: \(a) / \(b)")
+        }
+    }
+
+    func testSheetIdentityBoundsCountRawUnicodeScalarsNotGraphemesOrFoldedBytes() {
+        var dog = DogQuestionnaire()
+        dog.schemaVersion = 2
+        // A single grapheme can exceed Python's 100-code-point limit.
+        let atLimit = "a" + String(repeating: "\u{301}", count: 99)
+        let overLimit = atLimit + "\u{301}"
+        XCTAssertEqual(atLimit.count, 1)
+        XCTAssertEqual(atLimit.unicodeScalars.count, 100)
+        for value in [atLimit, String(repeating: "\u{10570}", count: 100), String(repeating: "ß", count: 100)] {
+            dog.animalId = value; dog.numberOrName = value
+            XCTAssertTrue(dog.validateSheet().isValid, "Raw scalar length, not UTF-16 or expanded casefold length")
+        }
+        for value in [overLimit, String(repeating: "\u{10570}", count: 101), " " + atLimit] {
+            dog.animalId = value; dog.numberOrName = value
+            XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["animalId", "numberOrName"]))
+        }
+        // Python strip includes C0 separators but excludes zero-width space.
+        for value in ["", "\u{1C}\u{1D}\u{1E}\u{1F}\u{85}\u{A0}\u{3000}"] {
+            dog.animalId = value; dog.numberOrName = value
+            XCTAssertTrue(AnimalIdentityKey.bytes(value).isEmpty)
+            XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["animalId", "numberOrName"]))
+        }
+        dog.animalId = nil; dog.numberOrName = "valid"
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["animalId"]))
+        dog.animalId = "\u{200B}"; dog.numberOrName = "\u{200B}"
+        XCTAssertTrue(dog.validateSheet().isValid)
+    }
+
+    func testV2SheetStringBoundsUseScalarsAndPythonBlanknessWithoutRewritingAnswers() {
+        let emoji100 = String(repeating: "😀", count: 100)
+        let combining120 = "a" + String(repeating: "\u{301}", count: 119)
+        var dog = DogQuestionnaire()
+        dog.schemaVersion = 2; dog.animalId = emoji100; dog.numberOrName = emoji100
+        dog.breedName = emoji100
+        dog.species = String(repeating: "😀", count: 2000)
+        XCTAssertTrue(dog.validateSheet().isValid)
+        XCTAssertEqual(dog.species?.unicodeScalars.count, 2000)
+        dog.breedName = combining120
+        dog.species = String(repeating: "a", count: 2001)
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["breedName", "species"]))
+        XCTAssertEqual(dog.breedName, combining120, "Validation must not normalize the payload")
+        dog.breedName = nil; dog.species = nil; dog.numberOrName = "\u{85}"
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["numberOrName"]))
+        dog.numberOrName = "name"
+        let overlongText = "a" + String(repeating: "\u{301}", count: 2000)
+        dog.notes = overlongText
+        dog.size = overlongText; dog.savedAtLocal = overlongText
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["notes", "size", "savedAtLocal"]))
+
+        var session = SessionQuestionnaire()
+        session.schemaVersion = 2; session.sessionLabel = emoji100; session.plannedActivities = ["activity"]
+        session.activityDetails = String(repeating: "😀", count: 1000)
+        session.operatorName = String(repeating: "😀", count: 150)
+        XCTAssertTrue(session.validateSheet().isValid)
+        session.sessionLabel = combining120
+        session.operatorName = "a" + String(repeating: "\u{301}", count: 150)
+        XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["sessionLabel", "operatorName"]))
+        session.sessionLabel = "\u{85}"; session.operatorName = "operator"
+        XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["sessionLabel"]))
+        XCTAssertEqual(session.sessionLabel, "\u{85}")
+        session.sessionLabel = "session"
+        session.surfaceDetails = "a" + String(repeating: "\u{301}", count: 300)
+        session.location = String(repeating: "a", count: 2001)
+        session.savedAtLocal = session.location
+        XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["surfaceDetails", "location", "savedAtLocal"]))
+    }
+
+    func testV2SheetArraysEnforceRawItemAndCollectionBoundsAlsoInHeartMode() {
+        let emoji100 = String(repeating: "😀", count: 100)
+        let combining120 = "a" + String(repeating: "\u{301}", count: 119)
+        let thirty = (0..<30).map { "item-\($0)" }
+        for kind in ["activity", "heart"] {
+            var session = SessionQuestionnaire()
+            session.schemaVersion = 2; session.sessionLabel = "session"; session.sessionKind = kind
+            for valid in [[emoji100], thirty, ["é", "e\u{301}"], ["A", "a"], [" "]] {
+                session.plannedActivities = valid; session.surfaces = valid
+                XCTAssertNil(session.validateSheet().errors["plannedActivities"])
+                XCTAssertNil(session.validateSheet().errors["surfaces"])
+            }
+            for invalid in [[""], [combining120], thirty + ["item-30"], ["duplicate", "duplicate"]] {
+                session.plannedActivities = invalid; session.surfaces = invalid
+                XCTAssertNotNil(session.validateSheet().errors["plannedActivities"], kind)
+                XCTAssertNotNil(session.validateSheet().errors["surfaces"], kind)
+                XCTAssertEqual(session.plannedActivities, invalid)
+            }
+            session.plannedActivities = []; session.surfaces = []
+            XCTAssertEqual(session.validateSheet().errors["plannedActivities"] == nil, kind == "heart")
+            XCTAssertNil(session.validateSheet().errors["surfaces"])
+            session.plannedActivities = nil; session.surfaces = nil
+            XCTAssertNotNil(session.validateSheet().errors["plannedActivities"], "Required array must be present even for heart sessions")
+            XCTAssertNil(session.validateSheet().errors["surfaces"])
+        }
+    }
+
+    func testV2SheetOptionalVitalsValidateBoundsRegardlessOfStatus() {
+        var session = SessionQuestionnaire()
+        session.schemaVersion = 2; session.sessionLabel = "session"; session.plannedActivities = ["activity"]
+        XCTAssertTrue(session.validateSheet().isValid, "Absent vitals stay optional")
+        for (pulse, respiration, temperature) in [(20, 1, 30.0), (300, 200, 45.0)] {
+            session.pulseBpm = pulse; session.respirationPerMinute = respiration; session.bodyTemperatureC = temperature
+            XCTAssertTrue(session.validateSheet().isValid)
+        }
+        for (pulse, respiration, temperature) in [(19, 0, 29.9), (301, 201, 45.1)] {
+            session.pulseBpm = pulse; session.respirationPerMinute = respiration; session.bodyTemperatureC = temperature
+            XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["pulseBpm", "respirationPerMinute", "bodyTemperatureC"]))
+        }
+        session.pulseBpm = nil; session.respirationPerMinute = nil
+        for temperature in [Double.nan, Double.infinity, -Double.infinity] {
+            session.bodyTemperatureC = temperature
+            XCTAssertEqual(Set(session.validateSheet().errors.keys), Set(["bodyTemperatureC"]))
+        }
+    }
+
+    func testV2SheetObservedSignsOnlyEnforcesMaximum100Items() {
+        var dog = DogQuestionnaire()
+        dog.schemaVersion = 2; dog.animalId = "id"; dog.numberOrName = "name"
+        for signs in [[], [""], [String(repeating: "a", count: 2001)], Array(repeating: "custom", count: 100)] {
+            dog.observedSigns = signs
+            XCTAssertTrue(dog.validateSheet().isValid, "V2 permits empty, repeated and arbitrary string answers")
+            XCTAssertEqual(dog.observedSigns, signs)
+        }
+        dog.observedSigns = Array(repeating: "custom", count: 101)
+        XCTAssertEqual(Set(dog.validateSheet().errors.keys), Set(["observedSigns"]))
+    }
+
+    func testNewHeartCaptureSuppliesRequiredActivityArrayWithoutChangingHistoricalEncoding() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        var heart = SessionQuestionnaire()
+        heart.schemaVersion = 2; heart.sessionKind = "heart"; heart.sessionLabel = "New heart"; heart.videoRequested = false
+        // An old payload with no array must retain its original encoding/hash. Only
+        // creation of a new row may supply the required empty transport array.
+        let historicalBytes = try WoonaStore.sessionQuestionnaireData(heart)
+        let historicalHash = WoonaStore.sha256(historicalBytes)
+        let historicalObject = try XCTUnwrap(JSONSerialization.jsonObject(with: historicalBytes) as? [String: Any])
+        XCTAssertNil(historicalObject["plannedActivities"])
+        for source in ["live", "replay"] {
+            let recording = try store.createRecording(profile: profile, source: source, questionnaire: heart)
+            let answers = try XCTUnwrap(recording.questionnaire)
+            XCTAssertEqual(answers.plannedActivities, [])
+            XCTAssertTrue(answers.validate().isValid)
+            XCTAssertFalse(answers.readyForSync, "Heart answers still need post-capture completion")
+            let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: WoonaStore.sessionQuestionnaireData(answers)) as? [String: Any])
+            XCTAssertEqual(wire["plannedActivities"] as? [String], [])
+            try store.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8))
+            let saved = try XCTUnwrap(store.recording(id: recording.id))
+            XCTAssertEqual(saved.status, "completed")
+            XCTAssertEqual(saved.questionnaire?.plannedActivities, [])
+        }
+        XCTAssertNil(heart.plannedActivities, "Do not mutate the caller's draft")
+        let decodedHistorical = try JSONDecoder().decode(SessionQuestionnaire.self, from: historicalBytes)
+        XCTAssertEqual(try WoonaStore.sessionQuestionnaireData(decodedHistorical), historicalBytes)
+        XCTAssertEqual(try WoonaStore.sha256(WoonaStore.sessionQuestionnaireData(decodedHistorical)), historicalHash)
+        heart.plannedActivities = [""]
+        XCTAssertEqual(heart.preparedForCommit().plannedActivities, [""], "Do not hide invalid supplied answers")
+        XCTAssertThrowsError(try store.createRecording(profile: profile, source: "replay", questionnaire: heart))
+        heart.sessionKind = "activity"; heart.plannedActivities = nil
+        XCTAssertNil(heart.preparedForCommit().plannedActivities)
+        XCTAssertThrowsError(try store.createRecording(profile: profile, source: "replay", questionnaire: heart))
+        heart.schemaVersion = 1; heart.sessionKind = "heart"
+        XCTAssertNil(heart.preparedForCommit().plannedActivities, "V1 encoding must remain unchanged")
+    }
+
+    func testLocalAnimalIdentityRejectsOtherUUIDAcrossAccountsAndHistoricalVersionsWithoutMutation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        var dog = DogQuestionnaire(); dog.schemaVersion = 2; dog.animalId = "Straße"; dog.numberOrName = "Original"
+        let original = try store.saveProfile(dog, accountID: "scope-a")
+        let recording = try store.createRecording(profile: original, source: "live", questionnaire: completeSession())
+        var revised = dog; revised.animalId = "Changed-ID"; revised.numberOrName = "Revised"
+        let latest = try store.saveProfile(revised, replacing: original)
+        for scope in [nil, "scope-a", "scope-b"] as [String?] {
+            var duplicate = dog; duplicate.animalId = " STRASSE "; duplicate.numberOrName = "Not a merge"
+            XCTAssertThrowsError(try store.saveProfile(duplicate, accountID: scope)) { error in
+                XCTAssertEqual(error as? LocalAnimalIdentityError, LocalAnimalIdentityError())
+            }
+        }
+        XCTAssertEqual(try store.profiles().count, 1)
+        XCTAssertEqual(try store.profiles().first?.profileVersionID, latest.profileVersionID)
+        XCTAssertEqual(try store.recording(id: recording.id)?.dogID, original.id)
+        XCTAssertEqual(try store.recording(id: recording.id)?.profileVersionID, original.profileVersionID)
+        XCTAssertEqual(try store.profileSyncState(versionID: latest.profileVersionID), "pending")
+        // A different existing UUID cannot edit its way into a historical ID either.
+        var other = dog; other.animalId = "Other-ID"
+        let otherProfile = try store.saveProfile(other, accountID: "scope-b")
+        other.animalId = "strasse"
+        XCTAssertThrowsError(try store.saveProfile(other, replacing: otherProfile))
+        XCTAssertEqual(try store.profiles().first(where: { $0.id == otherProfile.id })?.profileVersionID, otherProfile.profileVersionID)
+    }
+
+    func testLocalAnimalIdentityAllowsSameDogRevisionAndExactByteDistinctIDs() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        var dog = DogQuestionnaire(); dog.schemaVersion = 2; dog.animalId = "ΟΣ"; dog.numberOrName = "First"
+        let first = try store.saveProfile(dog)
+        try store.markProfileAccepted(dogID: first.id, versionID: first.profileVersionID)
+        dog.animalId = "ος"; dog.numberOrName = "Edited"
+        let second = try store.saveProfile(dog, replacing: first)
+        XCTAssertEqual(first.id, second.id)
+        XCTAssertNotEqual(first.profileVersionID, second.profileVersionID)
+        XCTAssertNotEqual(first.contentSha256, second.contentSha256)
+        XCTAssertEqual(try store.profileSyncState(versionID: second.profileVersionID), "pending")
+        XCTAssertEqual(try store.saveProfile(dog, replacing: second).profileVersionID, second.profileVersionID)
+        for id in ["é", "e\u{301}", "İ", "i", "ı"] {
+            dog.animalId = id
+            _ = try store.saveProfile(dog)
+        }
+        XCTAssertEqual(try store.profiles().count, 6)
+    }
+
+    func testLinkingDataAccountInvalidatesUnassignedVersionConfirmation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try store.saveProfile(completeDog())
+        try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
+        try store.linkDog(dogID: profile.id, accountID: "scope-a")
+        XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "pending")
+        XCTAssertEqual(try store.profiles().first?.accountID, "scope-a")
+        try store.markProfileAccepted(dogID: profile.id, versionID: profile.profileVersionID)
+        try store.linkDog(dogID: profile.id, accountID: "scope-a")
+        XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "synced")
+        XCTAssertThrowsError(try store.linkDog(dogID: profile.id, accountID: "scope-b"))
+    }
+
+    func testLocalIdentityErrorIsTypedActionableRussianAndEnglishAndDiagnosticsRedactCredentials() throws {
+        let error = LocalAnimalIdentityError()
+        XCTAssertEqual(error.field, "animalId")
+        XCTAssertTrue(error.message(language: .russian).contains("Черновик и записи сохранены"))
+        XCTAssertTrue(error.message(language: .english).contains("Select the existing dog or correct the ID"))
+        let diagnostic = safeSyncDiagnostic("HTTP 409 requestId=req-7 Bearer secret-value token=another https://user:password@host/path", secret: "secret-value")
+        for secret in ["secret-value", "another", "user:password"] { XCTAssertFalse(diagnostic.contains(secret)) }
+        XCTAssertTrue(diagnostic.contains("requestId=req-7"))
+        let response = ServerSyncError.responseError(status: 422, data: Data(#"{"detail":{"code":"invalid","message":"Bearer private-value token=private-token","requestId":"req-8","password":"not-allowlisted"}}"#.utf8))
+        XCTAssertFalse(response.localizedDescription.contains("private-value"))
+        XCTAssertFalse(response.localizedDescription.contains("private-token"))
+        XCTAssertFalse(response.localizedDescription.contains("not-allowlisted"))
+        XCTAssertTrue(response.localizedDescription.contains("req-8"))
+    }
+
     func testActualLiveTimingExcludesPreparationAndFinalizationAndUsesMonotonicElapsed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1188,6 +1445,8 @@ final class WoonaDataTests: XCTestCase {
             XCTAssertEqual(puts, 1, syncDiagnostics())
             XCTAssertEqual(try store.profileSyncState(versionID: profile.profileVersionID), "permanent_error")
             XCTAssertEqual(model.profileUploadFailed, 1)
+            XCTAssertEqual(model.profileIdentityStatuses[profile.profileVersionID], .conflict)
+            XCTAssertNil(model.profileIdentityCheckedAt[profile.profileVersionID])
             XCTAssertFalse(model.uploadQueueExplanation.contains("queue is empty"))
             let automatic = await model.resumePendingSync()
             XCTAssertTrue(automatic, syncDiagnostics()) // No eligible retry remains; this does not mark it uploaded.
@@ -1203,6 +1462,11 @@ final class WoonaDataTests: XCTestCase {
             XCTAssertEqual(try store.profiles().first?.revision, 8)
             XCTAssertEqual(model.profileUploadPending, 0)
             XCTAssertEqual(model.profileUploadFailed, 0)
+            XCTAssertEqual(model.profileIdentityStatuses[profile.profileVersionID], .serverConfirmed)
+            XCTAssertNotNil(model.profileIdentityCheckedAt[profile.profileVersionID])
+            model.updateTransferNetworkPath(available: false, unmetered: false)
+            XCTAssertEqual(model.profileIdentityStatuses[profile.profileVersionID], .offline)
+            XCTAssertNotNil(model.profileIdentityCheckedAt[profile.profileVersionID])
             XCTAssertEqual(try store.localInventory().recordings, 0)
         }
     }
@@ -2272,6 +2536,27 @@ final class WoonaDataTests: XCTestCase {
         let recording = try store!.createRecording(profile: profile, source: "live", questionnaire: session)
         try store!.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8))
         XCTAssertTrue(try store!.pendingRecordings().isEmpty)
+        // Simulate a deployed V2 heart row whose synthesized Codable omitted the
+        // required array. Loading/reopening must not rewrite its bytes or artifacts.
+        var historical = try XCTUnwrap(store!.recording(id: recording.id)?.questionnaire)
+        historical.plannedActivities = nil
+        let historicalBytes = try WoonaStore.sessionQuestionnaireData(historical)
+        let historicalHash = WoonaStore.sha256(historicalBytes)
+        let syncBeforeEdit = try XCTUnwrap(store!.artifacts(recordingID: recording.id).first { $0.type == "sync" })
+        let syncHashBeforeEdit = try WoonaStore.sha256File(root.appendingPathComponent(syncBeforeEdit.relativePath))
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(root.appendingPathComponent("woona.sqlite").path, &database), SQLITE_OK)
+        let legacyJSON = String(decoding: historicalBytes, as: UTF8.self).replacingOccurrences(of: "'", with: "''")
+        XCTAssertEqual(sqlite3_exec(database, "UPDATE recordings SET questionnaire_json='\(legacyJSON)' WHERE id='\(recording.id.uuidString)'", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(database)
+        store = nil
+        store = try WoonaStore(rootDirectory: root)
+        let loadedHistorical = try XCTUnwrap(store!.recording(id: recording.id)?.questionnaire)
+        XCTAssertNil(loadedHistorical.plannedActivities)
+        XCTAssertEqual(try WoonaStore.sessionQuestionnaireData(loadedHistorical), historicalBytes)
+        XCTAssertEqual(try WoonaStore.sha256(WoonaStore.sessionQuestionnaireData(loadedHistorical)), historicalHash)
+        XCTAssertEqual(loadedHistorical.preparedForCommit().plannedActivities, [])
+        XCTAssertNil(loadedHistorical.plannedActivities, "Preparing an edit cannot mutate the loaded historical value")
         func unknown(_ key: String) -> HeartAnswer { HeartQuestionnaire.options[key]!.first { $0.key == "unknown" }! }
         var heart = HeartQuestionnaire()
         heart.knownHeartCondition = unknown("knownHeartCondition")
@@ -2288,6 +2573,10 @@ final class WoonaDataTests: XCTestCase {
         invalid.referenceMethod = HeartQuestionnaire.options["referenceMethod"]!.first { $0.key == "ecg" }
         XCTAssertFalse(invalid.validate().isValid)
         try store!.saveHeartQuestionnaire(recordingID: recording.id, heart: heart)
+        let editedHeart = try XCTUnwrap(store!.recording(id: recording.id)?.questionnaire)
+        XCTAssertEqual(editedHeart.plannedActivities, [])
+        XCTAssertTrue(editedHeart.validate().isValid)
+        XCTAssertEqual(try WoonaStore.sha256File(root.appendingPathComponent(syncBeforeEdit.relativePath)), syncHashBeforeEdit, "An explicit questionnaire edit must not rewrite immutable capture artifacts")
         XCTAssertEqual(1, try store!.pendingRecordings().count)
         let bytes = Data("utc,bpm\n2026-10-05T12:00:00Z,120\n".utf8)
         let input = root.appendingPathComponent("target.csv")

@@ -1109,16 +1109,20 @@ class WoonaDatabase(
         }
         val name = questionnaire.numberOrName.trim()
         val id = profileId ?: UUID.randomUUID().toString()
-        val existing = profile(id)
-        val createdAt = existing?.createdAtUtc ?: now.toString()
-        val normalized = questionnaire.copy(numberOrName = name)
-        val questionnaireJson = normalized.toJson()
-        val contentSha256 = canonicalJsonSha256(questionnaireJson)
-        if (existing != null && existing.questionnaire.copy(savedAtLocal = null) == normalized.copy(savedAtLocal = null)) {
-            return existing
-        }
+        // Read current state and check every historical reservation under the same
+        // write transaction as the insert. A separate preflight races other saves.
         writableDatabase.beginTransaction()
         try {
+            val existing = profile(id)
+            requireAvailableAnimalIdentity(questionnaire.animalId, id)
+            val createdAt = existing?.createdAtUtc ?: now.toString()
+            val normalized = questionnaire.copy(numberOrName = name)
+            val questionnaireJson = normalized.toJson()
+            val contentSha256 = canonicalJsonSha256(questionnaireJson)
+            if (existing != null && existing.questionnaire.copy(savedAtLocal = null) == normalized.copy(savedAtLocal = null)) {
+                writableDatabase.setTransactionSuccessful()
+                return existing
+            }
             writableDatabase.insertWithOnConflict(
                 "dogs",
                 null,
@@ -1200,9 +1204,24 @@ class WoonaDatabase(
 
     fun linkDogAccount(dogId: String, accountId: String) {
         val account = normalizeAccountId(accountId)
-        val existing = requireNotNull(profile(dogId)).accountId
-        require(existing == null || existing == account) { "Собака уже принадлежит другому аккаунту" }
-        writableDatabase.update("dogs", ContentValues().apply { put("account_id", account) }, "id=?", arrayOf(dogId))
+        writableDatabase.beginTransaction()
+        try {
+            val existing = requireNotNull(profile(dogId)).accountId
+            require(existing == null || existing == account) { "Собака уже принадлежит другому аккаунту" }
+            if (existing != account) {
+                writableDatabase.update("dogs", ContentValues().apply { put("account_id", account) }, "id=?", arrayOf(dogId))
+                // An old acceptance was for the unassigned scope, not this account.
+                // Revalidate only the current version; preserve historical receipts,
+                // immutable JSON/hash, attempt history and server revision.
+                writableDatabase.execSQL(
+                    "UPDATE dog_profile_versions SET server_sync_state='pending' WHERE dog_id=? AND superseded_at_utc IS NULL",
+                    arrayOf(dogId),
+                )
+            }
+            writableDatabase.setTransactionSuccessful()
+        } finally {
+            writableDatabase.endTransaction()
+        }
     }
 
     fun beginRecording(

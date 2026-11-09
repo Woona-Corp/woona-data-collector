@@ -26,6 +26,7 @@ import com.example.myapplication.data.DogProfile
 import com.example.myapplication.data.Recording
 import com.example.myapplication.data.RecordingSource
 import com.example.myapplication.data.profileSyncRecord
+import com.example.myapplication.data.profileSyncSnapshots
 import com.example.myapplication.data.normalizeAccountId
 import com.example.myapplication.data.acceptServerRecording
 import com.example.myapplication.data.SessionQuestionnaire
@@ -109,6 +110,7 @@ class MainActivity : ComponentActivity() {
     private var selectedLanguage by mutableStateOf(AppLanguage.ENGLISH)
     private var selectedThemeMode by mutableStateOf(AppThemeMode.SYSTEM)
     private var dogProfiles by mutableStateOf<List<DogProfile>>(emptyList())
+    private var profileSyncStatuses by mutableStateOf<Map<String, com.example.myapplication.profile.ProfileSyncUiStatus>>(emptyMap())
     private var selectedProfileId by mutableStateOf<String?>(null)
     private var recentRecordings by mutableStateOf<List<Recording>>(emptyList())
     private val storageRequests = com.example.myapplication.sync.StorageRequestEpoch()
@@ -504,6 +506,21 @@ class MainActivity : ComponentActivity() {
                                 canSelectProfile = !accountBusy && !isServerRestoreInProgress && !deviceFeatureController.isCaptureActive(),
                                 profiles = dogProfiles,
                                 selectedProfileId = selectedProfileId,
+                                profileSyncStatus = { profile ->
+                                    val status = profileSyncStatuses[profile.profileVersionId]
+                                    com.example.myapplication.profile.ProfileSyncStatus(status, selectedLanguage)
+                                    com.example.myapplication.sync.SyncActivityHistory("profile", profile.profileVersionId, selectedLanguage, status)
+                                },
+                                recordingEvidence = { recording ->
+                                    com.example.myapplication.sync.SyncActivityHistory("recording", recording.id, selectedLanguage, recording.serverSyncState)
+                                    com.example.myapplication.sync.CaptureDiagnosticDetails(recording.id, selectedLanguage) {
+                                        val artifact = recording.artifacts.firstOrNull { it.type == com.example.myapplication.data.ArtifactType.DIAGNOSTIC && it.localPresence in setOf("local", "both") }
+                                        artifact?.let {
+                                            com.example.myapplication.storage.readRecordingDiagnosticTail(woonaDatabase.rootDirectory, recording.relativeDirectory, it.relativePath)
+                                                ?.let { text -> com.example.myapplication.sync.redactSyncDetails(text, serverSettingsStore.get().token) }
+                                        }
+                                    }
+                                },
                                 recordings = recentRecordings,
                                 language = selectedLanguage,
                                 onSelectProfile = ::selectProfile,
@@ -561,6 +578,7 @@ class MainActivity : ComponentActivity() {
                             initial = editingProfile?.questionnaire,
                             required = false,
                             language = selectedLanguage,
+                            activeAccountId = serverSettingsStore.get().accountId,
                             onDismiss = {
                                 editingProfile = null
                                 isDogQuestionnaireVisible = false
@@ -571,9 +589,14 @@ class MainActivity : ComponentActivity() {
                                     profileId = editingProfile?.id,
                                     accountId = serverSettingsStore.get().accountId,
                                 ) }.getOrElse { error ->
+                                    if (error is com.example.myapplication.data.LocalAnimalIdentityConflict) throw error
                                     throw IllegalStateException(if (selectedLanguage == AppLanguage.RUSSIAN)
                                         "Анкета не сохранена на устройстве. Черновик остаётся открытым; устраните причину и повторите сохранение.\n${error.message ?: error.javaClass.simpleName}"
                                         else "The questionnaire was not saved on this device. Your draft remains open; correct the cause and retry.\n${error.message ?: error.javaClass.simpleName}", error)
+                                }
+                                if (saved.profileVersionId != editingProfile?.profileVersionId) {
+                                    com.example.myapplication.sync.SyncActivityLog.record(applicationContext, "profile", saved.profileVersionId,
+                                        com.example.myapplication.sync.SyncActivityAction.LOCAL_SAVED, com.example.myapplication.sync.SyncActivityOutcome.SUCCEEDED)
                                 }
                                 editingProfile = null
                                 isDogQuestionnaireVisible = false
@@ -1113,6 +1136,9 @@ class MainActivity : ComponentActivity() {
         }
         if (storageRequests.configure(settings)) storageUi = com.example.myapplication.sync.ServerStorageUiState()
         val counts = woonaDatabase.serverSyncCounts()
+        profileSyncStatuses = woonaDatabase.profileSyncSnapshots().values.associate { snapshot ->
+            snapshot.versionId to com.example.myapplication.profile.ProfileSyncUiStatus(snapshot.state, snapshot.errorCode, snapshot.errorMessage, snapshot.confirmedAtUtc, snapshot.attemptCount)
+        }
         val cleanup = woonaDatabase.retirementCleanupStatus()
         serverSyncState = ServerSyncUiState(
             status = when {
@@ -1161,6 +1187,8 @@ class MainActivity : ComponentActivity() {
         if (serverRecordingReports[id]?.second == true) return
         val settings = serverSettingsStore.get()
         if (!settings.isConfigured) {
+            com.example.myapplication.sync.SyncActivityLog.record(applicationContext, "recording", id,
+                com.example.myapplication.sync.SyncActivityAction.CHECK_DELIVERY, com.example.myapplication.sync.SyncActivityOutcome.WAITING_SERVER, "server_disabled")
             serverRecordingReports = serverRecordingReports + (id to ((if (selectedLanguage == AppLanguage.RUSSIAN) "Подключите сервер в Настройках." else "Configure the server in Settings.") to false))
             return
         }
@@ -1168,14 +1196,20 @@ class MainActivity : ComponentActivity() {
         reportConfiguration = settings
         val language = selectedLanguage
         backgroundExecutor.execute {
+            com.example.myapplication.sync.SyncActivityLog.record(applicationContext, "recording", id,
+                com.example.myapplication.sync.SyncActivityAction.CHECK_DELIVERY, com.example.myapplication.sync.SyncActivityOutcome.STARTED)
             val result = runCatching { com.example.myapplication.sync.recordingServerReport(ServerApiClient(settings).syncStatus(id), language) }
+            com.example.myapplication.sync.SyncActivityLog.record(applicationContext, "recording", id,
+                com.example.myapplication.sync.SyncActivityAction.CHECK_DELIVERY,
+                if (result.isSuccess) com.example.myapplication.sync.SyncActivityOutcome.SUCCEEDED else com.example.myapplication.sync.SyncActivityOutcome.FAILED,
+                (result.exceptionOrNull() as? com.example.myapplication.sync.ServerHttpException)?.let { "http_${it.status}" })
             runOnUiThread {
                 if (settings != serverSettingsStore.get()) {
                     serverRecordingReports = serverRecordingReports - id
                 } else {
                     val stamp = (if (language == AppLanguage.RUSSIAN) "Проверено: " else "Checked: ") + java.time.Instant.now().toString() + " · " + settings.baseUrl + "\n"
                     val report = stamp + result.getOrElse { com.example.myapplication.localization.recordingUploadErrorText(it.message, language) + "\n" + it.message.orEmpty() }
-                    serverRecordingReports = serverRecordingReports + (id to (report to false))
+                    serverRecordingReports = serverRecordingReports + (id to (com.example.myapplication.sync.redactSyncDetails(report, settings.token) to false))
                 }
             }
         }
@@ -1262,20 +1296,24 @@ class MainActivity : ComponentActivity() {
         accountBusy = true
         val settings = serverSettingsStore.get().copy(accountId = identifier)
         backgroundExecutor.execute {
-            val result = runCatching { serverOperationLock.withLock {
-                if (identifier != null && settings.isConfigured) ServerApiClient(settings).applyAccount(identifier)
-                val snapshot = if (settings.isConfigured) ServerApiClient(settings).fetchRestoreSnapshot() else null
-                snapshot?.let {
-                    woonaDatabase.restoreServerMetadata(it.dogs, it.recordings)
-                    if (settings.sameRetirementServer(serverSettingsStore.get())) woonaDatabase.applyServerDeletions(it.deletions)
+            val result = runCatching {
+                serverOperationLock.withLock {
+                    if (identifier != null && settings.isConfigured) ServerApiClient(settings).applyAccount(identifier)
+                    val snapshot = if (settings.isConfigured) ServerApiClient(settings).fetchRestoreSnapshot() else null
+                    snapshot?.let {
+                        woonaDatabase.restoreServerMetadata(it.dogs, it.recordings)
+                        if (settings.sameRetirementServer(serverSettingsStore.get())) woonaDatabase.applyServerDeletions(it.deletions)
+                    }
+                    snapshot
                 }
-                snapshot
-            }
             }
             runOnUiThread {
                 accountBusy = false
                 result.onSuccess { snapshot ->
-                    if (deviceFeatureController.isCaptureActive()) { toast("Дождитесь завершения записи"); return@onSuccess }
+                    if (deviceFeatureController.isCaptureActive()) {
+                        toast("Дождитесь завершения записи")
+                        return@onSuccess
+                    }
                     serverSettingsStore.setAccount(identifier)
                     serverSyncState = serverSyncState.copy(operationMessage = snapshot?.warnings?.let { com.example.myapplication.sync.restoreWarningsText(it,selectedLanguage) })
                     editingProfile = null; editingRecording = null; heartQuestionnaireRecordingId = null

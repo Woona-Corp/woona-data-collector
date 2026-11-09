@@ -236,6 +236,10 @@
     "Добавить": "Add",
     "Позже": "Later",
     "Анкета": "Questionnaire",
-    "Анкета по сердцебиению": "Heart questionnaire"
+    "Анкета по сердцебиению": "Heart questionnaire",
+    "Максимум 100 вариантов": "Maximum 100 selections",
+    "Пульс: 20–300 уд/мин": "Pulse: 20–300 bpm",
+    "Дыхание: 1–200 в минуту": "Respiration: 1–200 per minute",
+    "Температура тела: 30–45 °C": "Body temperature: 30–45 °C"
   }
 }

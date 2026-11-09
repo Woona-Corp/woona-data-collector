@@ -48,7 +48,7 @@ class RecordingHistoryUiTest {
         val row=recording(0).copy(serverSyncState="permanent_error",serverSyncError="HTTP 413 storage_quota_exceeded requestId=fixture-id")
         compose.setContent { MaterialTheme { ProfilesOverview(emptyList(),null,listOf(row),AppLanguage.ENGLISH,{},{},{},{},videoState=VideoCaptureState.IDLE,videoOffsetMillis=null,onVideoAction={},section=ProfileScreenSection.RECORDINGS) } }
         compose.onNodeWithText("storage limit",substring=true).assertExists()
-        compose.onNodeWithText("Error details").performScrollTo().performClick()
+        compose.onNodeWithText("+ Details").performScrollTo().performClick()
         compose.onNodeWithText("requestId=fixture-id",substring=true).assertExists()
     }
     private fun recording(index:Int)=Recording("id-$index","dog","profile",RecordingSource.LIVE,RecordingStatus.COMPLETED,"Session $index",false,"2026-07-01T10:00:00Z",null,"UTC",null,"recordings/dog/$index")

@@ -18,6 +18,7 @@ class ServerRequestIdTest {
         url: URL,
         private val status: Int,
         private val headers: Map<String, String>,
+        private val body: String = """{"code":"server_busy"}""",
     ) : HttpURLConnection(url) {
         val requestHeaders = mutableMapOf<String, String>()
 
@@ -33,7 +34,7 @@ class ServerRequestIdTest {
 
         override fun getInputStream(): InputStream = ByteArrayInputStream(ByteArray(0))
 
-        override fun getErrorStream(): InputStream = ByteArrayInputStream("""{"code":"server_busy"}""".toByteArray())
+        override fun getErrorStream(): InputStream = ByteArrayInputStream(body.toByteArray())
 
         override fun getResponseCode() = status
 
@@ -57,6 +58,25 @@ class ServerRequestIdTest {
         )
         val error = assertThrows(ServerHttpException::class.java) { client.fetchDeletions() }
         return error to connection
+    }
+
+    @Test fun httpErrorIsSanitizedBeforeWorkerCanPersistItAndCodeRemainsJson() {
+        val token = "sentinel-configured-token"
+        val body = """{"detail":{"code":"animal_id_already_exists","message":"reflected $token https://host.test/path?X-Amz-Credential=sentinel-signed&unknown=sentinel-unknown#sentinel-fragment","requestId":"req-fixture","apiKey":"sentinel-api"}}"""
+        val client = ServerApiClient(
+            ServerSettings("https://network.test", token, "fixture", false),
+            connectionFactory = { url -> Connection(url, 409, mapOf("X-Request-ID" to "req-fixture"), body) },
+        )
+        val error = assertThrows(ServerHttpException::class.java) { client.fetchDeletions() }
+        assertEquals(409, error.status)
+        assertEquals("req-fixture", error.requestId)
+        assertFalse(error.message.orEmpty().contains("sentinel"))
+        assertFalse(error.responseBody.contains("sentinel"))
+        // Android's JSONObject is a JVM stub here. Exact valid JSON proves code and
+        // string delimiters survived; native persistence tests exercise the parser.
+        assertEquals("""{"detail":{"code":"animal_id_already_exists","message":"reflected [redacted] https://host.test/path[redacted]","requestId":"req-fixture","apiKey":"[redacted]"}}""", error.responseBody)
+        assertTrue(error.responseBody.contains("host.test/path"))
+        assertTrue(error.message.orEmpty().contains("req-fixture"))
     }
 
     @Test

@@ -7,6 +7,43 @@ import SwiftUI
 
 @MainActor
 final class AppShellTests: XCTestCase {
+    func testLocalProfileSaveWithoutServerConfigurationPreservesPendingVersionAndNeverClaimsChecking() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let model = AppViewModel(store: store, uiTesting: true)
+        model.serverBaseURL = ""; model.serverToken = ""
+        model.updateTransferNetworkPath(available: true, unmetered: true)
+        try await waitUntil("local recovery ready", timeout: 10) { model.canSelectAnimal }
+        var dog = DogQuestionnaire(); dog.schemaVersion = 2; dog.animalId = "local-only"; dog.numberOrName = "Offline dog"
+        try model.saveDogProfile(dog)
+        let first = try XCTUnwrap(model.selectedDogProfile)
+        XCTAssertEqual(try store.profileSyncState(versionID: first.profileVersionID), "pending")
+        try await waitUntil("local-only attempt settled", timeout: 10) { model.canChangeAccount && !model.isHistoryLoading }
+        XCTAssertEqual(model.profileIdentityStatuses[first.profileVersionID], .unverified)
+        XCTAssertNil(model.profileIdentityCheckedAt[first.profileVersionID])
+        XCTAssertNil(model.errorMessage)
+        // An absent URL is also unconfigured when a retained technical token exists.
+        model.serverToken = "synthetic-retained-token"
+        dog.numberOrName = "Revised offline dog"
+        try model.saveDogProfile(dog, replacing: first)
+        let second = try XCTUnwrap(model.selectedDogProfile)
+        try await waitUntil("unconfigured revision settled", timeout: 10) { model.canChangeAccount && !model.isHistoryLoading }
+        XCTAssertEqual(second.id, first.id)
+        XCTAssertNotEqual(second.profileVersionID, first.profileVersionID)
+        XCTAssertEqual(try store.profileSyncState(versionID: second.profileVersionID), "pending")
+        XCTAssertEqual(model.profileIdentityStatuses[second.profileVersionID], .unverified)
+        XCTAssertNil(model.profileIdentityCheckedAt[second.profileVersionID])
+        XCTAssertNil(model.errorMessage)
+        model.updateTransferNetworkPath(available: false, unmetered: false)
+        XCTAssertEqual(model.profileIdentityStatuses[second.profileVersionID], .offline)
+        let resumed = await model.resumePendingSync()
+        XCTAssertFalse(resumed)
+        XCTAssertEqual(try store.profileSyncState(versionID: second.profileVersionID), "pending")
+        XCTAssertEqual(try store.profiles().count, 1)
+        try await waitUntil("history reads settled", timeout: 10) { !model.isHistoryLoading }
+    }
+
     func testServerConnectionDraftLivesInAppMemoryAcrossViewRecreationAndClearsOnDismissal() {
         let model = AppViewModel(store: nil, uiTesting: true)
         model.serverBaseURL = "https://saved.example"
@@ -234,7 +271,9 @@ final class AppShellTests: XCTestCase {
         let unknown = recordingUploadErrorText("Unexpected future failure", language: .english)
         XCTAssertTrue(unknown.contains("outcome is not confirmed"))
         XCTAssertTrue(unknown.contains("complete archive"))
-        XCTAssertTrue(unknown.contains("Unexpected future failure"))
+        // Unknown technical payload belongs in collapsed, sanitized Details,
+        // not in the primary user-facing operation summary.
+        XCTAssertFalse(unknown.contains("Unexpected future failure"))
     }
 
     func testHTTPFailuresExplainSafeNextActions() {
@@ -469,6 +508,34 @@ final class AppShellTests: XCTestCase {
             XCTAssertTrue(model.canStartNewSession)
         }
         try await exerciseFixture()
+    }
+
+    func testEditingDeployedHeartWithMissingActivityArraySavesThroughModel() async throws {
+        let originalSelection = heartPromptSelectionPreferences()
+        defer { restoreHeartPromptSelectionPreferences(originalSelection) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = try WoonaStore(rootDirectory: root)
+        let profile = try makeHeartPromptProfile(store, name: "legacy-edit")
+        let old = try makeOldHeartPromptRecord(store, profile: profile)
+        var legacy = try XCTUnwrap(old.questionnaire)
+        legacy.plannedActivities = nil
+        let legacyBytes = try WoonaStore.sessionQuestionnaireData(legacy)
+        let json = String(decoding: legacyBytes, as: UTF8.self).replacingOccurrences(of: "'", with: "''")
+        try executeHeartPromptSQL(root, "UPDATE recordings SET questionnaire_json='\(json)' WHERE id='\(old.id.uuidString)'")
+        let model = AppViewModel(store: store, uiTesting: true)
+        defer { cleanupHeartPromptFixture(root, model: model) }
+        try await waitUntil("legacy heart editor ready") { !model.isHistoryLoading && model.canChangeAccount }
+        let displayed = try XCTUnwrap(store.recording(id: old.id))
+        XCTAssertNil(displayed.questionnaire?.plannedActivities)
+        XCTAssertEqual(try WoonaStore.sessionQuestionnaireData(XCTUnwrap(displayed.questionnaire)), legacyBytes)
+        try await model.saveHeartQuestionnaire(validUnknownHeartAnswers(), displayedRecording: displayed)
+        let saved = try XCTUnwrap(store.recording(id: old.id))
+        XCTAssertEqual(saved.questionnaire?.plannedActivities, [])
+        XCTAssertEqual(saved.questionnaire?.readyForSync, true)
+        XCTAssertEqual(saved.status, old.status)
+        XCTAssertEqual(saved.endedAtUTC, old.endedAtUTC)
+        XCTAssertNil(displayed.questionnaire?.plannedActivities, "The displayed historical snapshot is not mutated")
+        try await waitForHeartPromptLocalIdle(model)
     }
 
     func testHeartCapturePromptOwnsFreshFinalizedRecordAndDoesNotReopenAfterDismissal() async throws {
@@ -1307,7 +1374,9 @@ final class AppShellTests: XCTestCase {
     private func makeOldHeartPromptRecord(_ store: WoonaStore, profile: DogProfile) throws -> WoonaRecording {
         var questionnaire = SessionQuestionnaire()
         questionnaire.schemaVersion = 2; questionnaire.sessionKind = "heart"; questionnaire.sessionLabel = "Old incomplete heart"; questionnaire.videoRequested = false
+        questionnaire.plannedActivities = [] // Same explicit V2 transport array as the session sheet.
         let recording = try store.createRecording(profile: profile, source: "live", questionnaire: questionnaire)
+        XCTAssertEqual(recording.questionnaire?.plannedActivities, [])
         try store.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8))
         return try XCTUnwrap(store.recording(id: recording.id))
     }
@@ -1317,8 +1386,11 @@ final class AppShellTests: XCTestCase {
         try Data().write(to: source)
         var questionnaire = SessionQuestionnaire()
         questionnaire.schemaVersion = 2; questionnaire.sessionKind = "heart"; questionnaire.sessionLabel = label; questionnaire.videoRequested = false
+        questionnaire.plannedActivities = [] // Heart captures still carry the required array.
         try model.startReplay(from: source, questionnaire: questionnaire)
-        return try XCTUnwrap(model.activeRecording).id
+        let recording = try XCTUnwrap(model.activeRecording)
+        XCTAssertEqual(recording.questionnaire?.plannedActivities, [])
+        return recording.id
     }
 
     private func waitForHeartPromptLocalIdle(_ model: AppViewModel) async throws {

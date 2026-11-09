@@ -82,6 +82,7 @@ class QuestionnaireCompactUiTest {
         val wasPortrait = initial.height > initial.width
         val automation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation
         val originalFlags = automation.serviceInfo.flags
+        var primaryFailure: Throwable? = null
         try {
             automation.serviceInfo = automation.serviceInfo.apply {
                 flags = flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
@@ -122,17 +123,22 @@ class QuestionnaireCompactUiTest {
                 assertEquals(false, saved?.videoRequested)
             }
         } catch (primary: Throwable) {
+            primaryFailure = primary
             UiStopTrace.primary("Compact.landscape", primary)
             throw primary
         } finally {
             UiStopTrace.beforeClose("Compact.landscape")
-            androidx.test.espresso.Espresso.closeSoftKeyboard()
-            automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
-            compose.activity.restoreTestOrientation(orientation)
-            if (wasPortrait) compose.waitUntil(10_000) {
-                val view = compose.activity.findViewById<View>(android.R.id.content)
-                view.height > view.width
-            }
+            restoreUiTestState(primaryFailure,
+                { androidx.test.espresso.Espresso.closeSoftKeyboard() },
+                { automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags } },
+                {
+                    compose.activity.restoreTestOrientation(orientation)
+                    if (wasPortrait) compose.waitUntil(10_000) {
+                        val view = compose.activity.findViewById<View>(android.R.id.content)
+                        view.height > view.width
+                    }
+                },
+            )
         }
     }
 
@@ -142,6 +148,7 @@ class QuestionnaireCompactUiTest {
         val wasLandscape = initial.width > initial.height
         val automation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation
         val originalFlags = automation.serviceInfo.flags
+        var primaryFailure: Throwable? = null
         try {
             automation.serviceInfo = automation.serviceInfo.apply {
                 flags = flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
@@ -167,17 +174,22 @@ class QuestionnaireCompactUiTest {
                 assertEquals(listOf("Аллюр/движение"), saved?.plannedActivities)
             }
         } catch (primary: Throwable) {
+            primaryFailure = primary
             UiStopTrace.primary("Compact.portrait", primary)
             throw primary
         } finally {
             UiStopTrace.beforeClose("Compact.portrait")
-            androidx.test.espresso.Espresso.closeSoftKeyboard()
-            automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
-            compose.activity.restoreTestOrientation(orientation)
-            if (wasLandscape) compose.waitUntil(10_000) {
-                val view = compose.activity.findViewById<View>(android.R.id.content)
-                view.width > view.height
-            }
+            restoreUiTestState(primaryFailure,
+                { androidx.test.espresso.Espresso.closeSoftKeyboard() },
+                { automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags } },
+                {
+                    compose.activity.restoreTestOrientation(orientation)
+                    if (wasLandscape) compose.waitUntil(10_000) {
+                        val view = compose.activity.findViewById<View>(android.R.id.content)
+                        view.width > view.height
+                    }
+                },
+            )
         }
     }
 }

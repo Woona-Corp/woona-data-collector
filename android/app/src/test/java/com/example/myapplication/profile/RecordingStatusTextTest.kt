@@ -55,8 +55,8 @@ class RecordingStatusTextTest {
         assertTrue(recordingCaptureText("failed", null, null, ru).contains("причина не сохранена"))
         assertFalse(recordingCaptureText("interrupted", null, null, en).contains("collar"))
         val text = recordingCaptureText("failed", "new_firmware_error", "Specific future error", en)
-        assertTrue(text.contains("new_firmware_error"))
-        assertTrue(text.contains("Specific future error"))
+        assertTrue(text.contains("unrecognized cause"))
+        assertFalse(text.contains("Specific future error"))
     }
 
     @Test fun captureCategoriesIdentifyTheFailingSubsystem() {
@@ -87,7 +87,7 @@ class RecordingStatusTextTest {
         val unknown = recordingUploadErrorText("Unexpected future failure", en)
         assertTrue(unknown.contains("outcome is not confirmed"))
         assertTrue(unknown.contains("complete archive"))
-        assertTrue(unknown.contains("Unexpected future failure"))
+        assertFalse(unknown.contains("Unexpected future failure"))
     }
     @Test fun httpErrorsExplainTheNextActionWithoutPromisingSuccessfulRetry() {
         assertTrue(recordingUploadErrorText("HTTP 403", en).contains("permission change"))

@@ -238,6 +238,10 @@ internal val questionnaireEnglishLabels: Map<String, String> = linkedMapOf(
     "Позже" to "Later",
     "Анкета" to "Questionnaire",
     "Анкета по сердцебиению" to "Heart questionnaire",
+    "Максимум 100 вариантов" to "Maximum 100 selections",
+    "Пульс: 20–300 уд/мин" to "Pulse: 20–300 bpm",
+    "Дыхание: 1–200 в минуту" to "Respiration: 1–200 per minute",
+    "Температура тела: 30–45 °C" to "Body temperature: 30–45 °C",
 )
 
 private val russianValidation: Map<String, String> = mapOf(

@@ -2,6 +2,7 @@ package com.example.myapplication.data
 
 import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
+import com.example.myapplication.sync.redactSyncDetails
 import java.io.File
 import java.time.Instant
 import java.security.MessageDigest
@@ -17,6 +18,40 @@ data class ProfileSyncRecord(
     val contentSha256: String,
     val clientCreatedAtUtc: String,
 )
+
+/** Durable state of one exact current immutable profile version. Missing historical
+ * attempt timestamps are deliberately null: creation/success time is not attempt time.
+ */
+data class ProfileSyncSnapshot(
+    val versionId: String,
+    val state: String,
+    val errorCode: String?,
+    val errorMessage: String?,
+    val attemptCount: Int,
+    val lastAttemptUtc: String?,
+    val confirmedAtUtc: String? = null,
+)
+
+/** Keyed by dog UUID; callers can verify versionId before displaying a snapshot. */
+fun WoonaDatabase.profileSyncSnapshots(): Map<String, ProfileSyncSnapshot> =
+    readableDatabase.rawQuery(
+        """SELECT v.dog_id,v.id,v.server_sync_state,v.last_error_code,v.last_error_message,v.sync_attempt_count,v.server_synced_at_utc
+           FROM dog_profile_versions v JOIN dogs d ON d.id=v.dog_id
+           WHERE v.superseded_at_utc IS NULL""",
+        null,
+    ).use { cursor ->
+        buildMap {
+            while (cursor.moveToNext()) put(cursor.getString(0), ProfileSyncSnapshot(
+                versionId = cursor.getString(1),
+                state = cursor.getString(2),
+                errorCode = cursor.getString(3),
+                errorMessage = cursor.getString(4),
+                attemptCount = cursor.getInt(5),
+                lastAttemptUtc = null,
+                confirmedAtUtc = cursor.getString(6),
+            ))
+        }
+    }
 
 data class RecordingSyncClock(
     val schemaVersion: Int,
@@ -160,7 +195,9 @@ fun WoonaDatabase.pendingProfileVersionIds(): List<String> =
     readableDatabase.query(
         "dog_profile_versions",
         arrayOf("id"),
-        "server_sync_state IN ('pending','retryable_error')",
+        // Older builds incorrectly made missing configuration permanent. Resume
+        // only that code; validation/HTTP 409 errors still require intervention.
+        "(server_sync_state IN ('pending','retryable_error') OR (server_sync_state='permanent_error' AND last_error_code='server_not_configured'))",
         null,
         null,
         null,
@@ -251,7 +288,7 @@ fun WoonaDatabase.markProfileSyncError(
         ContentValues().apply {
             put("server_sync_state", if (retryable) "retryable_error" else "permanent_error")
             put("last_error_code", code.take(100))
-            put("last_error_message", message.take(1000))
+            put("last_error_message", redactSyncDetails(message).take(1000))
         },
         "id=?",
         arrayOf(profileVersionId),
@@ -264,7 +301,7 @@ fun WoonaDatabase.pendingRecordingIds(): List<String> =
         SELECT r.id FROM recordings r
         JOIN server_sync_state s ON s.recording_id=r.id
         WHERE r.status IN ('completed','failed','interrupted')
-          AND s.state IN ('pending','retryable_error')
+          AND (s.state IN ('pending','retryable_error') OR (s.state='permanent_error' AND s.last_error_code='server_not_configured'))
           AND (r.remote_copy=0 OR s.server_receipt_sha256 IS NOT NULL)
           AND NOT EXISTS (
               SELECT 1 FROM artifacts a
@@ -664,7 +701,7 @@ fun WoonaDatabase.markRecordingSyncError(
         ContentValues().apply {
             put("state", if (retryable) "retryable_error" else "permanent_error")
             put("last_error_code", code.take(100))
-            put("last_error_message", message.take(1000))
+            put("last_error_message", redactSyncDetails(message).take(1000))
             put("updated_at_utc", Instant.now().toString())
         },
         "recording_id=?",

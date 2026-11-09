@@ -182,6 +182,10 @@ let englishQuestionnaireText: [String: String] = [
     "Выберите формат записи": "Choose a recording format",
     "Проверьте поверхности": "Check the selected surfaces",
     "Температура: −60…70 °C": "Temperature: −60…70 °C",
+    "Максимум 100 вариантов": "Maximum 100 selections",
+    "Пульс: 20–300 уд/мин": "Pulse: 20–300 bpm",
+    "Дыхание: 1–200 в минуту": "Respiration: 1–200 per minute",
+    "Температура тела: 30–45 °C": "Body temperature: 30–45 °C",
     "Продолжительность должна быть ≥0": "Duration must be ≥0",
     "Дата: ГГГГ-ММ-ДД": "Date: YYYY-MM-DD",
     "Время: ЧЧ:ММ": "Time: HH:MM",
@@ -252,6 +256,7 @@ let englishQuestionnaireText: [String: String] = [
 ]
 
 func questionnaireSaveError(_ error: Error, language: AppLanguage) -> String {
+    if let identity = error as? LocalAnimalIdentityError { return identity.message(language: language) }
     let prefix = language == .russian
         ? "Анкета не сохранена на устройстве. Черновик остаётся открытым; устраните причину и повторите сохранение."
         : "The questionnaire was not saved on this device. Your draft remains open; correct the cause and retry."
@@ -746,6 +751,9 @@ struct SessionQuestionnaireEditor: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(q("Отмена")) { dismiss() }.disabled(saveState.isSaving) }
                 ToolbarItem(placement: .confirmationAction) { Button(q(initial == nil ? "Продолжить" : "Сохранить")) {
+                    // Existing heart records can lack this hidden transport field.
+                    // Repair only on explicit Save, never when opening the editor.
+                    draft = draft.preparedForCommit()
                     errors = draft.validate().errors
                     if initial != nil && !draft.readyForSync { errors["heartQuestionnaire"] = "Заполните ответы по сердцебиению" }
                     guard errors.isEmpty else { return }
