@@ -112,6 +112,21 @@ def _u32_le(data: bytes, offset: int) -> int:
     return int.from_bytes(data[offset:offset + 4], "little", signed=False)
 
 
+def _unwrap_u32_near(value: int, reference: int | None) -> int:
+    """Extend a uint32 device timestamp near the latest observed time.
+
+    Packets from independent streams may be serialized out of timestamp order
+    by a few milliseconds. Choosing the nearest epoch handles those legitimate
+    regressions while still crossing a real uint32 rollover correctly.
+    """
+    if reference is None:
+        return value
+    modulus = 1 << 32
+    base = reference & ~(modulus - 1)
+    candidates = (base + value, base + value - modulus, base + value + modulus)
+    return min(candidates, key=lambda candidate: abs(candidate - reference))
+
+
 def _validate_packet(packet: bytes) -> tuple[int, int, dict[tuple[int, int], list[float]]]:
     if len(packet) < MIN_PACKET_SIZE:
         raise DecodeError("packet is shorter than the 16-byte header")
@@ -223,8 +238,7 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
     streams: set[tuple[int, int]] = set()
     gaps: list[dict] = []
     previous_counter: int | None = None
-    previous_raw_timer: int | None = None
-    timer_epoch = 0
+    timer_reference: int | None = None
     first_unwrapped_timer: int | None = None
     first_host_ns: int | None = None
 
@@ -241,14 +255,12 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
             ):
                 raise DecodeError("packet timeline does not match packets.bin")
 
-        if previous_raw_timer is not None and device_timer_ms < previous_raw_timer:
-            backwards = previous_raw_timer - device_timer_ms
-            if backwards > 0x8000_0000:
-                timer_epoch += 1 << 32
-            else:
-                raise DecodeError("device timer regressed without uint32 rollover")
-        previous_raw_timer = device_timer_ms
-        unwrapped_timer = timer_epoch + device_timer_ms
+        unwrapped_timer = _unwrap_u32_near(device_timer_ms, timer_reference)
+        timer_reference = (
+            unwrapped_timer
+            if timer_reference is None
+            else max(timer_reference, unwrapped_timer)
+        )
         if first_unwrapped_timer is None:
             first_unwrapped_timer = unwrapped_timer
 
