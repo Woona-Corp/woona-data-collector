@@ -35,7 +35,17 @@ SHARDS = (
 
 
 def call(args, **kwargs):
-    return subprocess.run(args, check=True, text=True, **kwargs)
+    # TEMPORARY diagnostic branch: command-boundary wall/monotonic timings.
+    started = time.monotonic()
+    wall = time.time()
+    try:
+        return subprocess.run(args, check=True, text=True, **kwargs)
+    finally:
+        ROOT.mkdir(parents=True, exist_ok=True)
+        with (ROOT / 'command-subtimings.jsonl').open('a') as stream:
+            stream.write(json.dumps({'command': args, 'wall_start': wall,
+                                    'wall_finish': time.time(),
+                                    'seconds': time.monotonic() - started}) + '\n')
 
 
 def output(args):
@@ -270,7 +280,13 @@ def main():
                 p.error('Invalid test selector')
             if a.sanitizer != 'none' and selector.startswith('WoonaUITests'):
                 p.error('Sanitizers require unit tests')
-            test('unit', [selector], a.sanitizer)
+            selectors = [selector]
+            if a.mode == 'diagnostic' and selector == 'WoonaUITests/OverviewParityTests':
+                selectors = ['WoonaUITests/OverviewParityTests/' + method for method in (
+                    'testAccountPrecedesDogsAndStaysOnOverview',
+                    'testEnglishLongDogFormPresentsTranslatedOptionsAndRetainsCanonicalAnswersAcrossLanguageChange',
+                    'testFiveTabsPreserveSelectionAndSeparateFunctions')]
+            test('unit', selectors, a.sanitizer)
             if a.mode != 'diagnostic':
                 call(['python3', 'ios/tools/check-recording-export.py', str(ROOT / 'unit-attachments')])
                 write(ROOT / 'export-proof.json', identity())

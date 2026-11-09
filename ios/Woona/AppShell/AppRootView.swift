@@ -14,6 +14,7 @@ struct AppRootView: View {
             ZStack {
                 TabView(selection: $appState.selectedTab) {
                     OverviewView(section: .animals)
+                        .onAppear { traceNavigation("destination.appear.animals") }
                         .toolbar(.hidden, for: .tabBar)
                         .tag(AppViewModel.AppTab.overview)
                     Group {
@@ -21,15 +22,19 @@ struct AppRootView: View {
                         else { OverviewView(section: .session) }
                     }
                     .toolbar(.hidden, for: .tabBar)
+                    .onAppear { traceNavigation("destination.appear.session") }
                     .tag(AppViewModel.AppTab.session)
                     OverviewView(section: .video)
+                        .onAppear { traceNavigation("destination.appear.video") }
                         .toolbar(.hidden, for: .tabBar)
                         .tag(AppViewModel.AppTab.video)
                     OverviewView(section: .recordings)
+                        .onAppear { traceNavigation("destination.appear.recordings") }
                         .toolbar(.hidden, for: .tabBar)
                         .tag(AppViewModel.AppTab.recordings)
 
                     SettingsView()
+                        .onAppear { traceNavigation("destination.appear.settings") }
                         .tabItem {
                             Label(appState.text(.settings), systemImage: "gearshape")
                         }
@@ -78,6 +83,17 @@ struct AppRootView: View {
             .fixedSize(horizontal: false, vertical: true)
             .background(Color.woonaSurface)
         }
+        .onChange(of: appState.selectedTab) { old, new in
+            traceNavigation("selection.observed.\(old)->\(new)")
+        }
+        .task { @MainActor in
+            guard ProcessInfo.processInfo.arguments.contains("--ui-testing") else { return }
+            while !Task.isCancelled {
+                traceNavigation("heartbeat")
+                do { try await Task.sleep(for: .seconds(1)) }
+                catch { return }
+            }
+        }
         .tint(usesDarkPalette ? WoonaPalette.color(0x7ACCC5) : WoonaPalette.color(0x146B74))
         .preferredColorScheme(preferredColorScheme)
         .task(id: "\(appState.selectedTab)-\(appState.sessionExportAvailabilityRevision)") {
@@ -112,7 +128,12 @@ struct AppRootView: View {
 
     private func navigationItem(_ tab: AppViewModel.AppTab, title: String, symbol: String) -> some View {
         let selected = appState.selectedTab == tab
-        return Button { appState.selectedTab = tab } label: {
+        return Button {
+            traceNavigation("action.entry.target=\(tab)")
+            traceNavigation("selection.before.target=\(tab)")
+            appState.selectedTab = tab
+            traceNavigation("selection.after.target=\(tab)")
+        } label: {
             VStack(spacing: 6) {
                 Image(systemName: symbol).font(.system(size: 20))
                 Text(title).font(.system(size: 10, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
@@ -127,6 +148,14 @@ struct AppRootView: View {
         .accessibilityLabel(title)
         .accessibilityIdentifier("tab.\(tab)")
         .accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+
+    // TEMPORARY DIAGNOSTIC BRANCH ONLY; never merge into the application.
+    private func traceNavigation(_ event: String) {
+        guard ProcessInfo.processInfo.arguments.contains("--ui-testing") else { return }
+        NSLog("WOONA_CI_NAV wall=%.6f uptime=%.6f event=%@ selected=%@ main=%@",
+              Date().timeIntervalSince1970, ProcessInfo.processInfo.systemUptime,
+              event, String(describing: appState.selectedTab), String(Thread.isMainThread))
     }
 
     private var usesDarkPalette: Bool {

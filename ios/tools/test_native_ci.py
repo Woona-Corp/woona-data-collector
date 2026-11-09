@@ -151,6 +151,17 @@ class NativeCITests(unittest.TestCase):
                     ci.main()
                 call.assert_not_called()
 
+    def test_temporary_class_diagnostic_uses_exact_three_original_methods(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(ci, 'ROOT', Path(directory)), patch.object(ci, 'test') as test, \
+                    patch('sys.argv', ['native_ci.py', 'unit', '--mode', 'diagnostic',
+                                       '--test-filter', 'WoonaUITests/OverviewParityTests']):
+                ci.main()
+            test.assert_called_once_with('unit', ['WoonaUITests/OverviewParityTests/' + method for method in (
+                'testAccountPrecedesDogsAndStaysOnOverview',
+                'testEnglishLongDogFormPresentsTranslatedOptionsAndRetainsCanonicalAnswersAcrossLanguageChange',
+                'testFiveTabsPreserveSelectionAndSeparateFunctions')], 'none')
+
     def test_tree_digest_detects_contents_and_symlink_target_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

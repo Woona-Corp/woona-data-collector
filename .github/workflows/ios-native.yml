@@ -77,7 +77,62 @@ jobs:
           MODE: ${{ inputs.mode }}
           FILTER: ${{ inputs.test-filter }}
           SANITIZER: ${{ inputs.sanitizer }}
-        run: python3 ios/tools/native_ci.py unit --mode "$MODE" --test-filter "$FILTER" --sanitizer "$SANITIZER"
+        run: |
+          # TEMPORARY diagnostic branch only. No retries or verdict substitution.
+          root="$RUNNER_TEMP/woona-native-ci"
+          simulator="$(cat "$root/simulator")"
+          xcrun simctl spawn "$simulator" log stream --level debug --style compact \
+            --predicate 'eventMessage CONTAINS "WOONA_CI_NAV"' > "$root/nav-unified-live.log" 2>&1 &
+          log_pid=$!
+          (
+            # At most one 3-second sample, only after a heartbeat has been observed
+            # and the stream has then gone quiet for >5 seconds while Woona lives.
+            for attempt in $(seq 1 1200); do
+              if grep -q 'event=heartbeat' "$root/nav-unified-live.log"; then
+                modified=$(stat -f %m "$root/nav-unified-live.log")
+                now=$(date +%s)
+                if (( now - modified > 5 )); then
+                  app_pid=$(pgrep -f '/Woona[.]app/Woona' | head -1 || true)
+                  if [[ -n "$app_pid" ]]; then
+                    python3 - "$app_pid" "$root/nav-main-thread-sample.txt" <<'PY'
+          import subprocess, sys
+          try:
+              subprocess.run(['/usr/bin/sample', sys.argv[1], '3', '-file', sys.argv[2]], check=True, timeout=15)
+          except (subprocess.SubprocessError, OSError) as error:
+              print('WOONA_CI_NAV sample unavailable:', type(error).__name__, flush=True)
+          PY
+                    break
+                  fi
+                fi
+              fi
+              sleep 1
+            done
+          ) > "$root/nav-sample-monitor.log" 2>&1 &
+          sample_pid=$!
+          set +e
+          python3 ios/tools/native_ci.py unit --mode "$MODE" --test-filter "$FILTER" --sanitizer "$SANITIZER"
+          test_status=$?
+          kill "$sample_pid" "$log_pid" 2>/dev/null
+          wait "$sample_pid" "$log_pid" 2>/dev/null
+          set -e
+          exit "$test_status"
+      - name: Always collect filtered navigation simulator logs (diagnostic only)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'woona-native-ci'
+          if (root / 'simulator').exists():
+              with (root / 'nav-unified-final.log').open('w') as stream:
+                  try:
+                      subprocess.run(['xcrun', 'simctl', 'spawn', (root / 'simulator').read_text(),
+                                      'log', 'show', '--last', '30m', '--style', 'compact',
+                                      '--predicate', 'eventMessage CONTAINS "WOONA_CI_NAV"'],
+                                     stdout=stream, stderr=subprocess.STDOUT, timeout=60, check=True)
+                  except (subprocess.SubprocessError, OSError) as error:
+                      stream.write('WOONA_CI_NAV log collection unavailable: ' + type(error).__name__ + '\n')
+          PY
       - name: Retain complete result bundle with symlinks
         if: always()
         run: |
@@ -89,6 +144,9 @@ jobs:
           name: ios-native-unit-evidence
           path: |
             ${{ runner.temp }}/woona-native-ci/*.json
+            ${{ runner.temp }}/woona-native-ci/*.jsonl
+            ${{ runner.temp }}/woona-native-ci/nav-*.log
+            ${{ runner.temp }}/woona-native-ci/nav-*.txt
             ${{ runner.temp }}/woona-native-ci/*-xcresult.tar
             ${{ runner.temp }}/woona-native-ci/unit-attachments/
           retention-days: ${{ job.status == 'success' && 7 || 14 }}

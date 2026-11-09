@@ -458,11 +458,20 @@ final class OverviewParityTests: XCTestCase {
     }
 
     func testFiveTabsPreserveSelectionAndSeparateFunctions() {
+        // TEMPORARY DIAGNOSTIC BRANCH ONLY: keep original assertions and one tap.
+        defer {
+            if (testRun?.failureCount ?? 0) > 0 {
+                attachScreen("FiveTabs-failure-full-device", fullDevice: true)
+                attachNavigationTrace("FiveTabs-failure-hierarchy")
+            }
+        }
         let tabs = ["overview", "session", "video", "recordings", "settings"]
         for tab in tabs { XCTAssertTrue(app.buttons["tab." + tab].exists) }
         XCTAssertFalse(app.navigationBars.buttons["Export"].exists)
         attachScreen("Animals-EnglishLight")
+        attachNavigationTrace("FiveTabs-before-video-tap")
         app.buttons["tab.video"].tap()
+        attachNavigationTrace("FiveTabs-after-video-tap")
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "No active video")).firstMatch.exists)
         XCTAssertFalse(app.textFields["account.input"].exists)
         XCTAssertFalse(app.navigationBars.buttons["Export"].exists)
@@ -542,6 +551,22 @@ final class OverviewParityTests: XCTestCase {
         hierarchy.lifetime = .keepAlways
         add(hierarchy)
         return false
+    }
+
+    private func attachNavigationTrace(_ name: String) {
+        var lines = ["WOONA_CI_NAV wall=\(Date().timeIntervalSince1970) uptime=\(ProcessInfo.processInfo.systemUptime) phase=\(name)"]
+        print(lines[0])
+        for tab in ["overview", "session", "video", "recordings", "settings"] {
+            let button = app.buttons["tab." + tab]
+            lines.append("tab=\(tab) exists=\(button.exists) selected=\(button.isSelected) enabled=\(button.isEnabled) hittable=\(button.isHittable) frame=\(button.frame)")
+        }
+        print("WOONA_CI_NAV wall=\(Date().timeIntervalSince1970) phase=\(name) fields.completed")
+        lines.append(app.debugDescription)
+        print("WOONA_CI_NAV wall=\(Date().timeIntervalSince1970) phase=\(name) hierarchy.completed")
+        let attachment = XCTAttachment(string: lines.joined(separator: "\n"))
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func attachScreen(_ name: String, fullDevice: Bool = false) {
