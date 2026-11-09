@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+from functools import lru_cache
+import json
+import os
+from pathlib import Path
+import stat
+import uuid
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse
+from sqlalchemy import create_engine, text
+from starlette.concurrency import run_in_threadpool
+
+from viewer.decoder import DecodeError, RecordingIndex, build_index, query_signals, stream_label
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg://woona:woona-local-only@127.0.0.1:5432/woona",
+)
+STORAGE_ROOT = Path(os.getenv("WOONA_STORAGE_ROOT", "../var/storage")).resolve()
+ENVIRONMENT = os.getenv("WOONA_ENVIRONMENT", "development").lower()
+LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL", "")
+LABEL_STUDIO_HOST_HEADER = os.getenv("LABEL_STUDIO_HOST_HEADER", "cool-trams.digital")
+STATIC_ROOT = Path(__file__).resolve().parent
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+app = FastAPI(title="Woona Signal Viewer", version="0.1.0")
+
+
+def require_viewer_user(request: Request) -> None:
+    if not LABEL_STUDIO_URL:
+        if ENVIRONMENT != "production":
+            return
+        raise HTTPException(503, "Viewer authentication is not configured")
+
+    cookie = request.headers.get("cookie", "")
+    if not cookie:
+        raise HTTPException(401, "Sign in to Label Studio first")
+    try:
+        check = UrlRequest(
+            LABEL_STUDIO_URL.rstrip("/") + "/api/current-user/whoami",
+            headers={"Cookie": cookie, "Host": LABEL_STUDIO_HOST_HEADER},
+        )
+        with urlopen(check, timeout=5) as response:
+            user = json.load(response)
+    except HTTPError as error:
+        raise HTTPException(
+            401 if error.code in (401, 403) else 503,
+            "Label Studio authentication failed",
+        ) from error
+    except (URLError, ValueError, TimeoutError) as error:
+        raise HTTPException(503, "Label Studio authentication unavailable") from error
+
+    if "projects.view" not in user.get("permissions", []):
+        raise HTTPException(403, "Project access required")
+
+
+def _readonly_rows(query: str, parameters: dict | None = None):
+    with engine.begin() as connection:
+        connection.execute(text("SET TRANSACTION READ ONLY"))
+        return connection.execute(text(query), parameters or {}).mappings().all()
+
+
+def _safe_artifact_path(relative: str | None) -> Path | None:
+    if not relative:
+        return None
+    candidate = (STORAGE_ROOT / relative).resolve()
+    if candidate == STORAGE_ROOT or STORAGE_ROOT not in candidate.parents:
+        raise HTTPException(409, "Artifact path escapes storage root")
+    try:
+        info = candidate.stat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return candidate
+
+
+def _artifact_paths(recording_id: uuid.UUID) -> tuple[Path, Path | None]:
+    rows = _readonly_rows(
+        """
+        SELECT artifact_type, server_relative_path, storage_status
+        FROM artifacts
+        WHERE recording_id=:id
+          AND artifact_type IN ('packet','packet_timeline')
+        ORDER BY artifact_type
+        """,
+        {"id": recording_id},
+    )
+    by_type = {
+        row["artifact_type"]: _safe_artifact_path(row["server_relative_path"])
+        for row in rows
+        if row["storage_status"] == "available"
+    }
+    packet = by_type.get("packet")
+    if packet is None:
+        raise HTTPException(404, "Verified packet artifact is not available")
+    return packet, by_type.get("packet_timeline")
+
+
+@lru_cache(maxsize=24)
+def _cached_index(
+    packet_name: str,
+    packet_size: int,
+    packet_mtime_ns: int,
+    timeline_name: str | None,
+    timeline_size: int | None,
+    timeline_mtime_ns: int | None,
+) -> RecordingIndex:
+    del packet_size, packet_mtime_ns, timeline_size, timeline_mtime_ns
+    return build_index(
+        Path(packet_name),
+        Path(timeline_name) if timeline_name else None,
+    )
+
+
+def _index_for(recording_id: uuid.UUID) -> RecordingIndex:
+    packet, timeline = _artifact_paths(recording_id)
+    packet_stat = packet.stat()
+    timeline_stat = timeline.stat() if timeline else None
+    return _cached_index(
+        str(packet),
+        packet_stat.st_size,
+        packet_stat.st_mtime_ns,
+        str(timeline) if timeline else None,
+        timeline_stat.st_size if timeline_stat else None,
+        timeline_stat.st_mtime_ns if timeline_stat else None,
+    )
+
+
+def _parse_streams(value: str | None) -> set[tuple[int, int]] | None:
+    if value is None or not value.strip():
+        return None
+    result: set[tuple[int, int]] = set()
+    for item in value.split(","):
+        parts = item.strip().split(":")
+        if len(parts) != 2:
+            raise HTTPException(422, f"Invalid stream key: {item}")
+        try:
+            sensor_type, channel = int(parts[0]), int(parts[1])
+        except ValueError as error:
+            raise HTTPException(422, f"Invalid stream key: {item}") from error
+        if not 0 <= sensor_type <= 255 or not 1 <= channel <= 255:
+            raise HTTPException(422, f"Invalid stream key: {item}")
+        result.add((sensor_type, channel))
+    return result
+
+
+@app.exception_handler(DecodeError)
+async def decode_error(_: Request, exception: DecodeError) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"code": "recording_data_invalid", "detail": str(exception)},
+    )
+
+
+@app.get("/health/ready")
+def health_ready():
+    return {"status": "ok"}
+
+
+@app.get("/", dependencies=[Depends(require_viewer_user)])
+def viewer_page():
+    return FileResponse(STATIC_ROOT / "index.html", media_type="text/html")
+
+
+@app.get("/viewer.css")
+def viewer_css():
+    return FileResponse(STATIC_ROOT / "viewer.css", media_type="text/css")
+
+
+@app.get("/viewer.js")
+def viewer_js():
+    return FileResponse(STATIC_ROOT / "viewer.js", media_type="text/javascript")
+
+
+@app.get("/api/recordings", dependencies=[Depends(require_viewer_user)])
+def recordings(limit: int = Query(default=250, ge=1, le=1000)):
+    rows = _readonly_rows(
+        """
+        SELECT r.id, r.started_at, r.capture_status, r.ingest_status,
+               d.number_or_name AS dog,
+               bool_or(a.artifact_type='packet' AND a.storage_status='available') AS has_packets,
+               bool_or(a.artifact_type='packet_timeline' AND a.storage_status='available') AS has_timeline,
+               bool_or(a.artifact_type='video' AND a.storage_status='available') AS has_video
+        FROM recordings r
+        JOIN dogs d ON d.id=r.dog_id
+        LEFT JOIN artifacts a ON a.recording_id=r.id
+        GROUP BY r.id, r.started_at, r.capture_status, r.ingest_status, d.number_or_name
+        HAVING bool_or(a.artifact_type='packet' AND a.storage_status='available')
+        ORDER BY r.started_at DESC
+        LIMIT :limit
+        """,
+        {"limit": limit},
+    )
+    return {
+        "recordings": [
+            {
+                "id": str(row["id"]),
+                "dog": row["dog"],
+                "startedAtUtc": row["started_at"].isoformat(),
+                "captureStatus": row["capture_status"],
+                "ingestStatus": row["ingest_status"],
+                "hasTimeline": bool(row["has_timeline"]),
+                "hasVideo": bool(row["has_video"]),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.get("/api/recordings/{recording_id}/meta", dependencies=[Depends(require_viewer_user)])
+async def recording_meta(recording_id: uuid.UUID):
+    index = await run_in_threadpool(_index_for, recording_id)
+    rows = _readonly_rows(
+        """
+        SELECT r.started_at, r.capture_status, r.ingest_status, d.number_or_name AS dog
+        FROM recordings r
+        JOIN dogs d ON d.id=r.dog_id
+        WHERE r.id=:id
+        """,
+        {"id": recording_id},
+    )
+    if not rows:
+        raise HTTPException(404, "Recording not found")
+    row = rows[0]
+    return {
+        "id": str(recording_id),
+        "dog": row["dog"],
+        "startedAtUtc": row["started_at"].isoformat(),
+        "captureStatus": row["capture_status"],
+        "ingestStatus": row["ingest_status"],
+        "durationMs": index.duration_ms,
+        "timeBase": index.time_base,
+        "packetCount": len(index.entries),
+        "gapCount": len(index.gaps),
+        "streams": [
+            {
+                "key": f"{sensor_type}:{channel}",
+                "sensorType": sensor_type,
+                "channel": channel,
+                "label": stream_label(sensor_type, channel),
+            }
+            for sensor_type, channel in index.streams
+        ],
+    }
+
+
+@app.get("/api/recordings/{recording_id}/signals", dependencies=[Depends(require_viewer_user)])
+async def signals(
+    recording_id: uuid.UUID,
+    from_ms: float = Query(default=0.0, ge=0.0),
+    to_ms: float | None = Query(default=None, ge=0.0),
+    streams: str | None = Query(default=None),
+    max_points: int = Query(default=3000, ge=200, le=10_000),
+):
+    selected = _parse_streams(streams)
+    index = await run_in_threadpool(_index_for, recording_id)
+    end_ms = index.duration_ms if to_ms is None else min(to_ms, index.duration_ms)
+    if end_ms < from_ms:
+        raise HTTPException(422, "to_ms must be greater than from_ms")
+    return await run_in_threadpool(
+        query_signals,
+        index,
+        start_ms=from_ms,
+        end_ms=end_ms,
+        selected_streams=selected,
+        max_points=max_points,
+    )
