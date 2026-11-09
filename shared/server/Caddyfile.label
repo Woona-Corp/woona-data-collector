@@ -17,6 +17,10 @@ cool-trams.digital {
 	handle @dashboard {
 		reverse_proxy api:8080
 	}
+	redir /viewer /viewer/ 308
+	handle_path /viewer/* {
+		reverse_proxy viewer:8090
+	}
 	handle {
 		reverse_proxy label_studio:8080
 	}
