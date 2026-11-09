@@ -14,7 +14,15 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from sqlalchemy import create_engine, text
 from starlette.concurrency import run_in_threadpool
 
-from viewer.decoder import DecodeError, RecordingIndex, build_index, query_signals, stream_label
+from viewer.decoder import (
+    DecodeError,
+    RecordingIndex,
+    build_index,
+    query_signals,
+    stream_label,
+    stream_sample_rate_hz,
+    stream_unit,
+)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -271,6 +279,8 @@ async def recording_meta(recording_id: uuid.UUID):
                 "sensorType": sensor_type,
                 "channel": channel,
                 "label": stream_label(sensor_type, channel),
+                "sampleRateHz": stream_sample_rate_hz(sensor_type),
+                "unit": stream_unit(sensor_type),
             }
             for sensor_type, channel in index.streams
         ],
