@@ -15,7 +15,7 @@ def sensor_block(sensor_type: int, channels: list[list[int]]) -> bytes:
         if len(channel) != samples:
             raise ValueError("channels must have equal sample counts")
         for value in channel:
-            payload += int(value).to_bytes(2, "little", signed=True)
+            payload += int(value).to_bytes(2, "little", signed=(sensor_type != 6))
     return bytes(payload)
 
 
@@ -75,6 +75,25 @@ class DecoderTests(unittest.TestCase):
             self.assertEqual(result["signals"][0]["points"], [
                 [0.0, 10.0], [0.125, 20.0], [0.25, 30.0], [0.375, 40.0],
             ])
+
+    def test_piezo_is_unsigned_and_temperature_is_celsius(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            p1 = packet(1, 0, [
+                sensor_block(6, [[0, 65535]]),
+                sensor_block(7, [[2525]]),
+            ])
+            (root / "packets.bin").write_bytes(p1)
+            index = build_index(root / "packets.bin")
+            result = query_signals(
+                index, start_ms=0, end_ms=index.duration_ms,
+                selected_streams={(6, 1), (7, 1)}, max_points=100,
+            )
+            by_key = {signal["key"]: signal for signal in result["signals"]}
+            self.assertEqual(by_key["6:1"]["points"], [[0.0, 0.0], [1.0, 65535.0]])
+            self.assertEqual(by_key["6:1"]["unit"], "raw U16")
+            self.assertEqual(by_key["7:1"]["points"], [[0.0, 25.25]])
+            self.assertEqual(by_key["7:1"]["unit"], "°C")
 
     def test_counter_gap_is_reported(self):
         with tempfile.TemporaryDirectory() as directory:
