@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 
 ALL = frozenset(("android", "ios", "server"))
@@ -19,33 +20,78 @@ ZIP64_PATHS = ("ios/Woona/Storage/", "ios/Woona/Data/",
                "ios/Woona.xcodeproj/")
 
 
-def decision(event_name, ref, paths=None, scope="all"):
-    """paths=None means unavailable diff, not no changes. Manual scopes stay explicit."""
+# Reviewed non-executable narrative only. New Markdown is NOT automatically safe.
+DOCS_ONLY = frozenset((
+    "README.md", "RELEASE_NOTES.md", "ios/README.md",
+    "android/docs/PHONE_CHECKS.md", "android/docs/QA_COMPLETION_2026-10-29.md",
+    "ios/QA-EVIDENCE-2026-10-29.md", "shared/docs/qa-identity-sync-20261107.md",
+    "shared/docs/target-server-plan/acceptance-report.md",
+))
+ANDROID_FAST_PATHS = (
+    "android/app/src/main/java/com/example/myapplication/protocol/",
+    "android/app/src/test/java/com/example/myapplication/protocol/",
+)
+
+
+def decision(event_name, ref, paths=None, scope="all", *, instrumentation=False,
+             action="", main_units_enabled=False, test_filter="", sanitizer="none"):
+    """Compute modes once; callers must consume these outputs, not re-derive them."""
+    main = event_name == "push" and ref == "refs/heads/main"
+    ios_mode = "unit" if main and main_units_enabled is True else "full"
+    release = event_name == "push" and ref.startswith("refs/tags/android-v")
+    if event_name == "pull_request" and action == "closed":
+        return result((), False, "closed PR: cancel stale work", False, False, "full")
     if event_name == "workflow_dispatch":
         jobs = ALL if scope not in ALL else frozenset((scope,))
-        return result(jobs, True, "manual scope; full ZIP64")
+        return result(jobs, True, "manual debug diagnostics; full ZIP64",
+                      instrumentation is True, False,
+                      "diagnostic" if test_filter or sanitizer not in ("", "none") else "full")
     if ref.startswith("refs/tags/"):
-        # mobile.yml has always left iOS distribution to testflight.yml.
-        jobs = frozenset(("android", "server")) if ref.startswith("refs/tags/android-v") else ALL
-        return result(jobs, True, "release tag")
+        jobs = frozenset(("android", "server")) if release else ALL
+        return result(jobs, True, "release tag", True, release, "full")
     if event_name not in ("push", "pull_request") or not paths:
-        return result(ALL, True, "unavailable/empty diff or unsupported event")
+        return result(ALL, True, "unavailable/empty diff or unsupported event", not main, False, ios_mode)
     jobs = set()
     large = False
+    full = False
     for path in paths:
-        if (not path or path.startswith("/") or ".." in path.split("/")
-                or "\\" in path):
-            return result(ALL, True, "unrecognized path")
+        if (not isinstance(path, str) or not path or path.startswith("/")
+                or any(part in ("", ".", "..") for part in path.split("/"))
+                or "\\" in path or any(ord(char) < 32 for char in path)):
+            return result(ALL, True, "unrecognized path", not main, False, ios_mode)
+        if path in DOCS_ONLY:
+            continue
         matched = next((owners for prefix, owners in PATH_JOBS if path.startswith(prefix)), None)
         if matched is None:
-            return result(ALL, True, "shared dependency or unrecognized path")
+            return result(ALL, True, "shared dependency or unrecognized path", not main, False, ios_mode)
         jobs.update(matched)
         large |= path.startswith(ZIP64_PATHS)
-    return result(jobs, large, "changed-path ownership")
+        full |= path.startswith("android/") and not path.startswith(ANDROID_FAST_PATHS)
+    return result(jobs, large, "changed-path ownership", full and event_name == "pull_request", False, ios_mode)
 
 
-def result(jobs, large, reason):
-    return {**{job: job in jobs for job in sorted(ALL)}, "zip64_large": large, "reason": reason}
+def required_gate(needs):
+    """Selected skipped/cancelled/missing results are failures, never green skips."""
+    changes = needs.get("changes", {})
+    if changes.get("result") != "success":
+        return False
+    outputs = changes.get("outputs", {})
+    for job in sorted(ALL):
+        selected = outputs.get(job)
+        if selected not in ("true", "false"):
+            return False
+        status = needs.get(job, {}).get("result")
+        if status != ("success" if selected == "true" else "skipped"):
+            return False
+    release = outputs.get("android_release")
+    return (release in ("true", "false") and
+            needs.get("release", {}).get("result") == ("success" if release == "true" else "skipped"))
+
+
+def result(jobs, large, reason, full=True, release=False, ios_mode="full"):
+    return {**{job: job in jobs for job in sorted(ALL)}, "zip64_large": large,
+            "android_full": full, "android_mode": "full" if full else "fast",
+            "android_release": release, "ios_mode": ios_mode, "reason": reason}
 
 
 def git(*args):
@@ -105,21 +151,30 @@ def main():
     except (KeyError, OSError, ValueError):
         event = {}
     paths = None
-    if event_name != "workflow_dispatch" and not ref.startswith("refs/tags/"):
+    if (event_name != "workflow_dispatch" and not ref.startswith("refs/tags/")
+            and not (event_name == "pull_request" and event.get("action") == "closed")):
         paths = changed_paths(event_name, event)
     inputs = event.get("inputs")
     scope = inputs.get("scope", "all") if isinstance(inputs, dict) else "all"
-    selection = decision(event_name, ref, paths, scope)
+    selection = decision(event_name, ref, paths, scope,
+                         instrumentation=isinstance(inputs, dict) and inputs.get("android_instrumentation") in (True, "true"),
+                         action=event.get("action", ""),
+                         main_units_enabled=os.environ.get("CI_MAIN_UNITS_ENABLED") == "true",
+                         test_filter=inputs.get("ios_test_filter", "") if isinstance(inputs, dict) else "",
+                         sanitizer=inputs.get("sanitizer", "none") if isinstance(inputs, dict) else "none")
     print(json.dumps({"selection": selection, "changed_paths": paths}, sort_keys=True))
     if output := os.environ.get("GITHUB_OUTPUT"):
         with open(output, "a") as stream:
             for key, value in selection.items():
-                if isinstance(value, bool):
-                    stream.write(f"{key}={str(value).lower()}\n")
+                if key != "reason":
+                    stream.write(f"{key}={str(value).lower() if isinstance(value, bool) else value}\n")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as stream:
             stream.write("### CI selection\n\n```json\n" + json.dumps(selection, indent=2) + "\n```\n")
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--required-gate"]:
+        sys.exit(0 if required_gate(json.loads(os.environ["CI_NEEDS"])) else 1)
+    else:
+        main()

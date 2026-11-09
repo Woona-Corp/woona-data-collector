@@ -1,109 +1,108 @@
-# Mobile CI selection policy
+# Mobile CI selection and required gate
 
-`mobile.yml` runs the stdlib tests and selector in `changes`, then retains the
-existing `android`, `ios`, `server` and `release` job names. No workflow-level path
-filter hides required checks. Selection is a union of these ownership boundaries:
+`mobile.yml` always runs the Linux `changes` policy/documentation gate and the
+stable `ci-required` aggregate. There is no workflow-level path filter. Configure
+main protection to require `ci-required`, up-to-date PRs and no runtime direct-push
+or bypass before setting repository variable `CI_MAIN_UNITS_ENABLED=true`.
+This change does not itself configure GitHub branch protection.
 
-| Changed path | Checks | >4 GiB ZIP64 fixture if iOS runs |
-| --- | --- | --- |
-| `android/**` | Android | Not applicable |
-| `ios/**` | iOS | Ordinary CI explicitly omits it, except rows below |
-| `ios/Woona/{Storage,Data}/**` | iOS | Full |
-| `ios/WoonaTests/StorageTests/**`, `ios/tools/**`, `ios/Woona.xcodeproj/**` | iOS | Full |
-| `shared/server/**` | Server | Not applicable |
-| Other shared paths, contracts, testdata, test-fixtures, workflows, selector, unknown paths | All | Full |
-| Missing/failed/empty diff | All | Full |
+## Reviewed paths, not a Markdown wildcard
 
-PRs compare **merge-base(base SHA, head SHA)..head SHA**, not the synthetic merge
-commit and not base-tip..head. Pushes compare the event's exact **before..after**
-SHAs (including multi-commit pushes and force pushes). Renames are diffed without
-rename detection so both deletion and addition participate in selection. Paths
-are NUL-delimited. A bounded `git fetch --no-tags --depth=256` of just the two event
-SHAs suffices for typical PRs; missing/deleted SHAs, distant merge bases, malformed
-events and fetch/diff errors select all. There is no full-history clone or GitHub
-files-API pagination/truncation assumption. Selector decisions appear in job logs
-and the GitHub step summary.
+`select_checks.py::DOCS_ONLY` is the exact reviewed narrative allowlist: root
+README/release notes, iOS README, the named Android/iOS QA evidence and shared QA
+and historical acceptance report. A new Markdown path is **not** automatically
+safe. Shared UI/UX, API/data contracts, fixtures, models, workflows, selector,
+unknown or malformed paths and unavailable/empty diffs select all platforms and
+the full ZIP64 fixture. Android and iOS directories select their owner;
+`shared/server/` selects server. Multiple paths form a union. Storage/Data,
+storage tests, iOS tools and Xcode project inputs require full ZIP64.
 
-Manual mobile scopes remain explicit (`all`, `android`, `ios`, `server`) with full
-ZIP64 whenever iOS is selected; diagnostic XCTest filters/sanitizers remain
-available. Android tags always run Android + server before publishing, without
-adding iOS as a new Android release dependency. TestFlight tags **and manual
-archive/export/upload runs** always run independent archive tests with the large
-fixture, plus the existing simulator suite and export attachment verification.
-Nothing here changes release signing, versions, upload logic or permissions.
+PR diffs use merge-base(base SHA, head SHA)..head SHA. Main uses exact event
+before..after. A bounded fetch of the two SHAs has depth 256; distant/missing
+merge bases, deleted SHAs, invalid event/diff or fetch failures fail closed.
+NUL-delimited `--no-renames` exposes both deleted and added rename paths.
+Private fetch uses only a temporary GitHub-host-scoped token header in the fetch
+child environment, never argv, URLs, repository config or artifacts.
 
-## Large fixture gate, not an XCTest exclusion
+## One mode per platform
 
-`ios/tools/test_complete_archive.py` now runs the large streaming fixture by
-**default**, including direct developer/full runs. Only the exact explicit value
-`WOONA_SKIP_ZIP64_LARGE=1` skips that single test. Ordinary, non-storage iOS CI opts
-in to that omission through the selector output. Other compatibility, >65,535
-entries, CRC, cancellation, mutation, SQLite and insufficient-space assertions
-are unchanged. Sanitizers do not instrument the independently compiled Swift
-helper, so manual sanitizer runs also retain that independent coverage.
+- Android PR: full for runtime/UI/data/storage/BLE/video/sync/preferences,
+  resources, manifests, instrumentation and build inputs. Only the explicitly
+  listed pure protocol source/JVM test paths are fast. Main is fast; Android
+  release **push** is full. Manual `android_instrumentation` selects fast/full
+  debug diagnostics, even when the selected ref is a release tag.
+- iOS PR is `full`. Main remains `full` unless the exact repository variable
+  above is `true`, then `unit` (build + units, not UI acceptance). Manual filters
+  or sanitizers are `diagnostic`; unfiltered manual runs are `full`.
+- Tag/manual and shared-contract changes require the full independent ZIP64
+  fixture. Ordinary non-storage iOS changes may explicitly omit only the >4 GiB
+  fixture. The other ZIP/SQLite assertions and native test targets remain intact.
 
-The large fixture is Python-driven, not a simulator test. The `Woona` scheme
-includes **both WoonaTests and WoonaUITests**. No `-skip-testing` is added: skipping
-a target/class to avoid this fixture would not work and would lose unrelated
-storage/UI coverage. Existing focused `-only-testing` diagnostic behavior is
-unchanged. Runtime Swift and the Xcode scheme are untouched.
+The selector emits `android_full`, `android_mode`, `android_release`, `ios_mode`
+and `zip64_large` once. Android SDK/KVM/health/check steps consume that same
+`android_full`. The existing single batched debug Gradle invocation is unchanged.
+The iOS caller delegates to canonical `ios-native.yml` using `mode`,
+`zip64-large`, `test-filter` and `sanitizer`; simulator logic is not duplicated.
 
-No cancellation policy was added. TestFlight retains its existing serialized
-`testflight-main` group with `cancel-in-progress: false`; tag/manual uploads must
-never be superseded by an ordinary PR. Scheduling/queued-run behavior is otherwise
-unchanged.
+## Android test identity proof
 
-## Fixed action inputs and release cache isolation
+One stdlib verifier, `.github/ci/android_test_manifest.py`, runs after debug checks
+and before signing secrets. It requires non-empty JVM XML and, in full mode,
+API31 managed-device XML. It rejects malformed XML, contradictory counters,
+missing identities, duplicates, failures/errors, all JVM skips and unexpected
+instrumentation skips. Only the eight named opt-in identities reviewed in exact
+run 42609790701 XML are allowed to skip; the allowlist is not a numerical skip
+budget. Passing those opt-in cases is permitted. Fast runs reject stale full-mode
+reports. No fixed suite count or CLI progress counter is treated as inventory.
 
-The two modified build/distribution workflows pin each existing action version to
-its resolved full GitHub commit (read-only upstream ref inspection, 2026-10-30),
-without a major-version upgrade. Every checkout sets `persist-credentials: false`.
-The selector's private-repository fetch receives the existing read-only workflow
-token through a step-scoped environment variable, converted to a GitHub-only
-header in the fetch child's temporary environment. It is never placed in argv,
-remote URLs, `.git/config`, output or artifacts; other Git commands receive no
-selector token/header. Removing persisted credentials must not silently turn
-every private-repository diff into the conservative all-jobs fallback.
-Gradle cache writes are restricted to main; tag builds disable Gradle caching
-entirely so signed Android releases do not consume a shared build cache. Existing
-release signing, upload gates, artifact scopes and TestFlight serialization are
-unchanged. Hermetic tests guard these invariants alongside job selection.
+`android-tests.json` records actual per-group case identities/statuses/counts,
+each report path/SHA-256, mode, source SHA, run ID/attempt, verification result and
+errors. It is kept with diagnostics, including a failed verification, and copied
+to the APK artifact on success. Missing/bad XML cannot reach release signing.
+This report binds the supplied workflow identity to reports from that checkout;
+it is not a cross-run proof service or evidence of physical-device acceptance.
 
-## Validation
+## Releases, exports and cancellation
 
-From the repository root on Linux:
+Signing and Android publication require an Android tag **push**, not a manual
+run on a tag ref. Full debug tests finish before signing secrets enter the
+release step. Release assembly remains a separate variant invocation. Certificate,
+versionName/tag equality, empty generated release bearer token, APK size and SHA
+checks precede publication. Existing releases are immutable: no `--clobber` or
+replacement upload. Gradle cache writes remain main-only; tag refs disable the
+cache, and signing secrets are never shared with tests/cache setup.
+
+Ordinary branch/PR runs cancel stale runs in their own group. Closed PR events
+cancel stale native work and select no native jobs. Release-tag and manual runs
+use isolated groups with cancellation disabled; manual runs include run ID so
+exports and diagnostics cannot replace one another. No release is cancelled by
+ordinary CI. Successful Android reports are retained 7 days without duplicating
+the debug APK in diagnostics; `android-apk` holds the built APK.
+
+Server tests continue to use the same image built once in their job. That exact
+verified image plus provenance is exported for trusted main pushes and explicit
+manual server/all exports only, never PR or tag production exports. The
+`server-verified-image` artifact is retained 7 days. This is an image artifact,
+not a database/recording backup or authorization to deploy.
+
+`ci-required` requires the selector/policy gate to succeed, every explicitly
+selected job to succeed, every excluded job to be skipped, and a selected Android
+release publisher to succeed. Missing outputs/results, selected skips,
+cancellations and failures are errors. Diagnostic iOS results are not full native
+release evidence. GitHub required-check configuration remains an owner action.
+
+## Validation and evidence limits
 
 ```sh
 python3 -m unittest discover -s .github/ci -p 'test_*.py' -v
-actionlint .github/workflows/mobile.yml .github/workflows/testflight.yml
+actionlint .github/workflows/mobile.yml .github/workflows/ios-native.yml .github/workflows/testflight.yml
 ./android/tools/check.sh fast
 ```
 
-The tests use local temporary Git repositories (no network), table-driven event
-policies, failure injection, direct gate introspection, and scheme/workflow wiring
-assertions. These do **not** prove that Xcode or GitHub Actions will behave as
-intended. After the owner publishes these changes, inspect an actual ordinary
-PR/main run's `changes` summary and job skips; exercise an iOS UI-only change
-(single explicit large-fixture skip), then an exporter/storage change (all ten
-independent tests including the large fixture). Verify simulator WoonaTests and
-WoonaUITests and export attachments still pass. Verify full archive coverage in
-the next already-authorized TestFlight tag/manual run before upload. Do not
-create tags, dispatch/cancel workflows, or upload merely to validate this policy.
-
-## Baseline evidence (not a speedup benchmark)
-
-Read-only GitHub run inspection on 2026-10-30 found successful main push run
-[40973885283](https://github.com/Woona-Corp/woona-data-collector/actions/runs/40973885283)
-at baseline `cd7eecbf35edd082794decd9ea5fe691bed23a7e`:
-
-- Server job: 23:33:00–23:33:57 UTC (57 s).
-- Android job: 23:33:00–23:36:40 UTC (220 s).
-- iOS job: 23:33:00–23:49:33 UTC (993 s).
-- Independent archive step: 23:33:03–23:33:44 UTC (41 s, compilation + all
-  compatibility cases, **not an isolated large-fixture measurement**).
-- Simulator step: 23:33:44–23:49:00 UTC (916 s).
-
-These are historical wall-clock observations, not billed-minute estimates or a
-before/after benchmark. No speedup has been measured. Dependency selection is
-expected to avoid irrelevant jobs; adding archive tests to TestFlight deliberately
-adds release coverage. Measure comparable new runs before claiming savings.
+Hermetic tests cover real temporary Git rename/delete/add boundaries, event and
+path tables, unavailable/invalid diff fallback, release/manual trust, mode outputs,
+required-job failures/skips/cancellations/missing results, action pins, cache and
+reusable-workflow wiring. Linux policy checks do not prove Xcode behavior,
+physical BLE/camera/synchronization or Apple processing/tester availability.
+No CI run, release, upload or device acceptance is implied by local static tests.
+The audit's latency estimates are forecasts, not measured optimization results.

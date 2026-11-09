@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
-from select_checks import ALL, changed_paths, decision, git
+from select_checks import ALL, DOCS_ONLY, changed_paths, decision, git, required_gate
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE, HEAD, MERGE = "a" * 40, "b" * 40, "c" * 40
@@ -41,7 +41,7 @@ class PolicyTests(unittest.TestCase):
             ([".github/workflows/mobile.yml"], ALL, True),
             ([".github/workflows/testflight.yml"], ALL, True),
             ([".github/ci/select_checks.py"], ALL, True),
-            (["README.md"], ALL, True),
+            (["README.md"], set(), False),
             (["new-platform/code"], ALL, True),
             (["android/a", "unknown"], ALL, True),
             (["ios/a", "../android/a"], ALL, True),
@@ -66,6 +66,93 @@ class PolicyTests(unittest.TestCase):
                                           {scope} if scope in ALL else ALL, True)
         self.assert_selection(decision("schedule", "refs/heads/main", ["android/a"]), ALL, True)
 
+    def test_reviewed_docs_only_not_blanket_markdown(self):
+        for path in DOCS_ONLY:
+            self.assert_selection(decision("pull_request", "refs/pull/1/merge", [path]), set(), False)
+        for path in ("new.md", "android/new.md", "shared/UI_UX_CONTRACT.md"):
+            selected = decision("pull_request", "refs/pull/1/merge", [path])
+            self.assertTrue(any(selected[job] for job in ALL))
+
+    def test_reviewed_document_links_and_publication_boundary(self):
+        # Narrative exemptions still receive cheap local-link and credential checks.
+        for name in sorted(DOCS_ONLY):
+            path = ROOT / name
+            text = path.read_text()
+            for link in re.findall(r"\]\(([^)\s]+)\)", text):
+                target = link.split("#")[0]
+                if target and ":" not in target:
+                    self.assertTrue((path.parent / target).exists(), (name, target))
+            self.assertIsNone(re.search(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
+                                        r"gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}", text), name)
+
+    def test_modes_and_release_trust_boundary(self):
+        for path, full in (("android/app/src/main/java/com/example/myapplication/protocol/Packet.kt", False),
+                           ("android/app/src/main/java/com/example/myapplication/data/Store.kt", True),
+                           ("unknown", True)):
+            self.assertEqual(decision("pull_request", "refs/pull/1/merge", [path])["android_full"], full)
+            self.assertFalse(decision("push", "refs/heads/main", [path])["android_full"])
+        tag = decision("push", "refs/tags/android-v1.5.8")
+        self.assertTrue(tag["android_full"] and tag["android_release"])
+        for full in (False, True):
+            manual = decision("workflow_dispatch", "refs/tags/android-v1.5.8", instrumentation=full)
+            self.assertEqual(manual["android_full"], full)
+            self.assertFalse(manual["android_release"])
+            self.assertTrue(manual["zip64_large"])
+        for enabled in (False, True):
+            self.assertEqual(decision("push", "refs/heads/main", ["ios/a"], main_units_enabled=enabled)["ios_mode"],
+                             "unit" if enabled else "full")
+        self.assertEqual(decision("workflow_dispatch", "refs/heads/main", test_filter="WoonaTests")["ios_mode"], "diagnostic")
+        self.assertEqual(decision("workflow_dispatch", "refs/heads/main", sanitizer="thread")["ios_mode"], "diagnostic")
+        closed = decision("pull_request", "refs/pull/1/merge", action="closed")
+        self.assertFalse(any(closed[job] for job in ALL))
+
+    def test_main_fallback_modes_remain_canonical(self):
+        for paths in (None, [], ["unknown"], ["../invalid"], ["ios/a"]):
+            for enabled in (False, True):
+                selected = decision("push", "refs/heads/main", paths, main_units_enabled=enabled)
+                self.assertFalse(selected["android_full"])
+                self.assertEqual(selected["android_mode"], "fast")
+                self.assertEqual(selected["ios_mode"], "unit" if enabled else "full")
+
+    def test_required_gate_rejects_failed_skipped_cancelled_and_missing(self):
+        for selected in (True, False):
+            needs = {"changes": {"result": "success", "outputs": {
+                **{job: str(selected).lower() for job in ALL}, "android_release": "false"}},
+                **{job: {"result": "success" if selected else "skipped"} for job in ALL},
+                "release": {"result": "skipped"}}
+            self.assertTrue(required_gate(needs))
+            for job in (*ALL, "changes", "release"):
+                for state in ("failure", "cancelled", None, "skipped" if selected else "success"):
+                    if job == "release" and state == "skipped":
+                        continue
+                    changed = {**needs, job: {"result": state}}
+                    self.assertFalse(required_gate(changed), (job, state))
+            for job in (*ALL, "changes", "release"):
+                self.assertFalse(required_gate({key: value for key, value in needs.items() if key != job}))
+
+    def test_required_release_gate_and_invalid_selection(self):
+        needs = {"changes": {"result": "success", "outputs": {
+            "android": "true", "ios": "false", "server": "true", "android_release": "true"}},
+            "android": {"result": "success"}, "ios": {"result": "skipped"},
+            "server": {"result": "success"}, "release": {"result": "success"}}
+        self.assertTrue(required_gate(needs))
+        for state in ("skipped", "cancelled", "failure", None):
+            self.assertFalse(required_gate({**needs, "release": {"result": state}}))
+        for value in (None, "", "TRUE", "maybe"):
+            outputs = {**needs["changes"]["outputs"], "ios": value}
+            self.assertFalse(required_gate({**needs, "changes": {"result": "success", "outputs": outputs}}))
+
+    def test_android_publish_and_server_export_wiring(self):
+        mobile = (ROOT / ".github/workflows/mobile.yml").read_text()
+        self.assertNotIn("--clobber", mobile)
+        self.assertNotIn("inputs.android_instrumentation", mobile)
+        self.assertIn("test '${{ needs.changes.outputs.android_full }}' = true", mobile)
+        self.assertIn("test \"$actual_version\" = \"$expected_version\"", mobile)
+        self.assertIn('WOONA_SERVER_TOKEN = "";', mobile)
+        self.assertEqual(mobile.count("if: github.event_name == 'push' && needs.changes.outputs.android_release == 'true'"), 2)
+        self.assertIn("CI_NEEDS: ${{ toJSON(needs) }}", mobile)
+        self.assertIn("github.repository == 'Woona-Corp/woona-data-collector') || (github.event_name == 'workflow_dispatch'", mobile)
+
 
 class DiffTests(unittest.TestCase):
     def event(self, event):
@@ -75,7 +162,7 @@ class DiffTests(unittest.TestCase):
     def test_push_exact_endpoints_and_pr_merge_base(self):
         for event in ("push", "pull_request"):
             calls = []
-            def run(*args):
+            def run(*args, calls=calls):
                 calls.append(args)
                 if args[0] == "merge-base":
                     return (MERGE + "\n").encode()
@@ -90,7 +177,7 @@ class DiffTests(unittest.TestCase):
         for failing in ("fetch", "merge-base", "diff"):
             for error in (OSError("unavailable"), subprocess.CalledProcessError(1, "git"),
                           subprocess.TimeoutExpired("git", 90)):
-                def run(*args):
+                def run(*args, failing=failing, error=error):
                     if args[0] == failing:
                         raise error
                     return (MERGE + "\n").encode() if args[0] == "merge-base" else b""
@@ -108,7 +195,7 @@ class DiffTests(unittest.TestCase):
 
     def test_invalid_diff_output_is_conservative(self):
         for output in (b"android/a", b"android/\xff\0"):
-            def run(*args):
+            def run(*args, output=output):
                 return output if args[0] == "diff" else b""
             self.assertIsNone(changed_paths("push", self.event("push"), run))
 
@@ -156,7 +243,10 @@ class DiffTests(unittest.TestCase):
                    "GITHUB_REF": "refs/heads/main"}
             subprocess.run(["python3", str(ROOT / ".github/ci/select_checks.py")], env=env,
                            check=True, stdout=subprocess.PIPE)
-            self.assertEqual(output.read_text(), "android=true\nios=true\nserver=true\nzip64_large=true\n")
+            self.assertEqual(dict(line.split("=", 1) for line in output.read_text().splitlines()),
+                             {"android": "true", "ios": "true", "server": "true", "zip64_large": "true",
+                              "android_full": "false", "android_mode": "fast",
+                              "android_release": "false", "ios_mode": "full"})
             self.assertIn("unavailable/empty diff", summary.read_text())
 
 
@@ -185,12 +275,12 @@ class WorkflowHardeningTests(unittest.TestCase):
             self.assertEqual(env['GIT_CONFIG_COUNT'], '1')
 
     def test_publish_workflows_pin_actions_and_do_not_persist_checkout_credentials(self):
-        for name in ('mobile.yml', 'testflight.yml'):
+        for name in ('mobile.yml', 'testflight.yml', 'secrets-check.yml'):
             with self.subTest(workflow=name):
                 content = (ROOT / '.github/workflows' / name).read_text()
                 references = re.findall(r'\buses:\s*([^\s]+)', content)
                 self.assertTrue(references)
-                self.assertTrue(all(re.fullmatch(r'[^@]+@[0-9a-f]{40}', ref) for ref in references))
+                self.assertTrue(all(ref.startswith('./.github/workflows/') or re.fullmatch(r'[^@]+@[0-9a-f]{40}', ref) for ref in references))
                 self.assertEqual(content.count('uses: actions/checkout@'),
                                  content.count('persist-credentials: false'))
         mobile = (ROOT / '.github/workflows/mobile.yml').read_text()
@@ -202,17 +292,14 @@ class ZIP64GateTests(unittest.TestCase):
     def test_workflow_and_scheme_keep_all_xctest_targets_and_release_large_fixture(self):
         mobile = (ROOT / ".github/workflows/mobile.yml").read_text()
         distribution = (ROOT / ".github/workflows/testflight.yml").read_text()
-        self.assertIn("WOONA_SKIP_ZIP64_LARGE: ${{ needs.changes.outputs.zip64_large == 'true' && '0' || '1' }}", mobile)
-        self.assertIn("WOONA_SKIP_ZIP64_LARGE: '0'", distribution)
-        self.assertIn("run: python3 ios/tools/test_complete_archive.py", distribution)
+        native = (ROOT / ".github/workflows/ios-native.yml").read_text()
+        self.assertIn("uses: ./.github/workflows/ios-native.yml", mobile)
+        self.assertIn("mode: ${{ needs.changes.outputs.ios_mode }}", mobile)
+        self.assertIn("zip64-large: ${{ needs.changes.outputs.zip64_large == 'true' }}", mobile)
+        self.assertIn("zip64-large: true", distribution)
         self.assertIn("cancel-in-progress: false", distribution)
-        self.assertNotIn("cancel-in-progress: true", mobile)
-        for workflow in (mobile, distribution):
-            # The Python >4 GiB fixture is NOT an XCTest. Never use broad
-            # -skip-testing here: that could drop the entire storage/UI suite.
-            self.assertNotIn("-skip-testing", workflow)
-            self.assertIn("-scheme Woona", workflow)
-            self.assertIn("python3 ios/tools/check-recording-export.py", workflow)
+        self.assertIn("cancel-in-progress: ${{", mobile)
+        self.assertNotIn("-skip-testing", native)
         scheme = ET.parse(ROOT / "ios/Woona.xcodeproj/xcshareddata/xcschemes/Woona.xcscheme")
         references = scheme.findall("./TestAction/Testables/TestableReference")
         targets = set()

@@ -1,3 +1,4 @@
+# yamllint disable rule:line-length
 name: Upload iOS to TestFlight
 
 on:
@@ -8,45 +9,69 @@ on:
       upload:
         description: Upload to App Store Connect
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: testflight-main
   cancel-in-progress: false
+  queue: max
 
 jobs:
+  native:
+    uses: ./.github/workflows/ios-native.yml
+    with:
+      mode: full
+      zip64-large: true
+
   testflight:
+    needs: native
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Test CI selection policy
-        run: python3 -m unittest discover -s .github/ci -p 'test_*.py' -v
-      - name: Verify complete data archives including the large ZIP64 fixture
-        env:
-          WOONA_SKIP_ZIP64_LARGE: '0'
-        run: python3 ios/tools/test_complete_archive.py
-      - name: Test on iOS Simulator
-        run: |
-          simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for devices in json.load(sys.stdin)["devices"].values() for d in devices if d["name"].startswith("iPhone")))')"
-          xcrun simctl help bootstatus
-          python3 -c 'import subprocess,sys; subprocess.run(["xcrun","simctl","bootstatus",sys.argv[1],"-b"],check=True,timeout=180)' "$simulator_id"
-          xcodebuild -parallel-testing-enabled NO -project ios/Woona.xcodeproj -scheme Woona -derivedDataPath "$RUNNER_TEMP/WoonaDerived" -resultBundlePath "$RUNNER_TEMP/WoonaTests.xcresult" -destination "platform=iOS Simulator,id=$simulator_id" CODE_SIGNING_ALLOWED=NO test || {
-            xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/WoonaTests.xcresult" --compact
-            exit 1
-          }
-          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/WoonaTests.xcresult" --output-path "$RUNNER_TEMP/WoonaTestAttachments"
-          python3 ios/tools/check-recording-export.py "$RUNNER_TEMP/WoonaTestAttachments"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: ios-recording-export-proof
-          path: ${{ runner.temp }}/WoonaTestAttachments/
-          if-no-files-found: error
+          name: ios-native-proof
+      - name: Verify exact full native proof before any signing assets
+        run: |
+          test "$(xcrun --sdk iphoneos --show-sdk-version)" = '26.5'
+          python3 - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          proof = json.loads(Path('native-proof.json').read_text())
+          assert proof['mode'] == 'full' and proof['fullproof'] is True
+          assert proof['zip64_large'] is True and proof['independent_export_verified'] is True
+          identity = proof['identity']
+          assert (identity['source'], identity['run'], identity['attempt']) == (os.environ['GITHUB_SHA'], os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'])
+          assert identity['xcode'] == subprocess.check_output(['xcodebuild', '-version'], text=True).strip()
+          assert identity['architecture'] == platform.machine() == 'arm64'
+          PY
+      - name: Verify tag and Release marketing version before signing
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          settings = json.loads(subprocess.check_output([
+              'xcodebuild', '-showBuildSettings', '-json', '-project', 'ios/Woona.xcodeproj',
+              '-scheme', 'Woona', '-configuration', 'Release', 'CODE_SIGNING_ALLOWED=NO'], text=True))
+          app = [s['buildSettings'] for s in settings if s['target'] == 'Woona']
+          assert len(app) == 1, 'Ambiguous Release application settings'
+          version = app[0]['MARKETING_VERSION']
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'Invalid marketing version'
+          if os.environ['EVENT_NAME'] == 'push':
+              tag = os.environ['TAG_NAME']
+              assert tag.startswith('ios-v') and tag[5:].split('-', 1)[0] == version, 'Tag/version mismatch'
+          PY
       - name: Install distribution signing assets
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
@@ -109,3 +134,70 @@ jobs:
           sed -i '' "s/DESTINATION/$destination/" "$RUNNER_TEMP/ExportOptions.plist"
           xcodebuild -project ios/Woona.xcodeproj -scheme Woona -configuration Release -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/Woona.xcarchive" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY='Apple Distribution' PROVISIONING_PROFILE_SPECIFIER='Woona CI App Store Connect' DEVELOPMENT_TEAM=NBM28T989D CURRENT_PROJECT_VERSION="$build_number" archive
           xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Woona.xcarchive" -exportPath "$RUNNER_TEMP/WoonaExport" -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -allowProvisioningUpdates -authenticationKeyPath "$key_path" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+
+          export BUILD_NUMBER="$build_number"
+          python3 - <<'PY'
+          import hashlib, json, os, plistlib
+          from pathlib import Path
+          archive = Path(os.environ['RUNNER_TEMP']) / 'Woona.xcarchive'
+          info = plistlib.loads((archive / 'Products/Applications/Woona.app/Info.plist').read_bytes())
+          assert str(info['CFBundleVersion']) == os.environ['BUILD_NUMBER']
+          manifest = {
+              'source': os.environ['GITHUB_SHA'], 'run': os.environ['GITHUB_RUN_ID'],
+              'attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'version': info['CFBundleShortVersionString'], 'build': str(info['CFBundleVersion']),
+              'uploaded': os.environ['UPLOAD'] == 'true',
+              'native_proof_sha256': hashlib.sha256(Path('native-proof.json').read_bytes()).hexdigest(),
+          }
+          Path('testflight-upload.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: testflight-upload-manifest
+          path: testflight-upload.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove signing assets
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/woona-signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/woona-distribution.p12" "$RUNNER_TEMP/woona-app-store.mobileprovision"
+          rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/woona-app-store.mobileprovision"
+
+  apple-status:
+    needs: testflight
+    if: github.event_name == 'push' || inputs.upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: testflight-upload-manifest
+      - name: Observe exact uploaded build read-only (not tester availability)
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          m = json.loads(Path('testflight-upload.json').read_text())
+          assert m['uploaded'] is True
+          assert (m['source'], m['run'], m['attempt']) == (os.environ['GITHUB_SHA'], os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'])
+          subprocess.run(['python3', 'ios/tools/testflight_internal.py'], check=True,
+                         env={**os.environ, 'CHECK_VERSION': m['version'], 'CHECK_BUILD': m['build'],
+                              'ASSIGN_INTERNAL': 'false', 'INTERNAL_GROUP_IDS': ''})
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: testflight-processing-status
+          path: |
+            testflight-upload.json
+            testflight-internal-status.json
+            testflight-internal-polls.jsonl
+          retention-days: ${{ job.status == 'success' && 7 || 14 }}

@@ -10,11 +10,11 @@ import re
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-
 
 BUNDLE_ID = "com.woona.apps"
 API = "https://api.appstoreconnect.apple.com"
@@ -68,7 +68,7 @@ def token(key_path, key_id, issuer):
                              "aud": "appstoreconnect-v1"}).encode())
     signing = (header + "." + payload).encode()
     signature = subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(key_path)],
-                               input=signing, capture_output=True, check=True).stdout
+                               input=signing, capture_output=True, check=True, timeout=30).stdout
     return signing.decode() + "." + b64(jose_signature(signature))
 
 
@@ -76,6 +76,7 @@ class AppleClient:
     def __init__(self, key_path, key_id, issuer, *, allow_assignment=False):
         self.key_path, self.key_id, self.issuer = key_path, key_id, issuer
         self.allow_assignment = allow_assignment
+        self.deadline = float('inf')
 
     def _request(self, method, path, query=None, payload=None):
         # Restrict the only write operation even if a future caller passes a new path.
@@ -98,7 +99,10 @@ class AppleClient:
             "Content-Type": "application/json",
         })
         try:
-            with urlopen(request, timeout=30) as response:
+            remaining = getattr(self, 'deadline', float('inf')) - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('App Store Connect observation deadline exceeded')
+            with urlopen(request, timeout=min(30, remaining)) as response:
                 body = response.read()
                 return json.loads(body) if body else None
         except HTTPError as error:
@@ -214,7 +218,8 @@ def inspect(client, app_id, version, build_number):
             "physical_installation_verified": False}
 
 
-def run(client, version, build_number, *, assign_internal=False, group_ids=(), attempts=45, pause=time.sleep):
+def run(client, version, build_number, *, assign_internal=False, group_ids=(), attempts=45,
+        pause=time.sleep, clock=time.monotonic, timeout_seconds=900, on_poll=None):
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", version) or not re.fullmatch(r"[0-9]+", build_number):
         raise SafetyError("Explicit numeric marketing version and exact build number are required")
     if type(assign_internal) is not bool:
@@ -222,6 +227,11 @@ def run(client, version, build_number, *, assign_internal=False, group_ids=(), a
     targets = tuple(identifier(value) for value in group_ids)
     if len(set(targets)) != len(targets) or (assign_internal and not targets):
         raise SafetyError("Assignment requires explicit unique internal group IDs")
+    if timeout_seconds <= 0 or attempts < 1:
+        raise SafetyError('A positive bounded observation budget is required')
+    deadline = clock() + timeout_seconds
+    client.deadline = deadline
+    polls = []
     apps = collection(client.get("/v1/apps", {"filter[bundleId]": BUNDLE_ID}), "apps")
     if len(apps) != 1 or apps[0].get("attributes", {}).get("bundleId") != BUNDLE_ID:
         raise SafetyError("Expected exactly the com.woona.apps application")
@@ -229,8 +239,22 @@ def run(client, version, build_number, *, assign_internal=False, group_ids=(), a
     assigned_once = False
     target_build_id = None
     for attempt in range(attempts):
+        if clock() >= deadline:
+            break
         report = inspect(client, app_id, version, build_number)
+        poll = {'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+                'poll': attempt + 1, 'remaining_seconds': max(0, deadline - clock()),
+                'processing_state': report['processing_state'] if report else 'NOT_FOUND',
+                'available_for_internal_testers': bool(report and report['available_for_internal_testers'])}
+        polls.append(poll)
+        if on_poll is not None:
+            on_poll(poll)
+        if clock() >= deadline:
+            break
         if report is not None:
+            report['polls'] = list(polls)
+            report['status_inspected'] = True
+            report['observation_timestamp_utc'] = poll['timestamp_utc']
             if target_build_id is not None and report["build_id"] != target_build_id:
                 raise SafetyError("Exact build identity changed during assignment")
             if report["processing_state"] in ("FAILED", "INVALID") or report["expired"] is not False:
@@ -268,7 +292,7 @@ def run(client, version, build_number, *, assign_internal=False, group_ids=(), a
                         and any(groups[group_id]["tester_count"] > 0 for group_id in targets)):
                     return report
         if attempt + 1 < attempts:
-            pause(20)
+            pause(min(20, max(0, deadline - clock())))
     raise TimeoutError("Exact build processing or internal tester availability did not become ready")
 
 
@@ -283,8 +307,14 @@ def main():
         key.write_text(os.environ["ASC_PRIVATE_KEY"])
         key.chmod(0o600)
         client = AppleClient(key, os.environ["ASC_KEY_ID"], os.environ["ASC_ISSUER_ID"], allow_assignment=assign)
+        def record_poll(poll):
+            with Path('testflight-internal-polls.jsonl').open('a') as stream:
+                stream.write(json.dumps(poll) + '\n')
+            print(json.dumps(poll), flush=True)
         report = run(client, os.environ["CHECK_VERSION"].strip(), os.environ["CHECK_BUILD"].strip(),
-                     assign_internal=assign, group_ids=groups)
+                     assign_internal=assign, group_ids=groups, on_poll=record_poll)
+    report['observation_run'] = {key: os.environ.get(env) for key, env in (
+        ('source', 'GITHUB_SHA'), ('run', 'GITHUB_RUN_ID'), ('attempt', 'GITHUB_RUN_ATTEMPT'))}
     Path("testflight-internal-status.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report), flush=True)
 

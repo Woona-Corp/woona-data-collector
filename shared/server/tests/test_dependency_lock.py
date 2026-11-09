@@ -61,8 +61,16 @@ class DependencyLockTests(unittest.TestCase):
                          "--require-hashes --only-binary=:all:", "-r /app/server/requirements-test.lock",
                          "docker image save \"$WOONA_CANDIDATE_IMAGE\"", "--no-build --wait",
                          "github.event_name == 'workflow_dispatch' && inputs.export_server_image == true",
-                         "inputs.scope == 'server' || inputs.scope == 'all'", "retention-days: 1"):
+                         "inputs.scope == 'server' || inputs.scope == 'all'", "retention-days: 7",
+                         "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+                         "test_promote_server.py"):
             self.assertIn(fragment, server)
+        export = server.split("      - name: Export exact verified server image", 1)[1].split("      - name: Clean up", 1)[0]
+        self.assertEqual(export.count("retention-days: 7"), 1)
+        self.assertEqual(export.count("github.ref == 'refs/heads/main'"), 2)
+        self.assertNotIn("pull_request", export)
+        self.assertNotIn("docker compose", export)
+        self.assertNotIn(" build ", export)
         self.assertNotIn("pip install -e", server)
         self.assertIn("!build-provenance/source-manifest.json", (shared / ".dockerignore").read_text())
         self.assertIn("shared/build-provenance/", (shared.parent / ".gitignore").read_text())
