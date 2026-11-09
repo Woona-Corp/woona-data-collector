@@ -10,7 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from sqlalchemy import create_engine, text
 from starlette.concurrency import run_in_threadpool
 
@@ -79,17 +79,25 @@ def _safe_artifact_path(relative: str | None) -> Path | None:
     return candidate
 
 
-def _artifact_paths(recording_id: uuid.UUID) -> tuple[Path, Path | None]:
-    rows = _readonly_rows(
-        """
-        SELECT artifact_type, server_relative_path, storage_status
+def _artifact_rows(recording_id: uuid.UUID, artifact_types: tuple[str, ...]):
+    placeholders = ",".join(f":type_{index}" for index in range(len(artifact_types)))
+    parameters = {"id": recording_id}
+    parameters.update({f"type_{index}": value for index, value in enumerate(artifact_types)})
+    return _readonly_rows(
+        f"""
+        SELECT id, artifact_type, file_name, mime_type, expected_size_bytes,
+               server_relative_path, storage_status
         FROM artifacts
         WHERE recording_id=:id
-          AND artifact_type IN ('packet','packet_timeline')
+          AND artifact_type IN ({placeholders})
         ORDER BY artifact_type
         """,
-        {"id": recording_id},
+        parameters,
     )
+
+
+def _artifact_paths(recording_id: uuid.UUID) -> tuple[Path, Path | None]:
+    rows = _artifact_rows(recording_id, ("packet", "packet_timeline"))
     by_type = {
         row["artifact_type"]: _safe_artifact_path(row["server_relative_path"])
         for row in rows
@@ -217,9 +225,12 @@ async def recording_meta(recording_id: uuid.UUID):
     index = await run_in_threadpool(_index_for, recording_id)
     rows = _readonly_rows(
         """
-        SELECT r.started_at, r.capture_status, r.ingest_status, d.number_or_name AS dog
+        SELECT r.started_at, r.capture_status, r.ingest_status, d.number_or_name AS dog,
+               s.video_offset_from_sensor_ns, s.video_first_sample_pts_us,
+               s.overall_sync_quality, s.camera_clock_quality
         FROM recordings r
         JOIN dogs d ON d.id=r.dog_id
+        LEFT JOIN recording_sync s ON s.recording_id=r.id
         WHERE r.id=:id
         """,
         {"id": recording_id},
@@ -237,6 +248,21 @@ async def recording_meta(recording_id: uuid.UUID):
         "timeBase": index.time_base,
         "packetCount": len(index.entries),
         "gapCount": len(index.gaps),
+        "video": {
+            "available": any(
+                row["storage_status"] == "available"
+                and _safe_artifact_path(row["server_relative_path"]) is not None
+                for row in _artifact_rows(recording_id, ("video",))
+            ),
+            "offsetFromSensorMs": (
+                row["video_offset_from_sensor_ns"] / 1_000_000.0
+                if row["video_offset_from_sensor_ns"] is not None
+                else None
+            ),
+            "firstSamplePtsUs": row["video_first_sample_pts_us"],
+            "syncQuality": row["overall_sync_quality"],
+            "cameraClockQuality": row["camera_clock_quality"],
+        },
         "streams": [
             {
                 "key": f"{sensor_type}:{channel}",
@@ -269,4 +295,85 @@ async def signals(
         end_ms=end_ms,
         selected_streams=selected,
         max_points=max_points,
+    )
+
+
+
+def _stream_file(path: Path, start: int, length: int):
+    with path.open("rb") as source:
+        source.seek(start)
+        remaining = length
+        while remaining > 0:
+            chunk = source.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+@app.get("/api/recordings/{recording_id}/video", dependencies=[Depends(require_viewer_user)])
+def recording_video(recording_id: uuid.UUID, request: Request):
+    rows = _artifact_rows(recording_id, ("video",))
+    row = next(
+        (
+            item
+            for item in rows
+            if item["storage_status"] == "available"
+            and item["server_relative_path"]
+        ),
+        None,
+    )
+    if row is None:
+        raise HTTPException(404, "Verified video artifact is not available")
+
+    path = _safe_artifact_path(row["server_relative_path"])
+    if path is None:
+        raise HTTPException(404, "Verified video artifact is not available")
+
+    size = path.stat().st_size
+    expected = int(row["expected_size_bytes"])
+    if size != expected:
+        raise HTTPException(409, "Video file size does not match database metadata")
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=0",
+    }
+    range_header = request.headers.get("range")
+    if not range_header:
+        return FileResponse(
+            path,
+            media_type=row["mime_type"] or "video/mp4",
+            filename=row["file_name"] or "video.mp4",
+            headers=headers,
+        )
+
+    import re
+    match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header)
+    if match is None:
+        raise HTTPException(
+            416,
+            "Invalid Range header",
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) else size - 1
+    if start >= size or end < start or end >= size:
+        raise HTTPException(
+            416,
+            "Range not satisfiable",
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    length = end - start + 1
+    headers.update(
+        {
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Content-Length": str(length),
+        }
+    )
+    return StreamingResponse(
+        _stream_file(path, start, length),
+        status_code=206,
+        media_type=row["mime_type"] or "video/mp4",
+        headers=headers,
     )
