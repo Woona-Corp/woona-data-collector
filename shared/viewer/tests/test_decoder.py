@@ -58,7 +58,22 @@ class DecoderTests(unittest.TestCase):
                 selected_streams={(2, 1)}, max_points=100,
             )
             self.assertEqual(result["signals"][0]["points"], [
-                [0.0, 10.0], [1.0, 20.0], [100.0, 50.0], [101.0, 60.0],
+                [0.0, 10.0], [1.0, 20.0], [2.0, 50.0], [3.0, 60.0],
+            ])
+
+    def test_microphone_samples_use_8khz_timing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            p1 = packet(1, 1000, [sensor_block(4, [[10, 20, 30, 40]])])
+            (root / "packets.bin").write_bytes(p1)
+            index = build_index(root / "packets.bin")
+            result = query_signals(
+                index, start_ms=0, end_ms=index.duration_ms,
+                selected_streams={(4, 1)}, max_points=100,
+            )
+            self.assertEqual(result["signals"][0]["sampleRateHz"], 8000)
+            self.assertEqual(result["signals"][0]["points"], [
+                [0.0, 10.0], [0.125, 20.0], [0.25, 30.0], [0.375, 40.0],
             ])
 
     def test_counter_gap_is_reported(self):
