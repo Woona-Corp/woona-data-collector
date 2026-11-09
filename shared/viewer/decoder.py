@@ -239,14 +239,17 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
         streams.update(values)
         packet_duration = _packet_duration_ms(values)
 
+        # The packet timeline is an arrival-time audit trail. BLE scheduling jitter
+        # must not stretch/compress the sensor axis, so the plotted time is derived
+        # from the device timer. Timeline/sync anchors only establish t=0 in the
+        # host monotonic domain and validate packet identity.
+        start_ms = float(unwrapped_timer - first_unwrapped_timer)
         if timeline_entry is not None:
             if first_host_ns is None:
                 first_host_ns = timeline_entry.host_monotonic_ns
-            start_ms = (timeline_entry.host_monotonic_ns - first_host_ns) / 1_000_000.0
             host_wall = timeline_entry.host_wall_clock_ms
             host_mono = timeline_entry.host_monotonic_ns
         else:
-            start_ms = float(unwrapped_timer - first_unwrapped_timer)
             host_wall = None
             host_mono = None
         end_ms = start_ms + packet_duration
@@ -290,7 +293,7 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
         entries=tuple(entries),
         streams=tuple(sorted(streams)),
         duration_ms=max(0.0, duration),
-        time_base="host_monotonic+stream_rate" if timeline_path else "device_timer+stream_rate",
+        time_base="device_timer+stream_rate (host anchored)" if timeline_path else "device_timer+stream_rate",
         gaps=tuple(gaps),
     )
 
