@@ -95,6 +95,19 @@ class DecoderTests(unittest.TestCase):
             self.assertEqual(by_key["7:1"]["points"], [[0.0, 25.25]])
             self.assertEqual(by_key["7:1"]["unit"], "°C")
 
+    def test_interleaved_stream_timestamps_may_regress_slightly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            p1 = packet(1, 1000, [sensor_block(7, [[2500]])])
+            p2 = packet(2, 950, [sensor_block(2, [[10, 20], [30, 40], [50, 60]])])
+            (root / "packets.bin").write_bytes(p1 + p2)
+
+            index = build_index(root / "packets.bin")
+
+            self.assertEqual(len(index.entries), 2)
+            self.assertEqual(index.entries[0].start_ms, 0.0)
+            self.assertEqual(index.entries[1].start_ms, -50.0)
+
     def test_counter_gap_is_reported(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
