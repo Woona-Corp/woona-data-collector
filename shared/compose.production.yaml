@@ -83,11 +83,38 @@ services:
         max-size: 20m
         max-file: "5"
 
+  viewer:
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      WOONA_ENVIRONMENT: production
+      FILEBROWSER_URL: http://filebrowser:80/files
+      FILEBROWSER_HOST_HEADER: cool-trams.digital
+    depends_on:
+      postgres:
+        condition: service_healthy
+      filebrowser:
+        condition: service_healthy
+    mem_limit: 768m
+    pids_limit: 256
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
   caddy:
     image: caddy:2-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
     restart: unless-stopped
     depends_on:
       api:
+        condition: service_healthy
+      viewer:
         condition: service_healthy
       filebrowser:
         condition: service_healthy
