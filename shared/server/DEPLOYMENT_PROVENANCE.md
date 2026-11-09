@@ -334,10 +334,19 @@ The protected plan has exactly these fields (placeholders intentionally invalid)
 
 ```json
 {
-  "current_image": "sha256:CURRENT_IMMUTABLE_CONTAINER_IMAGE",
-  "current_source": "CURRENT_FULL_REVIEWED_SOURCE",
+  "services": {
+    "api": {
+      "current_image": "sha256:CURRENT_API_IMMUTABLE_IMAGE",
+      "current_source": "CURRENT_API_FULL_REVIEWED_SOURCE",
+      "rollback_image": "sha256:CURRENT_API_IMMUTABLE_IMAGE"
+    },
+    "label_sync": {
+      "current_image": "sha256:CURRENT_WORKER_IMMUTABLE_IMAGE",
+      "current_source": "CURRENT_WORKER_FULL_REVIEWED_SOURCE",
+      "rollback_image": "sha256:CURRENT_WORKER_IMMUTABLE_IMAGE"
+    }
+  },
   "schema_revision": "0009",
-  "rollback_image": "sha256:CURRENT_IMMUTABLE_CONTAINER_IMAGE",
   "rollback_schema_compatible": true,
   "storage_compatible": true,
   "reviewed_source": "CANDIDATE_FULL_REVIEWED_SOURCE",
@@ -353,11 +362,17 @@ The protected plan has exactly these fields (placeholders intentionally invalid)
 The owner reviews installed-client compatibility, runtime/dependency/schema and
 storage compatibility, current source provenance, prior image retention and the
 rollback procedure before setting these values and approving the dispatch.
-The reviewed local rollback image must still be inspectable by its exact ID;
-a running container alone is not proof that its original image remains available.
-The current API and worker must match the reviewed baseline image/source, with readable
-verified public trees, actual interpreter and PID1 UID10001, and exact image/DB
-revision0009. Unknown legacy baseline provenance cannot be filled in from Git HEAD
+`services` must contain exactly `api` and `label_sync`, each with exactly
+`current_image`, `current_source` and `rollback_image`; no global identity aliases,
+missing/extra roles or extra per-role fields are accepted. Each role's rollback
+must equal that role's current immutable image. The roles may have different
+reviewed current image/source identities: preflight matches and probes each role
+against its own baseline, never against the other role or the candidate.
+Every unique reviewed local rollback image must still be independently inspectable
+by its exact ID before any image load; a running container alone is not proof that
+its original image remains available. Shared rollback IDs are inspected once.
+Both roles still require readable verified public trees, actual interpreter and
+PID1 UID10001, and exact image/DB revision0009. Unknown legacy baseline provenance cannot be filled in from Git HEAD
 or the desired candidate. It needs a separate owner plan; there is no adoption flag.
 The three public Compose files on the host must match the reviewed plan hashes.
 Environment files stay on the host and are not exported, hashed or logged.
@@ -398,7 +413,8 @@ format requires reviewed implementation and hermetic tests first.
 
 Preflight streams only trusted helper code and bounded public plan to pinned SSH.
 It checks reviewed Compose bytes, existing API/worker identities and public source,
-PID1 UID, read-only SQL Alembic revision and baseline health. It does **not** load
+PID1 UID, read-only SQL Alembic revision, per-role rollback-image availability
+and baseline health. It does **not** load
 an image, create a container/file on the host, restart a service, or run migrations.
 Local runner artifact download/unpack is not a production mutation.
 
@@ -406,8 +422,12 @@ A separate `apply=true` dispatch requires production environment approval again.
 It repeats preflight, streams **only the code image** into `docker image load`,
 independently inspects the consumer identity against the proven archive chain,
 then probes the loaded image with no network, read-only filesystem, no mounts and
-explicit Python entrypoint. No default image CMD runs. Only after identical
-source/manifest/schema/UID observations does Compose replace `api` and `label_sync`
+explicit Python entrypoint. No default image CMD runs. Immediately before Compose
+replacement, a fresh runtime snapshot must exactly match the preflight snapshot.
+Any runtime change during image loading or candidate verification aborts for
+separate review: the code image may already be loaded, but no Compose replacement
+or automatic rollback follows. Only after identical source/manifest/schema/UID
+observations and this unchanged-runtime check does Compose replace `api` and `label_sync`
 with that immutable identity, `--no-build --no-deps --pull never`, bounded wait/stop
 limits, direct `uvicorn` for API and explicit Python module for worker. It does
 not rewrite the operational checkout or persist an overlay to its files. Container
@@ -427,8 +447,8 @@ credentials merely to make a test report green.
 A failed post-load/apply gate may leave a loaded image or replaced API/worker.
 Stop dependent client distribution and inspect the bounded redacted evidence;
 never assume failure means production unchanged. No automatic rollback, data
-restore/reset/downgrade, backup or deletion is attempted. The retained baseline
-image is a rollback candidate only under the explicitly reviewed current-schema
+restore/reset/downgrade, backup or deletion is attempted. Each retained role's
+baseline image is a rollback candidate only under the explicitly reviewed current-schema
 and storage compatibility plan; a rollback rehearsal remains separate acceptance.
 Successful evidence is retained seven days, rejected evidence fourteen days;
 identities/status only, no config/env dumps, credentials, logs or private bodies.

@@ -47,6 +47,45 @@ and `zip64_large` once. Android SDK/KVM/health/check steps consume that same
 The iOS caller delegates to canonical `ios-native.yml` using `mode`,
 `zip64-large`, `test-filter` and `sanitizer`; simulator logic is not duplicated.
 
+## iOS native identity proof and execution order
+
+The external reusable inputs remain `mode`, `zip64-large`, `test-filter`, and
+`sanitizer`. In `full`, the producer verifies the pinned native toolchain and
+available runtime/model **without booting Simulator**, builds both test targets
+once unsigned, packs/uploads same-run test products, and runs the independent
+archive/SQLite/ZIP oracle once. It does not execute native tests. Both isolated
+consumers depend on that build/oracle producer, not a separate unit-test job.
+
+Consumer 1 runs **one** serial `test-without-building` invocation selecting all
+`WoonaTests` plus the nine explicit shard-1 UI methods. Scheme target order keeps
+units before UI on one simulator, without a duplicate unit run or synthetic
+warm-up. Its one physical report is `unit-ui-1` (currently 355 units + 9 UI).
+The independent session ZIP checker reads this combined bundle's attachments.
+Consumer 2 runs the unchanged nine explicit shard-2 UI methods as `ui-2` in
+parallel on its own simulator. An internal producer/consumer role controls
+`prepare(boot=...)`; it is not an extra caller input. Consumer boot overlaps
+product download. `unit` and focused/sanitized `diagnostic` modes retain their
+single producer build/test path and do not start shard consumers.
+
+The aggregator requires those exact physical reports, validates every expected
+identity once in its assigned report, then requires their exact discovered union
+(currently 355 units + 18 UI). Unknown, missing, duplicate, failed, skipped,
+expected-failure or repeated rows are errors; actual rows are never filtered to
+manufacture completeness. A failed re-verification removes any stale final proof.
+Source/run/attempt/input/toolchain bindings, per-bundle result hashes, independent
+session export and producer archive/large-ZIP64 policy proofs remain mandatory.
+The final manifest retains separate unit/UI counts and same-run artifact IDs and
+service digests. TestFlight still requires `fullproof=true` and `zip64_large=true`
+before signing; diagnostic reports remain `fullproof=false`.
+
+Transfer products remain same-run-only with 1-day retention. Producer metadata,
+combined/second-shard results, attachments and timings are retained 7 days on
+success or 14 on failure. No native product is deleted before consumers finish.
+This execution-order/performance change is a hypothesis pending native validation,
+not a demonstrated AX timeout root cause or application fix. No Swift application,
+XCTest assertion, fixture, launch/orientation lifecycle, retry or post-tap wait is
+changed by it.
+
 ## Android test identity proof
 
 One stdlib verifier, `.github/ci/android_test_manifest.py`, runs after debug checks

@@ -76,8 +76,8 @@ def inventory():
                     if cls is None:
                         raise ValueError(f'Unowned test in {path}')
                     found.append(f'{target}/{cls}/{token[2]}')
-    if not found or len(found) != len(set(found)):
-        raise ValueError('Empty or duplicate discovered inventory')
+    if not found or len(found) != len(set(found)) or not any(i.startswith('WoonaTests/') for i in found):
+        raise ValueError('Empty unit suite, empty inventory or duplicate discovered test')
     assigned = [f'WoonaUITests/OverviewParityTests/{m}' for shard in SHARDS for m in shard]
     if Counter(assigned) != Counter(i for i in found if i.startswith('WoonaUITests/')):
         raise ValueError('UI inventory differs from explicit disjoint shards')
@@ -106,7 +106,7 @@ def identity():
     return info
 
 
-def prepare():
+def prepare(*, boot=True):
     ROOT.mkdir(parents=True, exist_ok=True)
     info = identity()
     if (not info['xcode'].startswith('Xcode 26.6\n') or info['sdk'] != '26.5'
@@ -120,10 +120,12 @@ def prepare():
     (ROOT / 'simulator').write_text(matches[0])
     write(ROOT / 'identity.json', info)
     write(ROOT / 'inventory.json', inventory())
-    # boot is asynchronous; compilation/download overlaps boot, bootstatus is bounded later.
-    state = output(['xcrun', 'simctl', 'list', 'devices', 'booted', '-j'])
-    if matches[0] not in state:
-        call(['xcrun', 'simctl', 'boot', matches[0]], timeout=180)
+    # Full producers never boot a simulator: consumers own testing and boot.
+    # Consumer boot overlaps download; unit/diagnostic producer boot overlaps build.
+    if boot:
+        state = output(['xcrun', 'simctl', 'list', 'devices', 'booted', '-j'])
+        if matches[0] not in state:
+            call(['xcrun', 'simctl', 'boot', matches[0]], timeout=180)
 
 
 def result_rows(tree):
@@ -161,7 +163,7 @@ def result_rows(tree):
 
 def require_pass(rows, expected):
     actual = Counter(row['id'] for row in rows)
-    if actual != Counter(expected) or any(row['status'] != 'Passed' for row in rows):
+    if not rows or not expected or actual != Counter(expected) or any(row['status'] != 'Passed' for row in rows):
         raise ValueError(f'Incomplete/duplicate/failed/skipped tests: expected {len(expected)}, actual {actual}')
 
 
@@ -214,11 +216,22 @@ def test(label, selectors, sanitizer='none'):
 
 
 def aggregate(directory, mode):
+    # A failed re-verification must never leave an older successful proof behind.
+    (directory / 'native-proof.json').unlink(missing_ok=True)
     expected = inventory()
-    labels = ['unit'] + (['ui-1', 'ui-2'] if mode == 'full' else [])
+    units = [i for i in expected if i.startswith('WoonaTests/')]
+    if mode == 'full':
+        expected_by_label = {
+            'unit-ui-1': units + ['WoonaUITests/OverviewParityTests/' + m for m in SHARDS[0]],
+            'ui-2': ['WoonaUITests/OverviewParityTests/' + m for m in SHARDS[1]],
+        }
+    else:
+        expected_by_label = {'unit': units}
+    labels = list(expected_by_label)
     rows, identities = [], []
     for label in labels:
         data = parse_json((directory / f'{label}.json').read_text())
+        require_pass(data['tests'], expected_by_label[label])
         identities.append(data['identity'])
         rows.extend(data['tests'])
     if any(i != identities[0] for i in identities):
@@ -239,6 +252,11 @@ def aggregate(directory, mode):
           'expected': expected if mode == 'full' else [i for i in expected if i.startswith('WoonaTests/')],
           'executed': [r['id'] for r in rows], 'passed': [r['id'] for r in rows],
           'skipped': [], 'failed': [],
+          'counts': {target: {'expected': sum(i.startswith(prefix) for i in (expected if mode == 'full' else units)),
+                              'executed': sum(r['id'].startswith(prefix) for r in rows),
+                              'passed': sum(r['id'].startswith(prefix) for r in rows),
+                              'skipped': 0, 'failed': 0}
+                     for target, prefix in (('unit', 'WoonaTests/'), ('ui', 'WoonaUITests/'))},
           'phase_timings': [parse_json(p.read_text()) for p in sorted(directory.glob('*-timing.json'))], 'independent_export_verified': True, 'zip64_large': archive['zip64_large'],
           'result_hashes': {label: parse_json((directory / f'{label}.json').read_text())['xcresult_sha256'] for label in labels}})
 
@@ -256,7 +274,12 @@ def main():
     started = time.monotonic()
     try:
         if a.command == 'prepare':
-            prepare()
+            # Internal job role, not a caller/workflow input. Full consumers boot;
+            # the full producer only verifies the pinned toolchain/runtime/model.
+            role = os.environ.get('WOONA_CI_ROLE', 'producer')
+            if role not in ('producer', 'consumer'):
+                p.error('Invalid internal native job role')
+            prepare(boot=a.mode != 'full' or role == 'consumer')
         elif a.command == 'build':
             args = ['xcodebuild', 'build-for-testing', '-project', 'ios/Woona.xcodeproj', '-scheme', 'Woona',
                     '-derivedDataPath', str(DERIVED), '-sdk', 'iphonesimulator26.5',
@@ -270,12 +293,25 @@ def main():
                 p.error('Invalid test selector')
             if a.sanitizer != 'none' and selector.startswith('WoonaUITests'):
                 p.error('Sanitizers require unit tests')
+            (ROOT / 'export-proof.json').unlink(missing_ok=True)
             test('unit', [selector], a.sanitizer)
             if a.mode != 'diagnostic':
                 call(['python3', 'ios/tools/check-recording-export.py', str(ROOT / 'unit-attachments')])
                 write(ROOT / 'export-proof.json', identity())
         elif a.command.startswith('ui-'):
-            test(a.command, ['WoonaUITests/OverviewParityTests/' + m for m in SHARDS[int(a.command[-1]) - 1]])
+            if a.mode != 'full':
+                p.error('Shard consumers require full mode; diagnostics use the unit/filter path')
+            selectors = ['WoonaUITests/OverviewParityTests/' + m for m in SHARDS[int(a.command[-1]) - 1]]
+            label = a.command
+            if a.command == 'ui-1':
+                label = 'unit-ui-1'
+                selectors.insert(0, 'WoonaTests')
+                (ROOT / 'export-proof.json').unlink(missing_ok=True)
+            # One invocation: scheme target order keeps serial units before UI1.
+            test(label, selectors)
+            if a.command == 'ui-1':
+                call(['python3', 'ios/tools/check-recording-export.py', str(ROOT / f'{label}-attachments')])
+                write(ROOT / 'export-proof.json', identity())
         elif a.command == 'archive':
             if platform.system() != 'Darwin' or not shutil.which('swiftc'):
                 raise ValueError('Independent archive oracle requires native macOS Swift, not a skipped suite')

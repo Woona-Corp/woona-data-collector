@@ -59,11 +59,16 @@ Debug допускает локальный HTTP для local networking; Releas
 `mode` (`full`, `unit`, `diagnostic`), `zip64-large` (boolean), `test-filter`
 и `sanitizer` (`none`, `address`, `thread`).
 
-- `full`: один unsigned `build-for-testing` обоих test targets, serial unit
-  `test-without-building`, независимые SQLite/ZIP и session ZIP proofs,
-  затем два отдельных macOS runner с explicit 9+9 UI methods, одним simulator
-  и serial `test-without-building` на каждом. Список methods задан в
-  [native_ci.py](tools/native_ci.py), без изменения XCTest assertions/fixtures.
+- `full`: producer без Simulator boot делает один unsigned `build-for-testing`
+  обоих test targets, публикует products и один раз выполняет independent
+  SQLite/ZIP oracle, но не запускает native tests. Затем два отдельных macOS
+  consumer runner работают параллельно. Первый выполняет **один** serial
+  `test-without-building`: весь `WoonaTests`, затем explicit 9 UI methods shard 1
+  на одном simulator, один physical report `unit-ui-1` (сейчас 355+9).
+  Session ZIP proof проверяется по attachments этого combined bundle.
+  Второй consumer выполняет прежние 9 UI methods shard 2, report `ui-2`.
+  Список methods задан в [native_ci.py](tools/native_ci.py), без duplicate unit
+  execution, synthetic warm-up или изменения XCTest assertions/fixtures.
 - `unit`: build + весь unit target и оба independent proofs; **не UI proof**.
   Main использует его только после effective required PR protection и включения
   repository variable `CI_MAIN_UNITS_ENABLED`; иначе main остаётся full.
@@ -76,9 +81,10 @@ Debug допускает локальный HTTP для local networking; Releas
 Pinned host: `macos-26`, `/Applications/Xcode_26.6.app`, arm64,
 iPhoneSimulator SDK 26.5, available iPhone 17 Pro / runtime 26.5. Отсутствие
 этого toolchain/device — ошибка, не fallback на первый доступный iPhone.
-Simulator boot начинается до build/download; bounded bootstatus — до tests.
-UI jobs ждут build/unit job целиком: публикация products происходит до units,
-но GitHub `needs` не запускает consumers по окончании отдельного step.
+В full producer не запускает Simulator. Оба consumers ждут только завершения
+build/products/archive-oracle producer; boot начинается до download, bounded
+bootstatus — до tests. В unit/diagnostic producer boot по-прежнему перекрывается
+со сборкой. Роль producer/consumer внутренняя, без нового caller input.
 
 Products передаются **только внутри одного workflow run**, в tar с сохранением
 executable modes и symlinks. Consumers восстанавливают тот же canonical
@@ -88,17 +94,20 @@ source/run/attempt, input digest и полный вывод Xcode/SDK/architectu
 не используются. Signing secrets не передаются reusable native workflow.
 
 Aggregator сравнивает discovered source XCTest identities с выполненными case
-identities из `xcresulttool get test-results tests` JSON: exact union, каждый
-один раз, каждый Passed; missing, duplicate, skipped, failed, retry/repetition,
+identities из `xcresulttool get test-results tests` JSON: каждый exact набор
+в своём physical report (`unit-ui-1` и `ui-2` для full), затем exact union,
+каждый один раз, каждый Passed; missing, duplicate, skipped, failed, retry/repetition,
 unknown schema и filtered suite не проходят. Сейчас source inventory — 355 unit
 и 18 UI methods; новые units обнаруживаются автоматически, новый UI method
 требует явного назначения shard. Discovery рассчитан на текущие обычные XCTest
 classes/methods, не Swift Testing, dynamic/inherited или parameterized tests.
 При такой миграции сначала обновить discovery/schema tests, не ослаблять gate.
 
-Каждый native job всегда сохраняет `.xcresult` как tar, raw JSON и compact
-identities/timings, attachments и phase wall times: 7 дней при success, 14 при
-failure; temporary products — 1 день. Final proof связывает mode, test identities,
+Каждый test consumer (или producer в unit/diagnostic) всегда сохраняет
+`.xcresult` как tar, raw JSON и compact identities/timings, attachments и phase
+wall times: 7 дней при success, 14 при failure. Full producer сохраняет свои
+identity/archive proofs и timings без выдуманного test result; temporary
+products — 1 день. Final proof связывает mode, test identities,
 independent proofs, result hashes и same-run artifact IDs/digests. Failed/cancelled
 selected jobs не могут быть заменены зелёным subset или диагностическим run.
 
@@ -109,15 +118,19 @@ python3 -m unittest discover -s ios/tools -p 'test_native_ci.py' -v
 python3 -m unittest discover -s ios/tools -p 'test_testflight_internal.py' -v
 ```
 
-**Migration acceptance ещё требует macOS/Xcode run.** Linux hermetic subprocess
-и JSON schema tests плюс настоящий tar round-trip подтверждают tooling policy,
-но не переносимость Xcode test products. Первый authorized native PR должен
-проверить `.xctestrun` relative/absolute paths, test host/runner launch на двух
-чистых VMs, фактическую JSON schema и полный identity union + attachments.
+**Изменённый execution order ещё требует macOS/Xcode run.** Linux hermetic
+subprocess и JSON schema tests плюс настоящий tar round-trip подтверждают
+tooling policy, но не native acceptance. В новом authorized full run проверить
+unit→UI порядок единственного combined invocation, точные 355+9 и 9 identities,
+attachments/session ZIP proof и полный агрегатор. Переносимость `.xctestrun`,
+test host/runner launch и schema ранее проверялись отдельными native consumers;
+это не доказывает принятие нового DAG или устранение AX timeout.
 Если Xcode сохраняет иной absolute path или schema, gate обязан упасть;
 не добавлять rebuild/retry/subset fallback. До release rollout нужны native
 эквивалентность и пять сопоставимых full runs (median/p90 и runner-minutes).
-Ускорение двух shard пока прогноз, не измеренный результат; physical BLE/camera,
+Этот порядок — performance/order hypothesis, не доказанное исправление
+AXErrorIPCTimeout; post-tap waits/retries не добавлены. Ускорение не заявлено;
+physical BLE/camera,
 MP4, background и hardware synchronization остаются отдельными проверками.
 
 ## TestFlight через CI

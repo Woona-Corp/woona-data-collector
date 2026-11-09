@@ -59,8 +59,9 @@ def synthetic(path, *, compressed=False, mutate=None, extra=None):
 
 
 def plan():
-    return {"current_image": OLD_IMAGE, "current_source": OLD_SOURCE, "schema_revision": "0009",
-            "rollback_image": OLD_IMAGE, "rollback_schema_compatible": True, "storage_compatible": True,
+    return {"services": {service: {"current_image": OLD_IMAGE, "current_source": OLD_SOURCE,
+                                   "rollback_image": OLD_IMAGE} for service in p.SERVICES},
+            "schema_revision": "0009", "rollback_schema_compatible": True, "storage_compatible": True,
             "reviewed_source": SOURCE, "observation_seconds": 30,
             "compose_sha256": {n: digest(b"reviewed") for n in
                                ("compose.yaml", "compose.production.yaml", "compose.label.yaml")}}
@@ -222,6 +223,64 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(all(args[:2] == ["docker", "exec"] or args[:3] == ["docker", "image", "inspect"]
                             for args, _ in self.commands))
         self.assertIn((["docker", "image", "inspect", "--format", "{{.Id}}", OLD_IMAGE], {}), self.commands)
+        self.assertEqual(sum(args[:3] == ["docker", "image", "inspect"] for args, _ in self.commands), 1)
+
+    def test_mixed_role_baselines_preflight_and_apply_one_candidate(self):
+        worker_image = "sha256:" + "1" * 64
+        worker_source = "2" * 40
+        self.payload["plan"]["services"]["label_sync"] = {
+            "current_image": worker_image, "current_source": worker_source, "rollback_image": worker_image}
+        self.before["label_sync"][1] = worker_image
+
+        def role_probe(cid, source):
+            expected = worker_source if cid == "label_sync-old" else OLD_SOURCE if cid == "api-old" else SOURCE
+            self.assertEqual(source, expected)
+            return dict(self.observed, source_id=source)
+
+        def load(*args, **kwargs):
+            inspected = [argv[-1] for argv, _ in self.commands if argv[:3] == ["docker", "image", "inspect"]]
+            self.assertEqual(inspected, sorted([OLD_IMAGE, worker_image]))
+            return subprocess.CompletedProcess([], 0)
+
+        for apply in (False, True):
+            self.commands.clear()
+            snapshots = [self.before, self.before, self.after, self.after] if apply else [self.before]
+            with self.subTest(apply=apply), patch.object(p, "snapshot", side_effect=snapshots), \
+                    patch.object(p, "probe", side_effect=role_probe) as probes, patch.object(p, "run", side_effect=self.command), \
+                    patch.object(p.subprocess, "run", side_effect=load) as process, \
+                    patch.object(p.time, "monotonic", side_effect=[0, 31]):
+                result = p.remote(self.payload, apply=apply)
+            self.assertEqual(probes.call_args_list[0].args, ("api-old", OLD_SOURCE))
+            self.assertEqual(probes.call_args_list[1].args, ("label_sync-old", worker_source))
+            inspected = [argv[-1] for argv, _ in self.commands if argv[:3] == ["docker", "image", "inspect"]]
+            self.assertEqual(inspected[:2], sorted([OLD_IMAGE, worker_image]))
+            if apply:
+                process.assert_called_once()
+                self.assertEqual(result["image"], self.new_image)
+                replacement = next(json.loads(kwargs["data"]) for argv, kwargs in self.commands if "up" in argv)
+                self.assertEqual({role["image"] for role in replacement["services"].values()}, {self.new_image})
+            else:
+                process.assert_not_called()
+                self.assertEqual(len(inspected), 2)
+                self.assertEqual(result["status"], "preflight-only")
+
+    def test_each_mixed_role_rollback_must_exist_exactly_before_load(self):
+        worker_image = "sha256:" + "1" * 64
+        self.payload["plan"]["services"]["label_sync"]["current_image"] = worker_image
+        self.payload["plan"]["services"]["label_sync"]["rollback_image"] = worker_image
+        self.before["label_sync"][1] = worker_image
+        for missing in (OLD_IMAGE, worker_image):
+            def mismatch(args, *, missing=missing, **kwargs):
+                if args[:3] == ["docker", "image", "inspect"] and args[-1] == missing:
+                    return self.new_image.encode()
+                return self.command(args, **kwargs)
+
+            with self.subTest(missing=missing), patch.object(p, "snapshot", return_value=self.before), \
+                    patch.object(p, "probe", return_value=self.observed), patch.object(p, "run", side_effect=mismatch), \
+                    patch.object(p.subprocess, "run") as process, self.assertRaises(p.Rejected):
+                p.remote(self.payload, apply=True)
+            process.assert_not_called()
+            self.assertFalse(any("up" in args for args, _ in self.commands))
 
     def test_missing_local_rollback_stops_before_image_load_or_replacement(self):
         def absent(args, **kwargs):
@@ -236,8 +295,29 @@ class RuntimeTests(unittest.TestCase):
         process.assert_not_called()
         self.assertFalse(any('up' in args for args, _ in self.commands))
 
+    def test_runtime_changed_during_load_aborts_before_replacement_without_rollback(self):
+        live = copy.deepcopy(self.before)
+
+        def load(*args, **kwargs):
+            live["api"][0] = "api-parallel-manual-deployment"
+            return subprocess.CompletedProcess([], 0)
+
+        with patch.object(p, "snapshot", side_effect=lambda: copy.deepcopy(live)) as snapshots, \
+                patch.object(p, "probe", return_value=self.observed), patch.object(p, "run", side_effect=self.command), \
+                patch.object(p.subprocess, "run", side_effect=load) as process, \
+                self.assertRaisesRegex(p.Rejected, "runtime changed after preflight; separate review required"):
+            p.remote(self.payload, apply=True)
+        process.assert_called_once()
+        self.assertEqual(process.call_args.args[0], ["docker", "image", "load"])
+        self.assertEqual(snapshots.call_count, 2)
+        self.assertTrue(any(args[:2] == ["docker", "run"] and p.PROBE in args for args, _ in self.commands))
+        self.assertEqual(sum(args[:3] == ["docker", "image", "inspect"] and args[-1] == OLD_IMAGE
+                             for args, _ in self.commands), 1)
+        self.assertFalse(any(set(args) & {"up", "down", "stop", "restart", "rm", "downgrade"}
+                             for args, _ in self.commands))
+
     def test_apply_scoped_no_build_no_dependencies_direct_uvicorn_and_observe(self):
-        with patch.object(p, "snapshot", side_effect=[self.before, self.after, self.after]), \
+        with patch.object(p, "snapshot", side_effect=[self.before, self.before, self.after, self.after]), \
                 patch.object(p, "probe", return_value=self.observed), patch.object(p, "run", side_effect=self.command), \
                 patch.object(p.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
                 patch.object(p.time, "monotonic", side_effect=[0, 31]):
@@ -263,7 +343,7 @@ class RuntimeTests(unittest.TestCase):
                 raise p.Rejected("external command failed (output suppressed)")
             return self.command(args, **kwargs)
 
-        with patch.object(p, "snapshot", side_effect=[self.before, self.after, self.after]), \
+        with patch.object(p, "snapshot", side_effect=[self.before, self.before, self.after, self.after]), \
                 patch.object(p, "probe", return_value=self.observed), patch.object(p, "run", side_effect=consumer), \
                 patch.object(p.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
                 patch.object(p.time, "monotonic", side_effect=[0, 31]):
@@ -304,7 +384,7 @@ class RuntimeTests(unittest.TestCase):
                 changed[service][0] = "changed"
             else:
                 changed[service][3] = 1
-            with self.subTest(service=service), patch.object(p, "snapshot", side_effect=[self.before, self.after, changed]), \
+            with self.subTest(service=service), patch.object(p, "snapshot", side_effect=[self.before, self.before, self.after, changed]), \
                     patch.object(p, "probe", return_value=self.observed), patch.object(p, "run", side_effect=self.command), \
                     patch.object(p.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
                     patch.object(p.time, "monotonic", return_value=0), self.assertRaises(p.Rejected):
@@ -325,6 +405,37 @@ class RuntimeTests(unittest.TestCase):
             value_plan = plan()
             value_plan[key] = value
             with self.subTest(key=key), self.assertRaises(p.Rejected):
+                p.validate_plan(value_plan)
+
+    def test_strict_service_and_role_fieldsets_and_identities(self):
+        malformed_services = [None, [], {}, {"api": plan()["services"]["api"]},
+                              dict(plan()["services"], worker=plan()["services"]["label_sync"]),
+                              {"api": plan()["services"]["api"], "unknown": plan()["services"]["label_sync"]}]
+        for services in malformed_services:
+            value_plan = plan()
+            value_plan["services"] = services
+            with self.subTest(services=services), self.assertRaises(p.Rejected):
+                p.validate_plan(value_plan)
+        for service in p.SERVICES:
+            for field in ("current_image", "current_source", "rollback_image"):
+                for wrong in (None, 123, True, "", "latest", "sha256:bad", self.new_image if field == "rollback_image" else "x" * 40):
+                    value_plan = plan()
+                    value_plan["services"][service][field] = wrong
+                    with self.subTest(service=service, field=field, wrong=wrong), self.assertRaises(p.Rejected):
+                        p.validate_plan(value_plan)
+                value_plan = plan()
+                del value_plan["services"][service][field]
+                with self.subTest(service=service, missing=field), self.assertRaises(p.Rejected):
+                    p.validate_plan(value_plan)
+            for malformed in (None, [], dict(plan()["services"][service], unexpected=True)):
+                value_plan = plan()
+                value_plan["services"][service] = malformed
+                with self.subTest(service=service, malformed=malformed), self.assertRaises(p.Rejected):
+                    p.validate_plan(value_plan)
+        for legacy_field, value in (("current_image", OLD_IMAGE), ("current_source", OLD_SOURCE), ("rollback_image", OLD_IMAGE)):
+            value_plan = plan()
+            value_plan[legacy_field] = value
+            with self.subTest(legacy_field=legacy_field), self.assertRaises(p.Rejected):
                 p.validate_plan(value_plan)
 
     def test_command_errors_redacted(self):

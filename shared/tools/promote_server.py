@@ -282,13 +282,23 @@ def probe(cid, source):
 
 
 def validate_plan(plan):
-    require(set(plan) == {"current_image", "current_source", "schema_revision", "rollback_image",
-                          "rollback_schema_compatible", "storage_compatible", "reviewed_source", "observation_seconds", "compose_sha256"},
+    require(isinstance(plan, dict) and set(plan) == {"services", "schema_revision",
+            "rollback_schema_compatible", "storage_compatible", "reviewed_source", "observation_seconds", "compose_sha256"},
             "invalid protected review plan")
-    require(DIGEST.fullmatch(plan["current_image"]) and DIGEST.fullmatch(plan["rollback_image"]) and
-            SOURCE.fullmatch(plan["current_source"]) and SOURCE.fullmatch(plan["reviewed_source"]), "invalid plan identity")
-    require(plan["rollback_image"] == plan["current_image"] and plan["rollback_schema_compatible"] is True and
-            plan["storage_compatible"] is True and plan["schema_revision"] == "0009", "separate owner compatibility plan required")
+    require(isinstance(plan["services"], dict) and set(plan["services"]) == set(SERVICES),
+            "exact reviewed service baselines required")
+    for service in SERVICES:
+        baseline = plan["services"][service]
+        require(isinstance(baseline, dict) and set(baseline) == {"current_image", "current_source", "rollback_image"},
+                "invalid service baseline fields")
+        require(isinstance(baseline["current_image"], str) and DIGEST.fullmatch(baseline["current_image"]) and
+                isinstance(baseline["rollback_image"], str) and DIGEST.fullmatch(baseline["rollback_image"]) and
+                isinstance(baseline["current_source"], str) and SOURCE.fullmatch(baseline["current_source"]),
+                "invalid service baseline identity")
+        require(baseline["rollback_image"] == baseline["current_image"], "reviewed role rollback must match current image")
+    require(isinstance(plan["reviewed_source"], str) and SOURCE.fullmatch(plan["reviewed_source"]), "invalid plan identity")
+    require(plan["rollback_schema_compatible"] is True and plan["storage_compatible"] is True and
+            plan["schema_revision"] == "0009", "separate owner compatibility plan required")
     require(type(plan["observation_seconds"]) is int and 30 <= plan["observation_seconds"] <= 300,
             "bounded worker observation required")
     require(isinstance(plan["compose_sha256"], dict) and set(plan["compose_sha256"]) ==
@@ -308,15 +318,16 @@ def remote(payload, apply=False):
     before = snapshot()
     for service in SERVICES:
         item = before[service]
-        require(item[1] == plan["current_image"] and item[2] == "running", "runtime baseline mismatch")
-        observed = probe(item[0], plan["current_source"])
+        baseline = plan["services"][service]
+        require(item[1] == baseline["current_image"] and item[2] == "running", "runtime baseline mismatch")
+        observed = probe(item[0], baseline["current_source"])
         require(observed["schema_revision"] == plan["schema_revision"], "runtime schema mismatch")
     require(decode(run(["docker", "exec", before["api"][0], "python", "-B", "-c", SCHEMA])) ==
             [plan["schema_revision"]], "database schema mismatch; separate owner migration plan required")
     run(["docker", "exec", before["api"][0], "python", "-B", "-c", HEALTH])
-    rollback = run(["docker", "image", "inspect", "--format", "{{.Id}}",
-                    plan["rollback_image"]]).decode().strip()
-    require(rollback == plan["rollback_image"], "reviewed local rollback image unavailable")
+    for rollback_image in sorted({baseline["rollback_image"] for baseline in plan["services"].values()}):
+        rollback = run(["docker", "image", "inspect", "--format", "{{.Id}}", rollback_image]).decode().strip()
+        require(rollback == rollback_image, "reviewed local rollback image unavailable")
     if not apply:
         return {"status": "preflight-only", "schema": plan["schema_revision"], "services": list(SERVICES)}
     # docker load is the first remote mutation. Archive arrives only after preflight.
@@ -341,6 +352,7 @@ def remote(payload, apply=False):
     override = {"services": {
         "api": {"image": image, "entrypoint": ["uvicorn"], "command": ["server.app:app", "--host", "0.0.0.0", "--port", "8080"]},  # nosec B104: container-only; reviewed Compose publishes loopback
         "label_sync": {"image": image, "entrypoint": ["python"], "command": ["-B", "-m", "server.label_sync"]}}}
+    require(snapshot() == before, "runtime changed after preflight; separate review required")
     run(COMPOSE + ["-f", "-", "up", "-d", "--no-build", "--no-deps", "--pull", "never",
                    "--wait", "--wait-timeout", "90", "--timeout", "30", *SERVICES], data=canonical(override), timeout=150)
     # No automatic rollback. A failure stops clients; operator reviews current schema first.
