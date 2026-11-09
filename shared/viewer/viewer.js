@@ -340,6 +340,7 @@
 
       if (points.length) {
         ctx.strokeStyle = css("--accent");
+        ctx.fillStyle = css("--accent");
         ctx.lineWidth = 1.2;
         ctx.beginPath();
         points.forEach((point, index) => {
@@ -349,6 +350,26 @@
           else ctx.lineTo(x, y);
         });
         ctx.stroke();
+
+        // Preserve the "individual samples" view when there are few enough
+        // rendered points. On wide/full-recording views the min/max envelope
+        // may still contain thousands of points, so drawing a circle for every
+        // one would turn the graph into a solid blob and waste CPU.
+        const pointsPerPixel = points.length / Math.max(1, plotWidth);
+        const pointRadius =
+          pointsPerPixel <= 0.35 ? 2.2 :
+          pointsPerPixel <= 0.9 ? 1.25 :
+          0;
+        if (pointRadius > 0) {
+          ctx.beginPath();
+          for (const point of points) {
+            const x = xFor(point[0]);
+            const y = yFor(point[1]);
+            ctx.moveTo(x + pointRadius, y);
+            ctx.arc(x, y, pointRadius, 0, Math.PI * 2);
+          }
+          ctx.fill();
+        }
       }
     }
 
