@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from sqlalchemy import create_engine, text
 from starlette.concurrency import run_in_threadpool
 
+from viewer.http_range import parse_byte_range
 from viewer.decoder import (
     DecodeError,
     RecordingIndex,
@@ -338,19 +339,6 @@ async def signals(
 
 
 
-def _parse_byte_range(range_header: str, size: int) -> tuple[int, int]:
-    import re
-
-    match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header)
-    if match is None:
-        raise ValueError("invalid_range")
-    start = int(match.group(1))
-    end = int(match.group(2)) if match.group(2) else size - 1
-    if start >= size or end < start or end >= size:
-        raise ValueError("range_not_satisfiable")
-    return start, end
-
-
 def _stream_file(path: Path, start: int, length: int):
     with path.open("rb") as source:
         source.seek(start)
@@ -401,7 +389,7 @@ def recording_video(recording_id: uuid.UUID, request: Request):
         )
 
     try:
-        start, end = _parse_byte_range(range_header, size)
+        start, end = parse_byte_range(range_header, size)
     except ValueError as error:
         raise HTTPException(
             416,
