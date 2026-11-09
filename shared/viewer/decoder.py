@@ -13,6 +13,20 @@ MAX_MEASUREMENT_COUNT = 4
 MAX_SENSOR_BLOCK_TRAILER_BYTES = 4
 TIMELINE_ROW = struct.Struct(">qqqqqi")
 
+# Canonical V2 sensor types written by the mobile clients.
+# The on-disk packet format does not carry sample rate, so the viewer uses the
+# protocol's current fixed stream profile. Unknown/legacy types retain a safe
+# 1 kHz fallback instead of inventing a physical label.
+STREAM_SAMPLE_RATES_HZ = {
+    2: 1000,  # accelerometer
+    3: 1000,  # gyroscope
+    4: 8000,  # contact microphone
+    5: 8000,  # ambient microphone
+    6: 1000,  # piezo
+    7: 1,     # main-board temperature
+    8: 1,     # ribbon temperature
+}
+
 
 class DecodeError(ValueError):
     pass
@@ -34,8 +48,7 @@ class PacketEntry:
     length: int
     counter: int
     device_timer_ms: int
-    sample_start_timer_ms: int
-    sample_count: int
+    unwrapped_device_timer_ms: int
     host_wall_clock_ms: int | None
     host_monotonic_ns: int | None
     start_ms: float
@@ -57,9 +70,13 @@ class RecordingIndex:
     gaps: tuple[dict, ...]
 
 
+def stream_sample_rate_hz(sensor_type: int) -> int:
+    return STREAM_SAMPLE_RATES_HZ.get(sensor_type, 1000)
+
+
 def stream_label(sensor_type: int, channel: int) -> str:
     if sensor_type == 1:
-        return f"Temperature {channel}"
+        return f"Legacy temperature {channel}"
     if sensor_type == 2:
         axis = {1: "X", 2: "Y", 3: "Z"}.get(channel, str(channel))
         return f"Accel {axis}"
@@ -67,7 +84,15 @@ def stream_label(sensor_type: int, channel: int) -> str:
         axis = {1: "X", 2: "Y", 3: "Z"}.get(channel, str(channel))
         return f"Gyro {axis}"
     if sensor_type == 4:
-        return f"Mic {channel}"
+        return "Contact microphone" if channel == 1 else f"Contact microphone {channel}"
+    if sensor_type == 5:
+        return "Ambient microphone" if channel == 1 else f"Ambient microphone {channel}"
+    if sensor_type == 6:
+        return "Piezo" if channel == 1 else f"Piezo {channel}"
+    if sensor_type == 7:
+        return "Main-board temperature" if channel == 1 else f"Main-board temperature {channel}"
+    if sensor_type == 8:
+        return "Ribbon temperature" if channel == 1 else f"Ribbon temperature {channel}"
     return f"Sensor {sensor_type} / ch {channel}"
 
 
@@ -159,6 +184,18 @@ def read_timeline(path: Path) -> list[TimelineEntry]:
     return result
 
 
+def _packet_duration_ms(values: dict[tuple[int, int], list[float]]) -> float:
+    duration = 0.0
+    for (sensor_type, _), samples in values.items():
+        if len(samples) <= 1:
+            continue
+        duration = max(
+            duration,
+            (len(samples) - 1) * 1000.0 / stream_sample_rate_hz(sensor_type),
+        )
+    return duration
+
+
 def build_index(packet_path: Path, timeline_path: Path | None = None) -> RecordingIndex:
     packet_path = packet_path.resolve()
     if not packet_path.is_file():
@@ -169,10 +206,11 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
     entries: list[PacketEntry] = []
     streams: set[tuple[int, int]] = set()
     gaps: list[dict] = []
-    previous_sample_timer: int | None = None
-    first_host_ns: int | None = None
-    first_device_sample_ms: int | None = None
     previous_counter: int | None = None
+    previous_raw_timer: int | None = None
+    timer_epoch = 0
+    first_unwrapped_timer: int | None = None
+    first_host_ns: int | None = None
 
     for packet_index, (offset, packet) in enumerate(iter_packets(packet_path)):
         counter, device_timer_ms, values = _validate_packet(packet)
@@ -187,36 +225,35 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
             ):
                 raise DecodeError("packet timeline does not match packets.bin")
 
+        if previous_raw_timer is not None and device_timer_ms < previous_raw_timer:
+            backwards = previous_raw_timer - device_timer_ms
+            if backwards > 0x8000_0000:
+                timer_epoch += 1 << 32
+            else:
+                raise DecodeError("device timer regressed without uint32 rollover")
+        previous_raw_timer = device_timer_ms
+        unwrapped_timer = timer_epoch + device_timer_ms
+        if first_unwrapped_timer is None:
+            first_unwrapped_timer = unwrapped_timer
+
         streams.update(values)
-        sample_count = max((len(series) for series in values.values()), default=0)
-        sample_start = max(
-            device_timer_ms,
-            (previous_sample_timer + 1) if previous_sample_timer is not None else device_timer_ms,
-        )
-        if sample_count:
-            previous_sample_timer = sample_start + sample_count - 1
+        packet_duration = _packet_duration_ms(values)
 
         if timeline_entry is not None:
-            packet_start_host_ns = timeline_entry.host_monotonic_ns + (sample_start - device_timer_ms) * 1_000_000
-            if first_host_ns is None and sample_count:
-                first_host_ns = packet_start_host_ns
-            anchor_ns = first_host_ns if first_host_ns is not None else packet_start_host_ns
-            start_ms = (packet_start_host_ns - anchor_ns) / 1_000_000.0
-            end_ms = start_ms + max(0, sample_count - 1)
+            if first_host_ns is None:
+                first_host_ns = timeline_entry.host_monotonic_ns
+            start_ms = (timeline_entry.host_monotonic_ns - first_host_ns) / 1_000_000.0
             host_wall = timeline_entry.host_wall_clock_ms
             host_mono = timeline_entry.host_monotonic_ns
         else:
-            if first_device_sample_ms is None and sample_count:
-                first_device_sample_ms = sample_start
-            anchor_ms = first_device_sample_ms if first_device_sample_ms is not None else sample_start
-            start_ms = float(sample_start - anchor_ms)
-            end_ms = start_ms + max(0, sample_count - 1)
+            start_ms = float(unwrapped_timer - first_unwrapped_timer)
             host_wall = None
             host_mono = None
+        end_ms = start_ms + packet_duration
 
         if previous_counter is not None:
             delta = (counter - previous_counter) & 0xFFFFFFFF
-            if 1 < delta < 0x80000000:
+            if 1 < delta < 0x8000_0000:
                 gaps.append({
                     "afterCounter": previous_counter,
                     "beforeCounter": counter,
@@ -230,8 +267,7 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
             length=len(packet),
             counter=counter,
             device_timer_ms=device_timer_ms,
-            sample_start_timer_ms=sample_start,
-            sample_count=sample_count,
+            unwrapped_device_timer_ms=unwrapped_timer,
             host_wall_clock_ms=host_wall,
             host_monotonic_ns=host_mono,
             start_ms=start_ms,
@@ -243,7 +279,7 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
 
     packet_stat = packet_path.stat()
     timeline_stat = timeline_path.stat() if timeline_path else None
-    duration = max((entry.end_ms for entry in entries if entry.sample_count), default=0.0)
+    duration = max((entry.end_ms for entry in entries), default=0.0)
     return RecordingIndex(
         packet_path=packet_path,
         timeline_path=timeline_path,
@@ -254,7 +290,7 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
         entries=tuple(entries),
         streams=tuple(sorted(streams)),
         duration_ms=max(0.0, duration),
-        time_base="host_monotonic" if timeline_path else "device_timer",
+        time_base="host_monotonic+stream_rate" if timeline_path else "device_timer+stream_rate",
         gaps=tuple(gaps),
     )
 
@@ -330,23 +366,9 @@ def query_signals(
     selected = set(index.streams) if selected_streams is None else set(selected_streams) & set(index.streams)
     collectors = {key: _SeriesCollector(start_ms, end_ms, max_points) for key in selected}
 
-    first_host = next(
-        (
-            item.host_monotonic_ns
-            + (item.sample_start_timer_ms - item.device_timer_ms) * 1_000_000
-            for item in index.entries
-            if item.sample_count and item.host_monotonic_ns is not None
-        ),
-        None,
-    )
-    first_sample = next(
-        (item.sample_start_timer_ms for item in index.entries if item.sample_count),
-        None,
-    )
-
     with index.packet_path.open("rb") as source:
         for entry in index.entries:
-            if not entry.sample_count or entry.end_ms < start_ms or entry.start_ms > end_ms:
+            if entry.end_ms < start_ms or entry.start_ms > end_ms:
                 continue
             source.seek(entry.offset)
             packet = source.read(entry.length)
@@ -359,15 +381,10 @@ def query_signals(
                 if not series:
                     continue
                 collector = collectors[key]
+                rate_hz = stream_sample_rate_hz(key[0])
+                step_ms = 1000.0 / rate_hz
                 for sample_index, value in enumerate(series):
-                    sample_timer = entry.sample_start_timer_ms + sample_index
-                    if entry.host_monotonic_ns is not None and first_host is not None:
-                        host_ns = entry.host_monotonic_ns + (sample_timer - entry.device_timer_ms) * 1_000_000
-                        t_ms = (host_ns - first_host) / 1_000_000.0
-                    elif first_sample is not None:
-                        t_ms = float(sample_timer - first_sample)
-                    else:
-                        continue
+                    t_ms = entry.start_ms + sample_index * step_ms
                     if start_ms <= t_ms <= end_ms:
                         collector.add(t_ms, value)
 
@@ -379,6 +396,7 @@ def query_signals(
             "sensorType": sensor_type,
             "channel": channel,
             "label": stream_label(sensor_type, channel),
+            "sampleRateHz": stream_sample_rate_hz(sensor_type),
             "rawCount": collector.count,
             "points": collector.points(),
         })
