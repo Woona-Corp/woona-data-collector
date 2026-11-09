@@ -78,7 +78,7 @@
         const option = document.createElement("option");
         option.value = recording.id;
         option.textContent =
-          `${recording.dog} — ${formatStarted(recording.startedAtUtc)}` +
+          `${recording.sessionLabel || recording.dog} · ${recording.dog} — ${formatStarted(recording.startedAtUtc)}` +
           `${recording.hasTimeline ? "" : " · no host timeline"}`;
         els.recordingSelect.append(option);
       }
@@ -126,7 +126,7 @@
     const meta = state.meta;
     if (!meta) return;
     els.recordingInfo.innerHTML =
-      `<span><strong>${escapeHtml(meta.dog)}</strong></span>` +
+      `<span><strong>${escapeHtml(meta.sessionLabel || meta.dog)}</strong> · ${escapeHtml(meta.dog)}</span>` +
       `<span>${escapeHtml(formatStarted(meta.startedAtUtc))}</span>` +
       `<span>duration <strong>${formatDuration(meta.durationMs)}</strong></span>` +
       `<span>${meta.packetCount.toLocaleString()} packets</span>` +
