@@ -55,5 +55,24 @@ services:
     volumes:
       - ${WOONA_STORAGE_ROOT_HOST:-../var/storage}:/srv/woona
 
+  viewer:
+    build:
+      context: .
+      dockerfile: viewer/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-woona}:${POSTGRES_PASSWORD:-woona-local-only}@postgres:5432/${POSTGRES_DB:-woona}
+      WOONA_STORAGE_ROOT: /srv/woona
+      WOONA_ENVIRONMENT: ${WOONA_ENVIRONMENT:-development}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health/ready', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - ${WOONA_STORAGE_ROOT_HOST:-../var/storage}:/srv/woona:ro
+
 volumes:
   postgres_data:
