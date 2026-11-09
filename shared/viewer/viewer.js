@@ -332,7 +332,11 @@
       ctx.fillStyle = css("--text");
       ctx.fillText(signal.label, 10, y0 + 18);
       ctx.fillStyle = css("--muted");
-      ctx.fillText(`${min.toFixed(1)} … ${max.toFixed(1)}`, 10, y0 + 36);
+      ctx.fillText(
+        `${min.toFixed(2)} … ${max.toFixed(2)} ${signal.unit || ""}`.trim(),
+        10,
+        y0 + 36,
+      );
 
       if (points.length) {
         ctx.strokeStyle = css("--accent");
@@ -398,7 +402,7 @@
     const rows = [`t = ${formatDuration(state.cursorMs)}`];
     for (const signal of signals) {
       const point = nearestPoint(signal.points, state.cursorMs);
-      if (point) rows.push(`${signal.label}: ${point[1]}`);
+      if (point) rows.push(`${signal.label}: ${point[1]} ${signal.unit || ""}`.trim());
     }
     els.cursorReadout.textContent = rows.join("\n");
     els.cursorReadout.classList.remove("hidden");
