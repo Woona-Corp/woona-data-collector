@@ -452,7 +452,7 @@ only after their distribution gates. A prepared version number is not a release,
 TestFlight upload, tester invitation or physical-device verification.
 
 
-## Final software gate and authorized release execution — 2026-11-08
+## Final software gate and authorized release execution — 2026-11-09
 
 The owner authorized merge and independent platform distribution. Full Android
 CI [42490002092](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42490002092)
@@ -477,3 +477,97 @@ deployment. No production server, SQL, user data, backups or physical phone was
 changed during this release execution. Android signed-asset publication and iOS
 Apple processing/internal availability remain separate distribution gates until
 observed below.
+
+
+## Distribution evidence — 2026-11-09
+
+PR #19 was marked ready and merged after owner authorization. Gate-evidence
+commit: `6c62e511c547da76b8114f87b6e35baffa2189f7`; merge/release commit:
+`fb64acf5188b53df633603980732999a74d6f551`. Independent annotated tags
+`android-v1.5.8` and `ios-v1.5.8` both point to that merge, without moving tags or
+changing release code afterward.
+
+### Android signed delivery
+
+[Release workflow 42608281896](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42608281896)
+passed Android fast/lint/build, server tests and signing/publication.
+[GitHub release](https://github.com/Woona-Corp/woona-data-collector/releases/tag/android-v1.5.8)
+published at **11:28:52 UTC** with `Woona-Android-release.apk` and
+`SHA256SUMS-android.txt`. Independently downloaded assets verify with
+`sha256sum -c`; APK size **23,160,160 bytes**, SHA-256
+`fef845fb4a3f7a8a14fe8d3e9ea73abb1064bf6fbf3bb3fb31e1c6361ff6fbda`.
+`apksigner verify --verbose --print-certs` confirms v2 signing and expected field
+certificate SHA-256
+`cf308a3b4d025e871bf30225ce1d1c3499f0fcd9d557f8a8ac5f5c414b381fa2`.
+`aapt dump badging` confirms `com.woona.drivetest`, **1.5.8/code21**, min31/target36;
+`apkanalyzer dex code --class com.example.myapplication.BuildConfig` confirms
+release/debug=false, production HTTPS URL and **empty WOONA_SERVER_TOKEN**.
+No phone installation was performed.
+
+A supplementary local `./android/tools/check.sh full` on the exact release
+source **failed**, unlike the earlier full CI/physical gates: XML reports
+**248 cases, 239 passed, one failure, eight skips**. JVM/lint tasks passed.
+`AppShellNavigationTest.sheetSession_preservesMultipleSurfacesAcrossLocationChange`
+failed at line529, `checkbox("Gait/movement").assertIsOn()`, with
+`IllegalStateException: No compose hierarchies found in the app`. Its preceding
+text input, keyboard close and movement click returned. The per-case log records
+Activity RESUMED, later PAUSED/STOPPED/DESTROYED and exception reporting, but does
+not establish whether destruction preceded the primary assertion or was cleanup.
+No app fatal crash/ANR was identified in that per-case log. This does **not** prove
+an emulator-only root cause or a production questionnaire failure; the local
+failure remains unexplained. Private log/XML evidence is retained outside Git.
+
+One full exact-tag CI comparison was requested, not a retry-until-green loop:
+[42609790701](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42609790701)
+**passed**. Downloaded XML confirms **368 JVM passed**, **248 instrumentation:
+240 passed, eight opt-in skips, zero failures/errors**. All assertions remained;
+no source, filter, timeout, tolerance or dependency was changed. This comparison
+did not reproduce the local failure and does not erase it. Its release job was
+skipped (manual Android-only scope); published release assets stayed unchanged.
+
+### iOS upload, Apple processing and internal availability
+
+[Distribution run 42608287801](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42608287801)
+passed the independent archive tests including large ZIP64, native macOS
+**355 unit +18 UI** tests, export proof, signed archive and Apple upload.
+CI run number44/attempt1 gives build **14401**; upload succeeded at
+**11:46:14 UTC**. No local Linux result is represented as an Xcode build.
+
+Initial read-only Apple check
+[42611802061](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42611802061)
+found exact app `com.woona.apps`, version1.5.8/build14401,
+build ID `f007dcc6-4366-4663-acd0-d5b3582e92f2`: **VALID**, nonexpired,
+**READY_FOR_BETA_TESTING**, but no assigned internal group. Upload alone was
+therefore not reported as tester access.
+
+The documented explicit internal-only assignment
+[42611969572](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42611969572)
+passed and reread **VALID**, **expired=false**, **IN_BETA_TESTING**,
+`available_for_internal_testers=true`. Existing internal group
+`30aea5fd-5ead-431a-b61f-3fe27277d681` has **two testers**, `assigned=true`.
+No people were invited; no external group, beta review or App Store submission
+was requested. `physical_installation_verified=false`: Apple availability is
+not evidence of download, installation or physical iPhone/BLE/camera behavior.
+
+Exact merge main CI
+[42608266761](https://github.com/Woona-Corp/woona-data-collector/actions/runs/42608266761)
+also passed, including native **355 unit +18 UI** and server checks.
+
+### Postrelease orchestration test migration
+
+The root workspace test depended on an ignored workspace-only `./woona` symlink.
+After coordinating with the root-docs owner, commit
+`fcd750d` moves its coverage into mobile's existing `.github/ci/test_woona.py`
+discovery: mobile ROOT, explicit `ROOT/shared/compose.yaml`, temporary mocked
+Docker, and the existing real disabled-backup-policy shell test. No production
+SSH/Docker, database or data mutation is performed. Both success and server-test
+failure cleanup exits remain asserted. `python3 -m unittest discover -s
+.github/ci -p 'test_*.py' -v` passed **14/14**; the changed Python file's active LSP
+probe reported zero diagnostics. This is a separate test-only commit, not new
+release code. Release tags remain fixed at `fb64acf`.
+
+No production deployment, server restart, SQL/data edit, backup activation,
+landing/firmware change or physical-phone command was performed by this mobile
+release task. Remaining gates are physical acquisition/background/clinical
+acceptance and investigation of the isolated local instrumentation failure,
+not signed publication or Apple internal availability.

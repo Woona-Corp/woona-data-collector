@@ -1,6 +1,6 @@
 # Woona mobile release notes
 
-## Unreleased candidate — Android 1.5.8 / iOS 1.5.8
+## Android 1.5.8 / iOS 1.5.8 — 2026-11-09
 
 - Prevent creating another local dog card with an already used animal ID,
   including historical aliases and cards in other data accounts. Comparison is
@@ -27,13 +27,22 @@
   in addition to visual masking; ordinary text-keyboard suggestions must not echo
   the entered credential.
 
-### Candidate verification and release gate
+### Release verification and distribution
 
-This heading prepares a version; it does not announce a release or tester access.
-Combined Android fast/full regression, native macOS iOS tests, visual review and
-release-asset checks must pass for the final source before publication. Existing
-physical BLE/camera/background and historical-data limitations still apply. No
-server API/schema migration or backup job is introduced by this candidate.
+- Android `android-v1.5.8`: signed field-key APK (version code 21) and checksum
+  [published](https://github.com/Woona-Corp/woona-data-collector/releases/tag/android-v1.5.8);
+  downloaded bytes, signature, version and empty embedded token verified.
+- iOS `ios-v1.5.8`: build **14401** uploaded; Apple processing **VALID**, nonexpired,
+  **IN_BETA_TESTING**, assigned to the existing internal group with two testers.
+  This verifies internal availability, not an installation, invitation, external
+  testing or App Store publication.
+- Exact-release Android full CI: **368 JVM passed; 240 instrumentation passed,
+  eight opt-in skips, zero failures/errors**. Native iOS: **355 unit +18 UI passed**.
+  An additional local full run had one no-Compose-hierarchy failure; the single
+  exact-tag CI comparison passed, without erasing or explaining that local failure.
+- [Detailed runs, assets, physical/visual evidence and remaining limitations](shared/docs/qa-identity-sync-20261107.md#distribution-evidence--2026-11-09).
+  Real BLE/camera/background and physical-iPhone acceptance remain separate.
+  No server API/schema migration, production deployment or backup job was needed.
 
 ## Android 1.5.5 / iOS 1.5.5
 
