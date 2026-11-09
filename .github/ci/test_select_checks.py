@@ -142,6 +142,15 @@ class PolicyTests(unittest.TestCase):
             outputs = {**needs["changes"]["outputs"], "ios": value}
             self.assertFalse(required_gate({**needs, "changes": {"result": "success", "outputs": outputs}}))
 
+    def test_only_open_pr_publishes_protected_context(self):
+        workflow = (ROOT / '.github/workflows/mobile.yml').read_text()
+        gate = workflow.split('\n  ci-required:\n', 1)[1]
+        self.assertIn("${{ github.event_name == 'pull_request'", gate)
+        self.assertIn("&& github.event.action != 'closed'", gate)
+        self.assertIn("&& 'ci-required' || 'ci-observed' }}", gate)
+        self.assertIn('if: always()', gate)
+        self.assertIn('CI_NEEDS: ${{ toJSON(needs) }}', gate)
+
     def test_android_publish_and_server_export_wiring(self):
         mobile = (ROOT / ".github/workflows/mobile.yml").read_text()
         self.assertNotIn("--clobber", mobile)

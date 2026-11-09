@@ -1,7 +1,10 @@
 # Mobile CI selection and required gate
 
-`mobile.yml` always runs the Linux `changes` policy/documentation gate and the
-stable `ci-required` aggregate. There is no workflow-level path filter. Configure
+`mobile.yml` always runs the Linux `changes` policy/documentation gate and a
+fail-closed aggregate. Only open PRs publish the protected `ci-required` context;
+main/tag/manual/closed runs publish `ci-observed` instead. A focused manual or
+closed-PR no-op therefore cannot substitute for the required PR gate on the same
+commit. There is no workflow-level path filter. Configure
 main protection to require `ci-required`, up-to-date PRs and no runtime direct-push
 or bypass before setting repository variable `CI_MAIN_UNITS_ENABLED=true`.
 This change does not itself configure GitHub branch protection.
@@ -65,7 +68,11 @@ it is not a cross-run proof service or evidence of physical-device acceptance.
 ## Releases, exports and cancellation
 
 Signing and Android publication require an Android tag **push**, not a manual
-run on a tag ref. Full debug tests finish before signing secrets enter the
+run on a tag ref **containing this workflow version**. Historical tags keep their
+historical workflows: do not dispatch older release tags as diagnostics, because
+those old definitions predate this separation. Do not move tags to retrofit CI;
+use a branch containing the reviewed workflow instead.
+Full debug tests finish before signing secrets enter the
 release step. Release assembly remains a separate variant invocation. Certificate,
 versionName/tag equality, empty generated release bearer token, APK size and SHA
 checks precede publication. Existing releases are immutable: no `--clobber` or

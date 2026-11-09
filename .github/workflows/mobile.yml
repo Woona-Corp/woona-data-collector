@@ -388,6 +388,11 @@ jobs:
           fi
 
   ci-required:
+    # Diagnostics and closed PR no-ops must not satisfy protected PR checks.
+    name: >-
+      ${{ github.event_name == 'pull_request'
+      && github.event.action != 'closed'
+      && 'ci-required' || 'ci-observed' }}
     if: always()
     needs: [changes, android, ios, server, release]
     runs-on: ubuntu-latest
