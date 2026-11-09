@@ -189,7 +189,7 @@ def viewer_js():
 def recordings(limit: int = Query(default=250, ge=1, le=1000)):
     rows = _readonly_rows(
         """
-        SELECT r.id, r.started_at, r.capture_status, r.ingest_status,
+        SELECT r.id, r.started_at, r.session_label, r.capture_status, r.ingest_status,
                d.number_or_name AS dog,
                bool_or(a.artifact_type='packet' AND a.storage_status='available') AS has_packets,
                bool_or(a.artifact_type='packet_timeline' AND a.storage_status='available') AS has_timeline,
@@ -197,7 +197,7 @@ def recordings(limit: int = Query(default=250, ge=1, le=1000)):
         FROM recordings r
         JOIN dogs d ON d.id=r.dog_id
         LEFT JOIN artifacts a ON a.recording_id=r.id
-        GROUP BY r.id, r.started_at, r.capture_status, r.ingest_status, d.number_or_name
+        GROUP BY r.id, r.started_at, r.session_label, r.capture_status, r.ingest_status, d.number_or_name
         HAVING bool_or(a.artifact_type='packet' AND a.storage_status='available')
         ORDER BY r.started_at DESC
         LIMIT :limit
@@ -209,6 +209,7 @@ def recordings(limit: int = Query(default=250, ge=1, le=1000)):
             {
                 "id": str(row["id"]),
                 "dog": row["dog"],
+                "sessionLabel": row["session_label"],
                 "startedAtUtc": row["started_at"].isoformat(),
                 "captureStatus": row["capture_status"],
                 "ingestStatus": row["ingest_status"],
@@ -225,7 +226,7 @@ async def recording_meta(recording_id: uuid.UUID):
     index = await run_in_threadpool(_index_for, recording_id)
     rows = _readonly_rows(
         """
-        SELECT r.started_at, r.capture_status, r.ingest_status, d.number_or_name AS dog,
+        SELECT r.started_at, r.session_label, r.capture_status, r.ingest_status, d.number_or_name AS dog,
                s.video_offset_from_sensor_ns, s.video_first_sample_pts_us,
                s.overall_sync_quality, s.camera_clock_quality
         FROM recordings r
@@ -241,6 +242,7 @@ async def recording_meta(recording_id: uuid.UUID):
     return {
         "id": str(recording_id),
         "dog": row["dog"],
+        "sessionLabel": row["session_label"],
         "startedAtUtc": row["started_at"].isoformat(),
         "captureStatus": row["capture_status"],
         "ingestStatus": row["ingest_status"],
@@ -299,6 +301,19 @@ async def signals(
 
 
 
+def _parse_byte_range(range_header: str, size: int) -> tuple[int, int]:
+    import re
+
+    match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header)
+    if match is None:
+        raise ValueError("invalid_range")
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) else size - 1
+    if start >= size or end < start or end >= size:
+        raise ValueError("range_not_satisfiable")
+    return start, end
+
+
 def _stream_file(path: Path, start: int, length: int):
     with path.open("rb") as source:
         source.seek(start)
@@ -348,22 +363,14 @@ def recording_video(recording_id: uuid.UUID, request: Request):
             headers=headers,
         )
 
-    import re
-    match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header)
-    if match is None:
-        raise HTTPException(
-            416,
-            "Invalid Range header",
-            headers={"Content-Range": f"bytes */{size}"},
-        )
-    start = int(match.group(1))
-    end = int(match.group(2)) if match.group(2) else size - 1
-    if start >= size or end < start or end >= size:
+    try:
+        start, end = _parse_byte_range(range_header, size)
+    except ValueError as error:
         raise HTTPException(
             416,
             "Range not satisfiable",
             headers={"Content-Range": f"bytes */{size}"},
-        )
+        ) from error
     length = end - start + 1
     headers.update(
         {
