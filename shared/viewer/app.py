@@ -32,38 +32,65 @@ STORAGE_ROOT = Path(os.getenv("WOONA_STORAGE_ROOT", "../var/storage")).resolve()
 ENVIRONMENT = os.getenv("WOONA_ENVIRONMENT", "development").lower()
 LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL", "")
 LABEL_STUDIO_HOST_HEADER = os.getenv("LABEL_STUDIO_HOST_HEADER", "cool-trams.digital")
+FILEBROWSER_URL = os.getenv("FILEBROWSER_URL", "")
+FILEBROWSER_HOST_HEADER = os.getenv("FILEBROWSER_HOST_HEADER", "cool-trams.digital")
 STATIC_ROOT = Path(__file__).resolve().parent
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 app = FastAPI(title="Woona Signal Viewer", version="0.1.0")
 
 
-def require_viewer_user(request: Request) -> None:
+def _label_studio_authorized(cookie: str) -> bool:
     if not LABEL_STUDIO_URL:
+        return False
+    check = UrlRequest(
+        LABEL_STUDIO_URL.rstrip("/") + "/api/current-user/whoami",
+        headers={"Cookie": cookie, "Host": LABEL_STUDIO_HOST_HEADER},
+    )
+    with urlopen(check, timeout=5) as response:
+        user = json.load(response)
+    return "projects.view" in user.get("permissions", [])
+
+
+def _filebrowser_authorized(cookie: str) -> bool:
+    if not FILEBROWSER_URL:
+        return False
+    check = UrlRequest(
+        FILEBROWSER_URL.rstrip("/") + "/api/users?username=self",
+        headers={"Cookie": cookie, "Host": FILEBROWSER_HOST_HEADER},
+    )
+    with urlopen(check, timeout=5) as response:
+        body = json.load(response)
+    # The endpoint may return either one user object or a collection depending
+    # on FileBrowser version. A successful authenticated response with JSON is
+    # sufficient; anonymous/expired sessions return 401/403 before this point.
+    return isinstance(body, (dict, list))
+
+
+def require_viewer_user(request: Request) -> None:
+    if not LABEL_STUDIO_URL and not FILEBROWSER_URL:
         if ENVIRONMENT != "production":
             return
         raise HTTPException(503, "Viewer authentication is not configured")
 
     cookie = request.headers.get("cookie", "")
     if not cookie:
-        raise HTTPException(401, "Sign in to Label Studio first")
-    try:
-        check = UrlRequest(
-            LABEL_STUDIO_URL.rstrip("/") + "/api/current-user/whoami",
-            headers={"Cookie": cookie, "Host": LABEL_STUDIO_HOST_HEADER},
-        )
-        with urlopen(check, timeout=5) as response:
-            user = json.load(response)
-    except HTTPError as error:
-        raise HTTPException(
-            401 if error.code in (401, 403) else 503,
-            "Label Studio authentication failed",
-        ) from error
-    except (URLError, ValueError, TimeoutError) as error:
-        raise HTTPException(503, "Label Studio authentication unavailable") from error
+        raise HTTPException(401, "Sign in to Woona server tools first")
 
-    if "projects.view" not in user.get("permissions", []):
-        raise HTTPException(403, "Project access required")
+    unavailable = False
+    for checker in (_filebrowser_authorized, _label_studio_authorized):
+        try:
+            if checker(cookie):
+                return
+        except HTTPError as error:
+            if error.code not in (401, 403):
+                unavailable = True
+        except (URLError, ValueError, TimeoutError):
+            unavailable = True
+
+    if unavailable:
+        raise HTTPException(503, "Viewer authentication service unavailable")
+    raise HTTPException(401, "Viewer session is not authorized")
 
 
 def _readonly_rows(query: str, parameters: dict | None = None):
