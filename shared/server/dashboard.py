@@ -620,7 +620,7 @@ def _catalog_files(record) -> str:
         action = '<span class="file-action muted">—</span>'
         if available:
             url = escape(file_url(item['relative']))
-            action = '<a class="file-action icon-button" href="' + url + '" download aria-label="Скачать ' + name + '">' + _catalog_icon('download') + '</a>'
+            action = '<a class="file-action icon-button" href="' + url + '" download="' + name + '" aria-label="Скачать ' + name + '">' + _catalog_icon('download') + '</a>'
             name = '<a href="' + url + '">' + name + '</a>'
         state, tone = ('Доступен', 'success') if available else ('Недоступен', 'neutral')
         if not available and item.get('storage_status') in ('pending', 'uploading'):
@@ -775,12 +775,12 @@ small { font-size: 11px; }
 .breadcrumb a { color: inherit; }
 .breadcrumb [aria-current] { color: var(--ink); }
 .topbar-actions, .heading-actions, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.topbar-actions { flex-shrink: 0; font-size: 11px; color: var(--muted); }
-.tools-menu { position: relative; }
+.topbar-actions { position: relative; flex-shrink: 0; font-size: 11px; color: var(--muted); }
+.tools-menu { position: static; }
 .tools-menu > summary { cursor: pointer; list-style: none; }
 .tools-menu > summary::-webkit-details-marker { display: none; }
 .tools-menu[open] > summary { background: var(--surface); }
-.tools-menu > nav { position: absolute; z-index: 30; right: 0; top: calc(100% + 8px); width: 220px; padding: 6px; border: 1px solid var(--line); border-radius: var(--radius); background: white; box-shadow: 0 6px 18px #15171a12; }
+.tools-menu > nav { position: absolute; z-index: 30; right: 0; top: calc(100% + 8px); width: 220px; max-width: calc(100vw - 32px); padding: 6px; border: 1px solid var(--line); border-radius: var(--radius); background: white; box-shadow: 0 6px 18px #15171a12; }
 .tools-menu .nav-item { font-size: 12px; }
 .page-content { padding: 24px 32px 32px; min-width: 0; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
@@ -829,12 +829,13 @@ small { font-size: 11px; }
 .form-field :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea) { width: 100%; min-width: 0; min-height: 32px; padding: 6px 8px; border: 1px solid #dedfe3; border-radius: 4px; background: white; }
 .form-field :is(input[type="checkbox"], input[type="radio"]) { accent-color: var(--accent); }
 .filter-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.filter-error { margin: 12px 16px 0; }
 .active-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 0 16px 12px; }
 .active-filters:empty { display: none; }
 .filter-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: #4e525a; font-size: 11px; }
 .filter-chip button { display: inline-flex; padding: 0; border: 0; color: inherit; }
 .sort-note { margin-left: auto; font-size: 11px; }
-.table-scroll { width: 100%; min-width: 0; max-height: 65vh; overflow: auto; }
+.table-scroll { position: relative; width: 100%; min-width: 0; max-height: 65vh; overflow: auto; }
 .records-table thead th { position: sticky; top: 0; z-index: 1; }
 .records-table { width: 100%; table-layout: fixed; border-collapse: collapse; text-align: left; }
 .records-table caption { padding: 8px 16px; text-align: left; font-size: 11px; color: var(--muted); }
@@ -1114,7 +1115,7 @@ def _catalog_shell(data, title, content, account='', params=None) -> str:
         '</main></div></div></body></html>')
 
 def render(data: dict, query: str, status: str = 'all', ble: str = 'all', page: int = 1,
-           account: str = '', date_from: str = '', date_to: str = '') -> str:
+           account: str = '', date_from: str = '', date_to: str = '', filter_error: str = '') -> str:
     escape = _catalog_escape
     available = data.get('label_service', {}).get('available', True)
 
@@ -1150,7 +1151,7 @@ def render(data: dict, query: str, status: str = 'all', ble: str = 'all', page: 
             return False
         return True
 
-    filtered = [r for r in data['records'] if matches(r)]
+    filtered = [] if filter_error else [r for r in data['records'] if matches(r)]
     label_filter_unavailable = not available and status in ('ready', 'in_progress', 'complete', 'awaiting_annotation')
     live_durations = [duration for r in filtered if r.get('source') == 'live'
                       and (duration := _catalog_duration(r)) is not None]
@@ -1160,12 +1161,15 @@ def render(data: dict, query: str, status: str = 'all', ble: str = 'all', page: 
              ('Проблемы передачи', sum(_catalog_upload_problem(r) for r in filtered)),
              ('Передано полностью', sum(r.get('server_status', {}).get('transfer', {}).get('status') == 'verified' for r in filtered)),
              ('Есть разметка', sum(bool(r.get('annotated_any')) for r in filtered) if available else 'Недоступно')]
-    if label_filter_unavailable:
+    if filter_error:
+        stats = [(name, '—') for name, _ in stats]
+    elif label_filter_unavailable:
         stats = [(name, 'Недоступно' if index in (0, 4) else '—') for index, (name, _) in enumerate(stats)]
     metrics = '<section aria-label="Сводка выбранных записей" class="metrics">' + ''.join(
         '<div class="metric"><span>' + name + '</span><strong' + (' class="metric-text"' if value == 'Недоступно' else '') + '>' + escape(value) + '</strong></div>'
         for name, value in stats) + '</section>'
-    calculation_note = ('Выборку по статусу разметки нельзя определить, пока Label Studio недоступен. '
+    calculation_note = ('Исправьте период, чтобы рассчитать сводку. Некорректный фильтр не означает отсутствие записей.' if filter_error else
+                        'Выборку по статусу разметки нельзя определить, пока Label Studio недоступен. '
                         'Снимите фильтр разметки, чтобы посмотреть записи, видео и файлы.' if label_filter_unavailable else
                         f'Сводка только по выбранным записям. Часы — длительность по метаданным, не оценка качества видео или сигнала. '
                         f'Replay: {replay} (исключены из часов); длительность неизвестна: {unknown_duration}. '
@@ -1194,20 +1198,22 @@ def render(data: dict, query: str, status: str = 'all', ble: str = 'all', page: 
 
     tabs = []
     for value, name in statuses:
-        count = ('—' if not available and value in ('awaiting_annotation', 'complete') else
+        count = ('—' if filter_error or (not available and value in ('awaiting_annotation', 'complete')) else
                  str(sum(matches(record, value) for record in data['records'])))
-        unavailable = ' · недоступно' if count == '—' else ''
+        unavailable = ' · недоступно' if count == '—' and not filter_error else ''
         tabs.append('<a href="' + escape(_catalog_url(params, status=value, page=1)) + '"' +
                     (' aria-current="page"' if value == status else '') + '>' + escape(name) +
                     ' <span class="tab-count">' + count + '</span>' + unavailable + '</a>')
     quick = '<nav class="tabs" aria-label="Быстрые фильтры">' + ''.join(tabs) + '</nav>'
-    filters = ('<form class="toolbar" method="get" action="/dashboard#data-manager" aria-label="Фильтры записей">'
+    date_invalid = ' aria-invalid="true" aria-describedby="catalog-date-error"' if filter_error else ''
+    filters = (('<p class="notice warning filter-error" id="catalog-date-error" role="alert">' + escape(filter_error) + '</p>' if filter_error else '') +
+               '<form class="toolbar" method="get" action="/dashboard#data-manager" aria-label="Фильтры записей">'
                '<label class="search-field"><span class="sr-only">Поиск</span>' + _catalog_icon('search') +
                '<input type="search" name="q" maxlength="100" placeholder="Кличка, аккаунт или UUID" value="' + escape(query) + '"></label>'
                '<label class="sr-only" for="catalog-account">Аккаунт</label><select class="account-filter" id="catalog-account" name="account">' + options(account_items, account) + '</select>'
-               '<details class="filter-menu" name="catalog-filter"><summary class="button secondary">' + _catalog_icon('calendar') + 'Даты</summary><div class="filter-panel">'
-               '<label class="form-field">С даты (UTC)<input type="date" name="date_from" value="' + escape(date_from) + '"></label>'
-               '<label class="form-field">По дату включительно (UTC)<input type="date" name="date_to" value="' + escape(date_to) + '"></label>'
+               '<details class="filter-menu" name="catalog-filter"' + (' open' if filter_error else '') + '><summary class="button secondary">' + _catalog_icon('calendar') + 'Даты</summary><div class="filter-panel">'
+               '<label class="form-field">С даты (UTC)<input type="date" name="date_from" value="' + escape(date_from) + '"' + date_invalid + '></label>'
+               '<label class="form-field">По дату включительно (UTC)<input type="date" name="date_to" value="' + escape(date_to) + '"' + date_invalid + '></label>'
                '<button class="button primary" type="submit">Применить период</button></div></details>'
                '<details class="filter-menu" name="catalog-filter"><summary class="button secondary">' + _catalog_icon('filter') + 'Ещё фильтры</summary><div class="filter-panel">'
                '<label class="form-field">Статус<select name="status">' + options(statuses + legacy, status) + '</select></label>'
@@ -1279,7 +1285,9 @@ def render(data: dict, query: str, status: str = 'all', ble: str = 'all', page: 
              '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div>')
     if not filtered:
         recovery = '<a class="button secondary" href="/dashboard#data-manager">Сбросить фильтры</a>'
-        if label_filter_unavailable:
+        if filter_error:
+            message = '<h2>Уточните период</h2><p>Исправьте даты или сбросьте фильтры. Записи не изменены.</p>'
+        elif label_filter_unavailable:
             message = '<h2>Не удалось проверить разметку</h2><p>Label Studio недоступен. Это не означает, что задач или разметки нет.</p>'
             recovery = '<a class="button secondary" href="' + escape(_catalog_url(params, status='all', page=1)) + '">Показать все записи</a>'
         elif data['records']:
@@ -1301,13 +1309,14 @@ def render(data: dict, query: str, status: str = 'all', ble: str = 'all', page: 
                           _catalog_icon('arrow-right') + '</a>')
     pagination = (f'<div class="pagination"><span>Показано {first}–{min(page * per_page, len(filtered))} из {len(filtered)}</span>'
                   '<nav aria-label="Страницы каталога">' + ''.join(page_links) + '</nav></div>')
-    result_caption = ('Выборка по разметке сейчас недоступна' if label_filter_unavailable else
+    result_caption = ('Некорректный период: выборка не рассчитана' if filter_error else
+                      'Выборка по разметке сейчас недоступна' if label_filter_unavailable else
                       f'Найдено {len(filtered)} из {len(data["records"])} записей')
     content = ('<div class="page-heading"><div class="heading-copy"><h1>Записи</h1>'
                '<p class="subtitle">Видео, анкеты и исходные файлы</p></div>'
                '<a class="button secondary" href="">' + _catalog_icon('refresh') + 'Обновить вручную</a></div>' + metrics +
                '<section class="panel" id="data-manager">' + quick + filters + active_filters +
-               '<p class="results-caption">' + result_caption + '</p>' + table + ('' if label_filter_unavailable else pagination) +
+               '<p class="results-caption">' + result_caption + '</p>' + table + ('' if filter_error or label_filter_unavailable else pagination) +
                '</section>' + _catalog_diagnostics(data) + _catalog_projects(data))
     return _catalog_shell(data, 'Записи', content, account=account, params=params)
 
@@ -1317,7 +1326,20 @@ def _catalog_answers(value, labels) -> str:
     if isinstance(value, dict):
         if set(value) == {'key', 'text'} and isinstance(value.get('text'), str):
             return escape(value['text'])
-        return '<dl class="answers">' + ''.join('<dt>' + escape(labels.get(key, key)) + '</dt><dd>' + _catalog_answers(item, labels) + '</dd>' for key, item in value.items()) + '</dl>' if value else '<span class="muted">Нет ответов</span>'
+        if not value:
+            return '<span class="muted">Нет ответов</span>'
+        filled, empty = [], []
+        for key, item in value.items():
+            row = ('<dt>' + escape(labels.get(key, key)) + '</dt><dd>' +
+                   _catalog_answers(item, labels) + '</dd>')
+            # Do not use truthiness: False and 0 are explicit answers, as is "unknown".
+            target = empty if item is None or item == '' or item == [] or item == {} else filled
+            target.append(row)
+        result = '<dl class="answers">' + ''.join(filled) + '</dl>' if filled else ''
+        if empty:
+            result += ('<details class="empty-answers"><summary>Незаполненные поля (' + str(len(empty)) +
+                       ')</summary><dl class="answers">' + ''.join(empty) + '</dl></details>')
+        return result
     if isinstance(value, list):
         return '<ul>' + ''.join('<li>' + _catalog_answers(item, labels) + '</li>' for item in value) + '</ul>' if value else '<span class="muted">Не указано</span>'
     if value is None or value == '':
@@ -1342,7 +1364,19 @@ def render_record_detail(data: dict, record: dict, back: str = '/dashboard') -> 
                    'heartRelevantMedicationDetails': 'Препараты — подробности',
                    'preRecordingState': 'Состояние перед записью', 'actualActivity': 'Фактическая активность',
                    'acuteHeartRateFactors': 'Факторы, влияющие на ЧСС', 'referenceMethod': 'Способ контрольного измерения',
-                   'referenceArtifact': 'Контрольный файл', 'key': 'Код ответа', 'text': 'Ответ'})
+                   'referenceArtifact': 'Контрольный файл', 'key': 'Код ответа', 'text': 'Ответ',
+                   'breedStatus': 'Сведения о породе', 'ageStatus': 'Сведения о возрасте',
+                   'bodyConditionStatus': 'Оценка упитанности — статус',
+                   'neckCircumferenceStatus': 'Измерение обхвата шеи',
+                   'observedSigns': 'Наблюдаемые симптомы', 'walksStatus': 'Сведения о прогулках',
+                   'notesStatus': 'Наличие примечаний', 'activityGroup': 'Группа активности',
+                   'activityType': 'Вид активности', 'surface': 'Поверхность',
+                   'airTemperatureStatus': 'Измерение температуры воздуха',
+                   'pulseStatus': 'Измерение пульса', 'pulseBpm': 'Пульс, уд/мин',
+                   'respirationStatus': 'Измерение частоты дыхания',
+                   'respirationPerMinute': 'Частота дыхания, в минуту',
+                   'bodyTemperatureStatus': 'Измерение температуры тела',
+                   'bodyTemperatureC': 'Температура тела, °C', 'measurementAtUtc': 'Время измерений (UTC)'})
     title = record.get('dog') or 'Собака не указана'
     profile = record.get('profile') or {}
     session = record.get('session_questionnaire') or {}
@@ -1350,8 +1384,13 @@ def render_record_detail(data: dict, record: dict, back: str = '/dashboard') -> 
               (item.get('type') == 'video' or str(item.get('name', '')).lower().endswith('.mp4'))]
     video_html = ''.join('<video controls preload="metadata" aria-label="Видео сессии" src="' + escape(file_url(item['relative'])) + '">Ваш браузер не поддерживает видео. <a href="' + escape(file_url(item['relative'])) + '">Скачать видео</a></video>' for item in videos)
     if not videos:
-        video_html = ('<div class="video-empty">' + _catalog_icon('film') + '<h2>Видео недоступно</h2>' +
-                      '<p>Файл ещё не передан или недоступен на сервере.</p><a href="#files">Проверить файлы записи</a></div>')
+        answers = session.get('answers')
+        not_requested = isinstance(answers, dict) and answers.get('videoRequested') is False
+        heading = 'Видео не запрашивалось' if not_requested else 'Видео недоступно'
+        explanation = ('В анкете этой сессии запись видео отключена.' if not_requested else
+                       'Файл ещё не передан или недоступен на сервере.')
+        video_html = ('<div class="video-empty">' + _catalog_icon('film') + '<h2>' + heading + '</h2>' +
+                      '<p>' + explanation + '</p><a href="#files">Проверить файлы записи</a></div>')
     states = _catalog_states(data, record)
     files = record.get('files', [])
     file_count = sum(bool(item.get('available')) for item in files)
@@ -1397,9 +1436,11 @@ def render_record_detail(data: dict, record: dict, back: str = '/dashboard') -> 
                 '</section></aside></div><section class="detail-section questionnaire" id="dog-profile">' +
                 '<div class="section-heading"><h2>Анкета собаки на момент записи</h2></div>' +
                 '<p class="muted">Снимок профиля для этой записи, не текущая анкета собаки; текущие данные могут отличаться.</p>' +
-                _catalog_answers(profile.get('answers') or {}, labels) + '</section>' +
+                (_catalog_answers(profile['answers'], labels) if isinstance(profile.get('answers'), dict) else
+                 '<p class="muted">Историческая анкета недоступна</p>') + '</section>' +
                 '<section class="detail-section questionnaire" id="session-profile"><div class="section-heading"><h2>Анкета сессии</h2></div>' +
-                _catalog_answers(session.get('answers') or {}, labels) + '</section>')
+                (_catalog_answers(session['answers'], labels) if isinstance(session.get('answers'), dict) else
+                 '<p class="muted">Анкета сессии недоступна</p>') + '</section>')
     technical = {'UUID записи': record.get('recording_id'), 'UUID собаки': record.get('dog_id'),
                  'ID аккаунта': record.get('account_id'), 'ID источника': record.get('source_id'),
                  'Источник (live / replay)': record.get('source'), 'Состояние записи': record.get('capture_status'),
@@ -1419,14 +1460,19 @@ def dashboard(q: str = Query("", max_length=100),
               account: str = Query("", max_length=64),
               date_from: str = Query("", pattern=r"^(?:\d{4}-\d{2}-\d{2})?$"),
               date_to: str = Query("", pattern=r"^(?:\d{4}-\d{2}-\d{2})?$")):
-    # HTML GET forms submit empty date inputs as empty strings, not omitted fields.
+    # Native date forms need an HTML recovery path, not the API JSON error page.
+    filter_error = ''
     try:
         start, end = (date.fromisoformat(value) if value else None for value in (date_from, date_to))
-    except ValueError as error:
-        raise HTTPException(422, "Укажите существующую дату в формате ГГГГ-ММ-ДД") from error
-    if start and end and start > end:
-        raise HTTPException(422, "Начало периода должно быть не позже окончания")
-    return HTMLResponse(render(load_dashboard(), q, status, ble, page, account, date_from, date_to),
+    except ValueError:
+        filter_error = 'Укажите существующую дату в формате ГГГГ-ММ-ДД'
+    else:
+        if start and end and start > end:
+            filter_error = 'Начало периода должно быть не позже окончания'
+    data = load_dashboard()
+    args = (data, q, status, ble, page, account, date_from, date_to)
+    document = render(*args, filter_error=filter_error) if filter_error else render(*args)
+    return HTMLResponse(document, status_code=422 if filter_error else 200,
                         headers={"Cache-Control": "no-store"})
 
 

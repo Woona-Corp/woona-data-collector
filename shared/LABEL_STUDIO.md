@@ -32,7 +32,11 @@ the same rows become short labeled blocks rather than a wide, shrunken table.
 The desktop account sidebar shows actual project-wide counts; selected-filter
 metrics and tab counts are scoped separately. Search accepts dog names, account
 identifiers and recording/dog UUIDs. Native filter menus, visible removable
-filter chips and pagination retain the current selection. The record's **К
+filter chips and pagination retain the current selection. Invalid calendar dates
+or a reversed date range keep the HTML workspace and entered filters, show an
+accessible correction message, and leave selection metrics unknown rather than
+reporting an empty result. The response remains HTTP 422 with `no-store`.
+The record's **К
 выборке записей** link preserves filters and page through a catalog-only return
 URL; external return destinations are rejected. The **Без аккаунта** selection
 means the dog's current `account_id` is NULL, not an identified historical uploader.
@@ -42,8 +46,13 @@ linked to that recording and the current session questionnaire. The profile is a
 historical snapshot; the session questionnaire may have been edited after capture.
 The detail view separates playback/files from recording metadata and provides
 section links to questionnaires and technical details. Nested answers have
-readable field labels; raw JSON and identifiers remain in collapsed technical
-details. Available files have explicit download links; unavailable files do not. Video uses the existing Label Studio local-file
+readable field labels. Empty answer rows are initially collapsed, while explicit
+false, zero and unknown answers remain visible. Raw JSON and identifiers remain
+in collapsed technical details. Available files have explicit download links
+with their original filenames; unavailable files do not. An explicit
+`videoRequested=false` in the session questionnaire distinguishes unrequested
+video from missing media; an available video always remains playable. Missing
+flags are not inferred as false. Video uses the existing Label Studio local-file
 route, browser controls and metadata-only preload, without autoplay. A current
 file-size check does not verify video content, signal quality or synchronization.
 
@@ -77,7 +86,8 @@ Targeted local checks from `shared/`:
 ```sh
 server/.venv/bin/python -m unittest -v server.tests.test_dashboard \
   server.tests.test_dashboard_catalog server.tests.test_dashboard_catalog_routes \
-  server.tests.test_dashboard_budget server.tests.test_dashboard_workspace
+  server.tests.test_dashboard_budget server.tests.test_dashboard_workspace \
+  server.tests.test_dashboard_review server.tests.test_dashboard_detail_review
 ```
 
 A deployment still needs separate verification with real Label Studio sessions,
