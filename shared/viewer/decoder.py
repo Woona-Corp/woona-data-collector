@@ -68,6 +68,7 @@ class RecordingIndex:
     duration_ms: float
     time_base: str
     gaps: tuple[dict, ...]
+    stream_gaps: tuple[dict, ...]
 
 
 def stream_sample_rate_hz(sensor_type: int) -> int:
@@ -237,6 +238,8 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
     entries: list[PacketEntry] = []
     streams: set[tuple[int, int]] = set()
     gaps: list[dict] = []
+    stream_gaps: list[dict] = []
+    stream_next_ms: dict[tuple[int, int], float] = {}
     previous_counter: int | None = None
     timer_reference: int | None = None
     first_unwrapped_timer: int | None = None
@@ -282,6 +285,33 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
             host_mono = None
         end_ms = start_ms + packet_duration
 
+        # Continuity is per stream, not per packet. Different streams may be
+        # serialized in overlapping timestamp order, while one particular stream
+        # can still skip one or more sample blocks entirely.
+        for key, series in values.items():
+            if not series:
+                continue
+            step_ms = 1000.0 / stream_sample_rate_hz(key[0])
+            expected_ms = stream_next_ms.get(key)
+            if expected_ms is not None and start_ms > expected_ms + step_ms * 0.5:
+                missing_samples = max(
+                    1,
+                    int(round((start_ms - expected_ms) / step_ms)),
+                )
+                stream_gaps.append({
+                    "key": f"{key[0]}:{key[1]}",
+                    "sensorType": key[0],
+                    "channel": key[1],
+                    "fromMs": expected_ms,
+                    "toMs": start_ms,
+                    "missingSamples": missing_samples,
+                })
+            next_ms = start_ms + len(series) * step_ms
+            previous_next = stream_next_ms.get(key)
+            stream_next_ms[key] = (
+                next_ms if previous_next is None else max(previous_next, next_ms)
+            )
+
         if previous_counter is not None:
             delta = (counter - previous_counter) & 0xFFFFFFFF
             if 1 < delta < 0x8000_0000:
@@ -323,6 +353,7 @@ def build_index(packet_path: Path, timeline_path: Path | None = None) -> Recordi
         duration_ms=max(0.0, duration),
         time_base="device_timer+stream_rate (host anchored)" if timeline_path else "device_timer+stream_rate",
         gaps=tuple(gaps),
+        stream_gaps=tuple(stream_gaps),
     )
 
 
@@ -422,14 +453,29 @@ def query_signals(
     signals = []
     for sensor_type, channel in sorted(selected):
         collector = collectors[(sensor_type, channel)]
+        key_text = f"{sensor_type}:{channel}"
+        signal_gaps = [
+            {
+                "fromMs": max(start_ms, float(gap["fromMs"])),
+                "toMs": min(end_ms, float(gap["toMs"])),
+                "missingSamples": int(gap["missingSamples"]),
+            }
+            for gap in index.stream_gaps
+            if gap["key"] == key_text
+            and float(gap["toMs"]) >= start_ms
+            and float(gap["fromMs"]) <= end_ms
+        ]
         signals.append({
-            "key": f"{sensor_type}:{channel}",
+            "key": key_text,
             "sensorType": sensor_type,
             "channel": channel,
             "label": stream_label(sensor_type, channel),
             "sampleRateHz": stream_sample_rate_hz(sensor_type),
             "unit": stream_unit(sensor_type),
             "rawCount": collector.count,
+            "missingSamples": sum(gap["missingSamples"] for gap in signal_gaps),
+            "gapCount": len(signal_gaps),
+            "gaps": signal_gaps,
             "points": collector.points(),
         })
 
