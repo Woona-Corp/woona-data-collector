@@ -15,6 +15,9 @@
     emptyState: document.getElementById("emptyState"),
     chart: document.getElementById("chart"),
     cursorReadout: document.getElementById("cursorReadout"),
+    videoPanel: document.getElementById("videoPanel"),
+    video: document.getElementById("video"),
+    videoSyncInfo: document.getElementById("videoSyncInfo"),
   };
 
   const state = {
@@ -32,6 +35,7 @@
     dragEnd: 1,
     loadTimer: null,
     requestSerial: 0,
+    dragMoved: false,
   };
 
   function setStatus(message, isError = false) {
@@ -108,6 +112,7 @@
       state.selected = new Set(meta.streams.slice(0, 12).map(stream => stream.key));
       renderInfo();
       renderStreams();
+      configureVideo();
       enableViewButtons(true);
       els.emptyState.classList.add("hidden");
       els.chart.classList.remove("hidden");
@@ -127,7 +132,10 @@
       `<span>${meta.packetCount.toLocaleString()} packets</span>` +
       `<span>${meta.streams.length} streams</span>` +
       `<span>${meta.gapCount} counter gaps</span>` +
-      `<span>time: ${escapeHtml(meta.timeBase)}</span>`;
+      `<span>time: ${escapeHtml(meta.timeBase)}</span>` +
+      (meta.video?.available
+        ? `<span>video offset <strong>${formatDuration(meta.video.offsetFromSensorMs || 0)}</strong></span>`
+        : "");
     els.recordingInfo.classList.remove("hidden");
   }
 
@@ -156,6 +164,53 @@
       els.streamList.append(label);
     }
     els.streamPanel.classList.remove("hidden");
+  }
+
+  function configureVideo() {
+    const video = state.meta?.video;
+    if (!video?.available || !Number.isFinite(video.offsetFromSensorMs)) {
+      els.video.pause();
+      els.video.removeAttribute("src");
+      els.video.load();
+      els.videoPanel.classList.add("hidden");
+      return;
+    }
+    els.video.src = `api/recordings/${encodeURIComponent(state.recordingId)}/video`;
+    els.videoPanel.classList.remove("hidden");
+    const quality = video.syncQuality || "unknown";
+    els.videoSyncInfo.classList.toggle("warn", quality === "degraded" || quality === "unavailable");
+    els.videoSyncInfo.textContent =
+      `First video frame: ${formatDuration(video.offsetFromSensorMs)} after first sensor packet · sync: ${quality}`;
+  }
+
+  function sensorTimeForVideo() {
+    const video = state.meta?.video;
+    if (!video || !Number.isFinite(video.offsetFromSensorMs)) return null;
+    const firstPtsMs = Number(video.firstSamplePtsUs || 0) / 1000.0;
+    return video.offsetFromSensorMs + els.video.currentTime * 1000.0 - firstPtsMs;
+  }
+
+  function seekVideoToSensor(sensorMs) {
+    const video = state.meta?.video;
+    if (!video?.available || !Number.isFinite(video.offsetFromSensorMs)) return;
+    const firstPtsMs = Number(video.firstSamplePtsUs || 0) / 1000.0;
+    const seconds = (sensorMs - video.offsetFromSensorMs + firstPtsMs) / 1000.0;
+    if (!Number.isFinite(seconds) || seconds < 0) return;
+    const duration = Number.isFinite(els.video.duration) ? els.video.duration : seconds;
+    els.video.currentTime = Math.min(seconds, duration);
+  }
+
+  function followVideoCursor() {
+    const sensorMs = sensorTimeForVideo();
+    if (sensorMs === null) return;
+    state.cursorMs = sensorMs;
+    if (sensorMs < state.viewStart || sensorMs > state.viewEnd) {
+      const width = state.viewEnd - state.viewStart;
+      const start = sensorMs - width * 0.25;
+      [state.viewStart, state.viewEnd] = clampView(start, start + width);
+      scheduleLoad(80);
+    }
+    renderChart();
   }
 
   function clampView(start, end) {
@@ -385,6 +440,7 @@
   els.chart.addEventListener("pointerdown", event => {
     if (!state.meta) return;
     state.dragging = true;
+    state.dragMoved = false;
     state.dragX = event.clientX;
     state.dragStart = state.viewStart;
     state.dragEnd = state.viewEnd;
@@ -394,6 +450,7 @@
   els.chart.addEventListener("pointermove", event => {
     if (!state.meta) return;
     if (state.dragging) {
+      if (Math.abs(event.clientX - state.dragX) > 4) state.dragMoved = true;
       const rect = els.chart.getBoundingClientRect();
       const span = state.dragEnd - state.dragStart;
       const shift = -((event.clientX - state.dragX) / Math.max(1, rect.width)) * span;
@@ -410,7 +467,14 @@
     if (!state.dragging) return;
     state.dragging = false;
     try { els.chart.releasePointerCapture(event.pointerId); } catch (_) {}
-    scheduleLoad(0);
+    if (!state.dragMoved) {
+      const target = xToTime(event.clientX);
+      state.cursorMs = target;
+      seekVideoToSensor(target);
+      renderChart();
+    } else {
+      scheduleLoad(0);
+    }
   }
   els.chart.addEventListener("pointerup", endDrag);
   els.chart.addEventListener("pointercancel", endDrag);
@@ -423,6 +487,10 @@
   els.chart.addEventListener("dblclick", () => {
     if (state.meta) setView(0, state.meta.durationMs, true);
   });
+
+  els.video.addEventListener("timeupdate", followVideoCursor);
+  els.video.addEventListener("seeking", followVideoCursor);
+  els.video.addEventListener("loadedmetadata", followVideoCursor);
 
   window.addEventListener("resize", () => renderChart());
   loadRecordings();
