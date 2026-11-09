@@ -90,11 +90,46 @@ services:
       label_studio:
         condition: service_healthy
 
+  viewer:
+    build:
+      context: .
+      dockerfile: viewer/Dockerfile
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ${WOONA_STORAGE_ROOT_HOST:?set WOONA_STORAGE_ROOT_HOST}:/srv/woona:ro
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-woona}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-woona}
+      WOONA_STORAGE_ROOT: /srv/woona
+      WOONA_ENVIRONMENT: production
+      LABEL_STUDIO_URL: http://label_studio:8080
+      LABEL_STUDIO_HOST_HEADER: cool-trams.digital
+    depends_on:
+      postgres:
+        condition: service_healthy
+      label_studio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health/ready', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 768m
+    pids_limit: 256
+
   caddy:
     image: caddy:2-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
     restart: unless-stopped
     depends_on:
       api:
+        condition: service_healthy
+      viewer:
         condition: service_healthy
       label_studio:
         condition: service_healthy
