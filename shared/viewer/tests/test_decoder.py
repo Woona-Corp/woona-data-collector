@@ -39,7 +39,7 @@ def write_timeline(path: Path, rows: list[tuple[int, int, int, int, int, int]]) 
 
 
 class DecoderTests(unittest.TestCase):
-    def test_index_and_query_match_android_csv_timing(self):
+    def test_index_and_query_use_device_timer_with_host_anchor(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             p1 = packet(9, 50, [sensor_block(2, [[10, 20], [30, 40]])])
@@ -51,7 +51,7 @@ class DecoderTests(unittest.TestCase):
             ])
 
             index = build_index(root / "packets.bin", root / "packet_timeline.bin")
-            self.assertEqual(index.time_base, "host_monotonic")
+            self.assertEqual(index.time_base, "device_timer+stream_rate (host anchored)")
             self.assertEqual(index.streams, ((2, 1), (2, 2)))
             result = query_signals(
                 index, start_ms=0, end_ms=index.duration_ms,
