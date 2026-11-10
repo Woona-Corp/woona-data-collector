@@ -15,23 +15,25 @@ from pathlib import Path
 
 ROOT = Path(os.environ.get('RUNNER_TEMP', tempfile.gettempdir())) / 'woona-native-ci'
 DERIVED = ROOT / 'Derived'
-SHARDS = (
-    ('testEnglishLongDogFormPresentsTranslatedOptionsAndRetainsCanonicalAnswersAcrossLanguageChange',
-     'testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls',
-     'testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire',
-     'testHistoryExplainsCaptureFailureSeparatelyAndRemovalCanBeCancelled',
-     'testProfileSaveFailureKeepsEditorAndDraftUntilSuccessfulRetry',
-     'testAccountPrecedesDogsAndStaysOnOverview',
-     'testNewSavesSeparateDogAndKeepsExistingProfile',
-     'testFiveTabsPreserveSelectionAndSeparateFunctions', 'testIdleDiscoveryActionsAppearTogether'),
-    ('testIdentityAndRecordingGroupsReflowWithLargeTextInLandscape',
-     'testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions',
-     'testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory',
-     'testFirstEditNewAndReselectionUseCorrectProfile',
-     'testV2PickerIsExplicitAndReturnsToRecordAfterClosingWithoutConnecting',
-     'testRussianDarkOverviewHasSameActions', 'testFullscreenKeepsChartSelection',
-     'testServerConnectionRequiresTokenAndCancelDoesNotConfigure',
-     'testLanguageChangeUpdatesNavigationAndThemeLabels'))
+UI_METHODS = (
+    'testEnglishLongDogFormPresentsTranslatedOptionsAndRetainsCanonicalAnswersAcrossLanguageChange',
+    'testV2PreviewKeepsTheSameChartSelectionWindowPanZoomAndFullscreenControls',
+    'testSelectingDogDoesNotAutomaticallyOpenPreexistingHeartQuestionnaire',
+    'testHistoryExplainsCaptureFailureSeparatelyAndRemovalCanBeCancelled',
+    'testProfileSaveFailureKeepsEditorAndDraftUntilSuccessfulRetry',
+    'testAccountPrecedesDogsAndStaysOnOverview',
+    'testNewSavesSeparateDogAndKeepsExistingProfile',
+    'testFiveTabsPreserveSelectionAndSeparateFunctions',
+    'testIdleDiscoveryActionsAppearTogether',
+    'testIdentityAndRecordingGroupsReflowWithLargeTextInLandscape',
+    'testServerEditorLandscapeKeyboardKeepsDraftAndReachableActions',
+    'testNewHeartCaptureOpensOneQuestionnaireAndDismissalDoesNotReopenHistory',
+    'testFirstEditNewAndReselectionUseCorrectProfile',
+    'testV2PickerIsExplicitAndReturnsToRecordAfterClosingWithoutConnecting',
+    'testRussianDarkOverviewHasSameActions',
+    'testFullscreenKeepsChartSelection',
+    'testServerConnectionRequiresTokenAndCancelDoesNotConfigure',
+    'testLanguageChangeUpdatesNavigationAndThemeLabels')
 
 
 def call(args, **kwargs):
@@ -78,9 +80,9 @@ def inventory():
                     found.append(f'{target}/{cls}/{token[2]}')
     if not found or len(found) != len(set(found)) or not any(i.startswith('WoonaTests/') for i in found):
         raise ValueError('Empty unit suite, empty inventory or duplicate discovered test')
-    assigned = [f'WoonaUITests/OverviewParityTests/{m}' for shard in SHARDS for m in shard]
+    assigned = [f'WoonaUITests/OverviewParityTests/{m}' for m in UI_METHODS]
     if Counter(assigned) != Counter(i for i in found if i.startswith('WoonaUITests/')):
-        raise ValueError('UI inventory differs from explicit disjoint shards')
+        raise ValueError('UI inventory differs from explicit reviewed methods')
     return sorted(found)
 
 
@@ -106,7 +108,7 @@ def identity():
     return info
 
 
-def prepare(*, boot=True):
+def prepare():
     ROOT.mkdir(parents=True, exist_ok=True)
     info = identity()
     if (not info['xcode'].startswith('Xcode 26.6\n') or info['sdk'] != '26.5'
@@ -120,12 +122,7 @@ def prepare(*, boot=True):
     (ROOT / 'simulator').write_text(matches[0])
     write(ROOT / 'identity.json', info)
     write(ROOT / 'inventory.json', inventory())
-    # Full producers never boot a simulator: consumers own testing and boot.
-    # Consumer boot overlaps download; unit/diagnostic producer boot overlaps build.
-    if boot:
-        state = output(['xcrun', 'simctl', 'list', 'devices', 'booted', '-j'])
-        if matches[0] not in state:
-            call(['xcrun', 'simctl', 'boot', matches[0]], timeout=180)
+    # Every mode compiles before booting Simulator; execution owns boot.
 
 
 def result_rows(tree):
@@ -190,7 +187,8 @@ def collect(label):
           'passed': [r['id'] for r in rows if r['status'] == 'Passed'],
           'skipped': [r['id'] for r in rows if r['status'] == 'Skipped'],
           'failed': [r['id'] for r in rows if r['status'] not in ('Passed', 'Skipped')],
-          'xcresult_sha256': tree_digest(bundle)})
+          'xcresult_sha256': tree_digest(bundle),
+          'products_sha256': tree_digest(DERIVED / 'Build/Products')})
     call(['xcrun', 'xcresulttool', 'export', 'attachments', '--path', str(bundle),
           '--output-path', str(ROOT / f'{label}-attachments')])
     return rows
@@ -198,6 +196,9 @@ def collect(label):
 
 def test(label, selectors, sanitizer='none'):
     simulator = (ROOT / 'simulator').read_text()
+    state = output(['xcrun', 'simctl', 'list', 'devices', 'booted', '-j'])
+    if simulator not in state:
+        call(['xcrun', 'simctl', 'boot', simulator], timeout=180)
     call(['xcrun', 'simctl', 'bootstatus', simulator, '-b'], timeout=180)
     products = list((DERIVED / 'Build/Products').glob('*.xctestrun'))
     if len(products) != 1:
@@ -219,51 +220,40 @@ def aggregate(directory, mode):
     # A failed re-verification must never leave an older successful proof behind.
     (directory / 'native-proof.json').unlink(missing_ok=True)
     expected = inventory()
-    units = [i for i in expected if i.startswith('WoonaTests/')]
-    if mode == 'full':
-        expected_by_label = {
-            'unit-ui-1': units + ['WoonaUITests/OverviewParityTests/' + m for m in SHARDS[0]],
-            'ui-2': ['WoonaUITests/OverviewParityTests/' + m for m in SHARDS[1]],
-        }
-    else:
-        expected_by_label = {'unit': units}
-    labels = list(expected_by_label)
-    rows, identities = [], []
-    for label in labels:
-        data = parse_json((directory / f'{label}.json').read_text())
-        require_pass(data['tests'], expected_by_label[label])
-        identities.append(data['identity'])
-        rows.extend(data['tests'])
-    if any(i != identities[0] for i in identities):
-        raise ValueError('Run/source/toolchain identity mismatch')
+    if mode != 'full':
+        expected = [i for i in expected if i.startswith('WoonaTests/')]
+    label = 'full' if mode == 'full' else 'unit'
+    data = parse_json((directory / f'{label}.json').read_text())
+    rows, info = data['tests'], data['identity']
+    require_pass(rows, expected)
     current = {'source': os.environ['GITHUB_SHA'], 'run': os.environ['GITHUB_RUN_ID'],
                'attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'inputs_sha256': input_digest()}
-    if any(identities[0].get(key) != value for key, value in current.items()):
+    if any(info.get(key) != value for key, value in current.items()):
         raise ValueError('Evidence does not belong to current run/source/inputs')
-    require_pass(rows, expected if mode == 'full' else [i for i in expected if i.startswith('WoonaTests/')])
     archive = parse_json((directory / 'archive-proof.json').read_text())
-    if archive['identity'] != identities[0]:
+    if archive['identity'] != info:
         raise ValueError('Independent archive oracle identity/policy mismatch')
     proof = parse_json((directory / 'export-proof.json').read_text())
-    if proof != identities[0]:
+    if proof != info:
         raise ValueError('Missing independent export proof binding')
     write(directory / 'native-proof.json', {'mode': mode, 'fullproof': mode == 'full',
-          'identity': identities[0], 'tests': rows,
-          'expected': expected if mode == 'full' else [i for i in expected if i.startswith('WoonaTests/')],
+          'identity': info, 'tests': rows,
+          'expected': expected,
           'executed': [r['id'] for r in rows], 'passed': [r['id'] for r in rows],
           'skipped': [], 'failed': [],
-          'counts': {target: {'expected': sum(i.startswith(prefix) for i in (expected if mode == 'full' else units)),
+          'counts': {target: {'expected': sum(i.startswith(prefix) for i in expected),
                               'executed': sum(r['id'].startswith(prefix) for r in rows),
                               'passed': sum(r['id'].startswith(prefix) for r in rows),
                               'skipped': 0, 'failed': 0}
                      for target, prefix in (('unit', 'WoonaTests/'), ('ui', 'WoonaUITests/'))},
           'phase_timings': [parse_json(p.read_text()) for p in sorted(directory.glob('*-timing.json'))], 'independent_export_verified': True, 'zip64_large': archive['zip64_large'],
-          'result_hashes': {label: parse_json((directory / f'{label}.json').read_text())['xcresult_sha256'] for label in labels}})
+          'products_sha256': data['products_sha256'],
+          'result_hashes': {label: data['xcresult_sha256']}})
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('command', choices=['prepare', 'build', 'unit', 'ui-1', 'ui-2', 'pack', 'verify', 'aggregate', 'archive'])
+    p.add_argument('command', choices=['prepare', 'build', 'test', 'aggregate', 'archive'])
     p.add_argument('--mode', choices=['full', 'unit', 'diagnostic'], default='full')
     p.add_argument('--test-filter', default='')
     p.add_argument('--sanitizer', choices=['none', 'address', 'thread'], default='none')
@@ -274,12 +264,7 @@ def main():
     started = time.monotonic()
     try:
         if a.command == 'prepare':
-            # Internal job role, not a caller/workflow input. Full consumers boot;
-            # the full producer only verifies the pinned toolchain/runtime/model.
-            role = os.environ.get('WOONA_CI_ROLE', 'producer')
-            if role not in ('producer', 'consumer'):
-                p.error('Invalid internal native job role')
-            prepare(boot=a.mode != 'full' or role == 'consumer')
+            prepare()
         elif a.command == 'build':
             args = ['xcodebuild', 'build-for-testing', '-project', 'ios/Woona.xcodeproj', '-scheme', 'Woona',
                     '-derivedDataPath', str(DERIVED), '-sdk', 'iphonesimulator26.5',
@@ -287,29 +272,18 @@ def main():
             if a.sanitizer != 'none':
                 args += ['-enable' + a.sanitizer.title() + 'Sanitizer', 'YES']
             call(args, timeout=1200)
-        elif a.command == 'unit':
+        elif a.command == 'test':
             selector = a.test_filter or 'WoonaTests'
             if not re.fullmatch(r'Woona(?:UI)?Tests(?:/\w+){0,2}', selector):
                 p.error('Invalid test selector')
             if a.sanitizer != 'none' and selector.startswith('WoonaUITests'):
                 p.error('Sanitizers require unit tests')
             (ROOT / 'export-proof.json').unlink(missing_ok=True)
-            test('unit', [selector], a.sanitizer)
+            label = 'full' if a.mode == 'full' else 'unit'
+            selectors = ['WoonaTests', 'WoonaUITests'] if a.mode == 'full' else [selector]
+            # One invocation uses the original scheme target order, units then UI.
+            test(label, selectors, a.sanitizer)
             if a.mode != 'diagnostic':
-                call(['python3', 'ios/tools/check-recording-export.py', str(ROOT / 'unit-attachments')])
-                write(ROOT / 'export-proof.json', identity())
-        elif a.command.startswith('ui-'):
-            if a.mode != 'full':
-                p.error('Shard consumers require full mode; diagnostics use the unit/filter path')
-            selectors = ['WoonaUITests/OverviewParityTests/' + m for m in SHARDS[int(a.command[-1]) - 1]]
-            label = a.command
-            if a.command == 'ui-1':
-                label = 'unit-ui-1'
-                selectors.insert(0, 'WoonaTests')
-                (ROOT / 'export-proof.json').unlink(missing_ok=True)
-            # One invocation: scheme target order keeps serial units before UI1.
-            test(label, selectors)
-            if a.command == 'ui-1':
                 call(['python3', 'ios/tools/check-recording-export.py', str(ROOT / f'{label}-attachments')])
                 write(ROOT / 'export-proof.json', identity())
         elif a.command == 'archive':
@@ -318,14 +292,6 @@ def main():
             call(['python3', 'ios/tools/test_complete_archive.py'], timeout=600)
             write(ROOT / 'archive-proof.json', {'identity': identity(),
                   'zip64_large': os.environ.get('WOONA_SKIP_ZIP64_LARGE', '0') == '0'})
-        elif a.command == 'pack':
-            call(['tar', '-cf', str(ROOT / 'products.tar'), '-C', str(ROOT), 'Derived/Build/Products'])
-            write(ROOT / 'products-manifest.json', {'identity': identity(), 'sha256': digest(ROOT / 'products.tar')})
-        elif a.command == 'verify':
-            manifest = parse_json((ROOT / 'products-manifest.json').read_text())
-            if manifest != {'identity': identity(), 'sha256': digest(ROOT / 'products.tar')}:
-                raise ValueError('Products source/run/toolchain/hash mismatch')
-            call(['tar', '-xf', str(ROOT / 'products.tar'), '-C', str(ROOT)])
         elif a.command == 'aggregate':
             if a.mode == 'diagnostic':
                 write(a.directory / 'native-proof.json', {'mode': 'diagnostic', 'fullproof': False})

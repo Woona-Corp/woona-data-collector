@@ -26,10 +26,9 @@ env:
 
 jobs:
   native-build-unit:
-    name: ${{ inputs.mode == 'full' && 'native-build-only' || 'native-build-unit' }}
+    name: native-build-test
     env:
       CI_PHASE_SCOPE: producer
-      WOONA_CI_ROLE: producer
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -50,7 +49,7 @@ jobs:
           assert mode in ('full', 'unit', 'diagnostic'), 'Invalid native mode'
           assert mode == 'diagnostic' or (not os.environ['FILTER'] and os.environ['SANITIZER'] == 'none'), 'Diagnostic inputs cannot authorize proof'
           PY
-      - name: Verify pinned producer host (full mode does not boot Simulator)
+      - name: Verify pinned host without booting Simulator (all modes)
         env:
           MODE: ${{ inputs.mode }}
         run: python3 ios/tools/native_ci.py prepare --mode "$MODE"
@@ -59,98 +58,36 @@ jobs:
           SANITIZER: ${{ inputs.sanitizer }}
           MODE: ${{ inputs.mode }}
         run: python3 ios/tools/native_ci.py build --mode "$MODE" --sanitizer "$SANITIZER"
-      - name: Package transferable test products preserving modes and symlinks
-        if: inputs.mode == 'full'
-        run: python3 ios/tools/native_ci.py pack
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: inputs.mode == 'full'
-        with:
-          name: ios-test-products
-          path: |
-            ${{ runner.temp }}/woona-native-ci/products.tar
-            ${{ runner.temp }}/woona-native-ci/products-manifest.json
-          retention-days: 1
-          if-no-files-found: error
-          compression-level: 0
       - name: Independent archive SQLite/ZIP oracle
         env:
           WOONA_SKIP_ZIP64_LARGE: ${{ inputs.zip64-large && '0' || '1' }}
         run: python3 ios/tools/native_ci.py archive
-      - name: Serial native units and independent session export proof
-        if: inputs.mode != 'full'
+      - name: One serial native invocation and independent session export proof
         env:
           MODE: ${{ inputs.mode }}
           FILTER: ${{ inputs.test-filter }}
           SANITIZER: ${{ inputs.sanitizer }}
-        run: python3 ios/tools/native_ci.py unit --mode "$MODE" --test-filter "$FILTER" --sanitizer "$SANITIZER"
+        run: python3 ios/tools/native_ci.py test --mode "$MODE" --test-filter "$FILTER" --sanitizer "$SANITIZER"
       - name: Retain complete result bundle with symlinks
         if: always()
         run: |
           cd "$RUNNER_TEMP/woona-native-ci"
-          if test -d unit.xcresult; then tar -cf unit-xcresult.tar unit.xcresult; fi
+          for label in full unit; do
+            if test -d "$label.xcresult"; then tar -cf "$label-xcresult.tar" "$label.xcresult"; fi
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
-          name: ${{ inputs.mode == 'full' && 'ios-native-build-evidence' || 'ios-native-unit-evidence' }}
+          name: ${{ inputs.mode == 'full' && 'ios-native-full-evidence' || 'ios-native-unit-evidence' }}
           path: |
             ${{ runner.temp }}/woona-native-ci/*.json
             ${{ runner.temp }}/woona-native-ci/*-xcresult.tar
-            ${{ runner.temp }}/woona-native-ci/unit-attachments/
-          retention-days: ${{ job.status == 'success' && 7 || 14 }}
-          if-no-files-found: warn
-
-  ui:
-    needs: native-build-unit
-    if: inputs.mode == 'full'
-    env:
-      CI_PHASE_SCOPE: ${{ matrix.label }}
-      WOONA_CI_ROLE: consumer
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - shard: 1
-            label: unit-ui-1
-          - shard: 2
-            label: ui-2
-    runs-on: macos-26
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Verify pinned host and start simulator boot before download
-        run: python3 ios/tools/native_ci.py prepare
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: ios-test-products
-          path: ${{ runner.temp }}/woona-native-ci
-      - name: Verify exact same-run product identity/hash and restore canonical path
-        run: python3 ios/tools/native_ci.py verify
-      - name: Serial selected targets (all units then UI1, or UI2) without rebuilding or retries
-        env:
-          SHARD: ${{ matrix.shard }}
-        run: python3 ios/tools/native_ci.py "ui-$SHARD"
-      - name: Retain complete result bundle with symlinks
-        if: always()
-        env:
-          LABEL: ${{ matrix.label }}
-        run: |
-          cd "$RUNNER_TEMP/woona-native-ci"
-          if test -d "$LABEL.xcresult"; then tar -cf "$LABEL-xcresult.tar" "$LABEL.xcresult"; fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: always()
-        with:
-          name: ios-native-${{ matrix.label }}-evidence
-          path: |
-            ${{ runner.temp }}/woona-native-ci/*.json
-            ${{ runner.temp }}/woona-native-ci/*-xcresult.tar
-            ${{ runner.temp }}/woona-native-ci/${{ matrix.label }}-attachments/
+            ${{ runner.temp }}/woona-native-ci/*-attachments/
           retention-days: ${{ job.status == 'success' && 7 || 14 }}
           if-no-files-found: warn
 
   ios-required:
-    needs: [native-build-unit, ui]
+    needs: native-build-unit
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -160,12 +97,8 @@ jobs:
           persist-credentials: false
       - name: Require selected job success, never skipped/failed proof
         env:
-          MODE: ${{ inputs.mode }}
           PRODUCER: ${{ needs.native-build-unit.result }}
-          UI: ${{ needs.ui.result }}
-        run: |
-          test "$PRODUCER" = success
-          if test "$MODE" = full; then test "$UI" = success; else test "$UI" = skipped; fi
+        run: test "$PRODUCER" = success
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: ios-native-*-evidence
@@ -184,12 +117,11 @@ jobs:
         run: |
           gh api "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" > native-evidence/artifacts.json
           python3 - <<'PY'
-          import json, os
+          import json, os, re
           from pathlib import Path
           root = Path('native-evidence')
           if os.environ['MODE'] == 'full':
-              names = ['ios-test-products', 'ios-native-build-evidence',
-                       'ios-native-unit-ui-1-evidence', 'ios-native-ui-2-evidence']
+              names = ['ios-native-full-evidence']
           else:
               names = ['ios-native-unit-evidence']
           artifacts = json.loads((root / 'artifacts.json').read_text())['artifacts']
@@ -198,6 +130,9 @@ jobs:
               matches = [a for a in artifacts if a['name'] == name and not a['expired']]
               assert len(matches) == 1, 'Missing/ambiguous same-run artifact: ' + name
               a = matches[0]
+              assert type(a['id']) is int and a['id'] > 0, 'Invalid evidence artifact ID'
+              assert type(a['size_in_bytes']) is int and a['size_in_bytes'] > 0, 'Empty evidence artifact'
+              assert isinstance(a['digest'], str) and re.fullmatch(r'sha256:[0-9a-f]{64}', a['digest']), 'Missing/invalid service digest'
               bindings.append({k: a[k] for k in ('id', 'name', 'digest', 'size_in_bytes')})
           proof_path = root / 'native-proof.json'
           proof = json.loads(proof_path.read_text())
