@@ -109,6 +109,12 @@ identities/timings, attachments, identity/archive proofs и phase wall times:
 independent proofs, result hashes и same-run artifact IDs/digests. Failed/cancelled
 selected jobs не могут быть заменены зелёным subset или диагностическим run.
 
+Для Mobile CI artifact `ios-native-full-evidence` содержит полный physical
+report, `ios-native-unit-evidence` — unit/diagnostic evidence, `ios-native-proof`
+— результат Linux acceptance. На открытом PR нужны зелёные `ios / ios-required`
+и `ci-required`, а не только macOS job. Main/manual используют `ci-observed`;
+`mode=unit` или `diagnostic` с `fullproof=false` не подтверждает UI acceptance.
+
 Linux checks (не native acceptance):
 
 ```sh
