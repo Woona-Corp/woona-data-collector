@@ -114,6 +114,15 @@ report, `ios-native-unit-evidence` — unit/diagnostic evidence, `ios-native-pro
 — результат Linux acceptance. На открытом PR нужны зелёные `ios / ios-required`
 и `ci-required`, а не только macOS job. Main/manual используют `ci-observed`;
 `mode=unit` или `diagnostic` с `fullproof=false` не подтверждает UI acceptance.
+Проверка и скачивание proof — read-only, без запуска нового workflow или upload:
+
+```sh
+gh run view RUN_ID -R Woona-Corp/woona-data-collector --json conclusion,headSha,jobs
+gh run download RUN_ID -R Woona-Corp/woona-data-collector --name ios-native-proof --dir /tmp/woona-ci-proof-RUN_ID
+```
+
+Скачанный JSON сам по себе не заменяет required checks и не используется для
+переноса PR proof в publisher другого run.
 
 Linux checks (не native acceptance):
 
