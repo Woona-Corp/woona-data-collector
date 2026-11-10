@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ['android-v*']
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, closed]
   workflow_dispatch:
     inputs:
       scope:
@@ -13,7 +14,7 @@ on:
         options: [all, android, ios, server]
         default: all
       export_server_image:
-        description: Export verified server image privately for authorized exact-image deployment
+        description: Export tested code-only image for authorized exact-image deployment
         type: boolean
         default: false
       ios_test_filter:
@@ -33,6 +34,11 @@ on:
 permissions:
   contents: read
 
+# Closed PR runs share the ordinary group, cancelling stale work without native jobs.
+concurrency:
+  group: mobile-${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v') && format('release-{0}', github.ref) || github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || format('ci-{0}', github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -42,16 +48,26 @@ jobs:
       ios: ${{ steps.select.outputs.ios }}
       server: ${{ steps.select.outputs.server }}
       zip64_large: ${{ steps.select.outputs.zip64_large }}
+      android_full: ${{ steps.select.outputs.android_full }}
+      android_mode: ${{ steps.select.outputs.android_mode }}
+      android_release: ${{ steps.select.outputs.android_release }}
+      ios_mode: ${{ steps.select.outputs.ios_mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Test CI selection policy
         run: python3 -m unittest discover -s .github/ci -p 'test_*.py' -v
+      - name: Lightweight policy and documentation gate
+        run: |
+          git diff --check
+          python3 shared/tools/check_questionnaire_presentation.py
+          python3 android/tools/test_backup_policy.py
       - name: Select dependency-aware checks
         id: select
         env:
           WOONA_CI_FETCH_TOKEN: ${{ github.token }}
+          CI_MAIN_UNITS_ENABLED: ${{ vars.CI_MAIN_UNITS_ENABLED }}
         run: python3 .github/ci/select_checks.py
 
   android:
@@ -75,7 +91,7 @@ jobs:
           cache-disabled: ${{ startsWith(github.ref, 'refs/tags/') }}
       - name: Install Android SDK
         env:
-          ANDROID_INSTRUMENTATION: ${{ inputs.android_instrumentation }}
+          ANDROID_INSTRUMENTATION: ${{ needs.changes.outputs.android_full }}
         run: |
           if [[ "$ANDROID_INSTRUMENTATION" == 'true' ]]; then
             ./android/tools/setup-android-sdk.sh full
@@ -83,13 +99,13 @@ jobs:
             ./android/tools/setup-android-sdk.sh fast
           fi
       - name: Enable KVM for Android instrumentation
-        if: inputs.android_instrumentation == true
+        if: needs.changes.outputs.android_full == 'true'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - name: Record Android host baseline
-        if: inputs.android_instrumentation == true
+        if: needs.changes.outputs.android_full == 'true'
         run: |
           diagnostics=android/app/build/outputs/androidTest-results/ci-health
           mkdir -p "$diagnostics"
@@ -104,7 +120,7 @@ jobs:
           } > "$diagnostics/host-start.txt" 2>&1 || true
       - name: Test, lint, and build Android
         env:
-          ANDROID_INSTRUMENTATION: ${{ inputs.android_instrumentation }}
+          ANDROID_INSTRUMENTATION: ${{ needs.changes.outputs.android_full }}
         run: |
           python3 android/tools/test_setup_android_sdk.py
           python3 android/tools/test_backup_policy.py
@@ -113,8 +129,17 @@ jobs:
           else
             ./android/tools/check.sh fast
           fi
+      - name: Verify Android JUnit identities before signing
+        if: ${{ !cancelled() }}
+        env:
+          ANDROID_MODE: ${{ needs.changes.outputs.android_mode }}
+        run: |
+          python3 .github/ci/android_test_manifest.py \
+            --mode "$ANDROID_MODE" --source "$(git rev-parse HEAD)" \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --output android/app/build/ci-verification/android-tests.json
       - name: Record Android failure health
-        if: failure() && inputs.android_instrumentation == true
+        if: failure() && needs.changes.outputs.android_full == 'true'
         run: |
           diagnostics=android/app/build/outputs/androidTest-results/ci-health
           mkdir -p "$diagnostics"
@@ -146,24 +171,24 @@ jobs:
         with:
           name: android-test-diagnostics
           path: |
+            android/app/build/ci-verification/
             android/app/build/test-results/
             android/app/build/reports/tests/
             android/app/build/reports/androidTests/
             android/app/build/outputs/androidTest-results/
             android/app/build/outputs/managed_device_android_test_additional_output/
             android/app/build/reports/lint-results-debug.*
-            android/app/build/outputs/apk/debug/
-            android/app/build/outputs/apk/androidTest/debug/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: ${{ job.status == 'failure' && 14 || 7 }}
       - name: Prepare Android APK for release tag
-        if: startsWith(github.ref, 'refs/tags/android-v')
+        if: github.event_name == 'push' && needs.changes.outputs.android_release == 'true'
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
           ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
           ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
         run: |
+          test '${{ needs.changes.outputs.android_full }}' = true
           mkdir -p release-assets
           [[ -n "$KEYSTORE_BASE64" && -n "$ANDROID_SIGNING_STORE_PASSWORD" && -n "$ANDROID_SIGNING_KEY_ALIAS" && -n "$ANDROID_SIGNING_KEY_PASSWORD" ]] || {
             echo 'Android signing secrets are required for a release tag' >&2
@@ -172,102 +197,44 @@ jobs:
           umask 077
           export ANDROID_SIGNING_STORE_FILE="$RUNNER_TEMP/woona-release.keystore"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$ANDROID_SIGNING_STORE_FILE"
+          trap 'rm -f "$ANDROID_SIGNING_STORE_FILE"' EXIT
           (cd android && ./gradlew assembleRelease --no-daemon --console=plain)
+          expected_version="${GITHUB_REF_NAME#android-v}"
+          actual_version="$("$ANDROID_SDK_ROOT/build-tools/36.1.0/aapt" dump badging android/app/build/outputs/apk/release/app-release.apk | sed -n "s/^package:.*versionName='\([^']*\)'.*/\1/p")"
+          test "$actual_version" = "$expected_version"
+          grep -Eq 'WOONA_SERVER_TOKEN = "";' android/app/build/generated/source/buildConfig/release/com/example/myapplication/BuildConfig.java
           certs="$("$ANDROID_SDK_ROOT/build-tools/36.1.0/apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk)"
           grep -Fq 'cf308a3b4d025e871bf30225ce1d1c3499f0fcd9d557f8a8ac5f5c414b381fa2' <<< "$certs"
           test "$(stat -c %s android/app/build/outputs/apk/release/app-release.apk)" -le 23276117
           cp android/app/build/outputs/apk/release/app-release.apk release-assets/Woona-Android-release.apk
           (cd release-assets && sha256sum *.apk > SHA256SUMS-android.txt)
       - name: Prepare debug APK
-        if: ${{ !startsWith(github.ref, 'refs/tags/android-v') }}
+        if: needs.changes.outputs.android_release != 'true'
         run: |
           mkdir -p release-assets
           cp android/app/build/outputs/apk/debug/app-debug.apk release-assets/Woona-Android-debug.apk
           (cd release-assets && sha256sum *.apk > SHA256SUMS-android.txt)
+      - name: Bind Android test proof to APK artifact
+        run: cp android/app/build/ci-verification/android-tests.json release-assets/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: android-apk
+          retention-days: 7
           path: release-assets/
           if-no-files-found: error
 
   ios:
     needs: changes
-    if: ${{ !startsWith(github.ref, 'refs/tags/') && needs.changes.outputs.ios == 'true' }}
-    runs-on: macos-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Verify complete data archives with independent ZIP and SQLite readers
-        env:
-          # Only ordinary, non-storage CI opts out. Full/developer runs default on.
-          WOONA_SKIP_ZIP64_LARGE: ${{ needs.changes.outputs.zip64_large == 'true' && '0' || '1' }}
-        run: python3 ios/tools/test_complete_archive.py
-      - name: Test iOS on simulator
-        timeout-minutes: 30
-        if: ${{ !cancelled() }}
-        env:
-          WOONA_SANITIZER: ${{ inputs.sanitizer || 'none' }}
-          WOONA_IOS_TEST_FILTER: ${{ inputs.ios_test_filter }}
-        run: |
-          simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for devices in json.load(sys.stdin)["devices"].values() for d in devices if d["name"].startswith("iPhone")))')"
-          xcrun simctl help bootstatus
-          python3 -c 'import subprocess,sys; subprocess.run(["xcrun","simctl","bootstatus",sys.argv[1],"-b"],check=True,timeout=180)' "$simulator_id"
-          sanitizer_args=()
-          filter_args=()
-          parallel_args=(-parallel-testing-enabled NO)
-          case "$WOONA_SANITIZER" in
-            none) ;;
-            address)
-              sanitizer_args=(-enableAddressSanitizer YES -enableThreadSanitizer NO)
-              filter_args=(-only-testing:WoonaTests)
-              ;;
-            thread)
-              sanitizer_args=(-enableThreadSanitizer YES -enableAddressSanitizer NO)
-              filter_args=(-only-testing:WoonaTests)
-              parallel_args=(-parallel-testing-enabled NO)
-              ;;
-            *) echo 'Unsupported sanitizer mode' >&2; exit 2 ;;
-          esac
-          if [[ -n "$WOONA_IOS_TEST_FILTER" ]]; then
-            [[ "$WOONA_IOS_TEST_FILTER" =~ ^Woona(Tests|UITests)(/[A-Za-z0-9_]+){0,2}$ ]] || { echo 'Invalid XCTest filter'; exit 2; }
-            [[ "$WOONA_SANITIZER" == 'none' || "$WOONA_IOS_TEST_FILTER" != WoonaUITests* ]] || { echo 'Sanitizer filters must select unit tests'; exit 2; }
-            filter_args=(-only-testing:"$WOONA_IOS_TEST_FILTER")
-            parallel_args=(-parallel-testing-enabled NO)
-          fi
-          xcodebuild "${sanitizer_args[@]}" "${filter_args[@]}" "${parallel_args[@]}" -project ios/Woona.xcodeproj -scheme Woona -derivedDataPath "$RUNNER_TEMP/WoonaDerived" -resultBundlePath "$RUNNER_TEMP/WoonaTests.xcresult" -destination "platform=iOS Simulator,id=$simulator_id" CODE_SIGNING_ALLOWED=NO test || {
-            xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/WoonaTests.xcresult" --compact
-            exit 1
-          }
-      - name: Collect iOS test attachments
-        if: always()
-        run: |
-          if [[ -d "$RUNNER_TEMP/WoonaTests.xcresult" ]]; then
-            xcrun xcresulttool export attachments --path "$RUNNER_TEMP/WoonaTests.xcresult" --output-path "$RUNNER_TEMP/WoonaTestAttachments"
-          fi
-      - name: Verify session export attachments
-        if: ${{ success() && inputs.ios_test_filter == '' && (inputs.sanitizer == '' || inputs.sanitizer == 'none') }}
-        run: python3 ios/tools/check-recording-export.py "$RUNNER_TEMP/WoonaTestAttachments"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: always()
-        with:
-          name: ios-recording-export-proof
-          path: ${{ runner.temp }}/WoonaTestAttachments/
-          if-no-files-found: warn
-      - name: Collect iOS crash diagnostics
-        if: failure()
-        run: |
-          mkdir -p "$RUNNER_TEMP/WoonaFailure"
-          xcrun xcresulttool export diagnostics --path "$RUNNER_TEMP/WoonaTests.xcresult" --output-path "$RUNNER_TEMP/WoonaFailure" || true
-          find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f -name 'Woona*' -exec cp {} "$RUNNER_TEMP/WoonaFailure/" \; || true
-          find "$RUNNER_TEMP/WoonaFailure" -type f -name '*.ips' -exec cat {} \;
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: failure()
-        with:
-          name: ios-failure-diagnostics
-          path: ${{ runner.temp }}/WoonaFailure/
-          if-no-files-found: warn
+    if: needs.changes.outputs.ios == 'true'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ios-native.yml
+    with:
+      mode: ${{ needs.changes.outputs.ios_mode }}
+      zip64-large: ${{ needs.changes.outputs.zip64_large == 'true' }}
+      test-filter: ${{ inputs.ios_test_filter || '' }}
+      sanitizer: ${{ inputs.sanitizer || 'none' }}
 
   server:
     needs: changes
@@ -290,6 +257,7 @@ jobs:
           python3 tools/check_questionnaire_presentation.py
           python3 server/check_dependency_lock.py
           python3 -B -m unittest -v server.tests.test_dependency_lock server.tests.test_deployment_provenance
+          python3 -B -m unittest discover -s tools -p 'test_promote_server.py' -v
           docker compose --env-file /dev/null config -q
           bash server/tests/test_backup.sh
           bash operations/backups/test-scheduled-backup.sh
@@ -331,7 +299,7 @@ jobs:
           import json, pathlib, sys
           root = pathlib.Path(sys.argv[2])
           observed = json.loads((root / "tree-verification.json").read_text())
-          observed["image_digest"] = sys.argv[1]  # actual Docker local configuration digest
+          observed["image_digest"] = sys.argv[1]  # actual producer ID; promotion proves its OCI kind
           (root / "image-binding.json").write_text(json.dumps(observed, sort_keys=True) + "\n")
           PY
           python3 -B server/deployment_provenance.py compare \
@@ -372,28 +340,28 @@ jobs:
           path: ${{ runner.temp }}/server-provenance/
           if-no-files-found: error
           retention-days: 7
-      - name: Export exact verified server image (manual only)
-        if: github.event_name == 'workflow_dispatch' && inputs.export_server_image == true && (inputs.scope == 'server' || inputs.scope == 'all')
+      - name: Export exact verified server image (trusted main or explicit manual)
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'Woona-Corp/woona-data-collector') || (github.event_name == 'workflow_dispatch' && inputs.export_server_image == true && (inputs.scope == 'server' || inputs.scope == 'all'))
         run: |
           mkdir -p "$RUNNER_TEMP/server-image"
           docker image save "$WOONA_CANDIDATE_IMAGE" -o "$RUNNER_TEMP/server-image/server-image.tar"
           cp "$RUNNER_TEMP/server-provenance/"*.json "$RUNNER_TEMP/server-image/"
           (cd "$RUNNER_TEMP/server-image" && sha256sum server-image.tar > SHA256SUMS)
-      - name: Retain private exact-image export (manual only)
-        if: github.event_name == 'workflow_dispatch' && inputs.export_server_image == true && (inputs.scope == 'server' || inputs.scope == 'all')
+      - name: Retain code-only exact-image export (trusted main or explicit manual)
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'Woona-Corp/woona-data-collector') || (github.event_name == 'workflow_dispatch' && inputs.export_server_image == true && (inputs.scope == 'server' || inputs.scope == 'all'))
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: server-verified-image
           path: ${{ runner.temp }}/server-image/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
       - name: Clean up
         if: always()
         run: docker compose -p woona-ci down -v --remove-orphans
 
   release:
-    if: startsWith(github.ref, 'refs/tags/android-v')
-    needs: [android, server]
+    if: github.event_name == 'push' && needs.changes.outputs.android_release == 'true'
+    needs: [changes, android, server]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -406,8 +374,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          (cd release-assets && sha256sum -c SHA256SUMS-android.txt)
+          test -f release-assets/Woona-Android-release.apk
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+            echo "Release already exists; immutable assets cannot be replaced" >&2
+            exit 1
           else
             release_args=()
             if [[ "${GITHUB_REF_NAME#android-v}" == *-* ]]; then
@@ -415,3 +386,22 @@ jobs:
             fi
             gh release create "${release_args[@]}" "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "Woona Android ${GITHUB_REF_NAME#android-v}"
           fi
+
+  ci-required:
+    # Diagnostics and closed PR no-ops must not satisfy protected PR checks.
+    name: >-
+      ${{ github.event_name == 'pull_request'
+      && github.event.action != 'closed'
+      && 'ci-required' || 'ci-observed' }}
+    if: always()
+    needs: [changes, android, ios, server, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Require every selected check to succeed
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/ci/select_checks.py --required-gate

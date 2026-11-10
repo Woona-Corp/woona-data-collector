@@ -3,10 +3,16 @@ import copy
 import io
 import json
 import unittest
-from urllib.error import HTTPError
 from unittest.mock import patch
+from urllib.error import HTTPError
 
-from testflight_internal import AppleClient, AppleRequestError, SafetyError, jose_signature, run
+from testflight_internal import (
+    AppleClient,
+    AppleRequestError,
+    SafetyError,
+    jose_signature,
+    run,
+)
 
 
 def row(kind, identity, **attrs):
@@ -271,7 +277,7 @@ class InternalTestFlightTests(unittest.TestCase):
     def test_null_required_owner_or_version_still_fails_closed(self):
         original_get = self.client.get
         for relationship in ["app", "preReleaseVersion"]:
-            def get(path, query=None):
+            def get(path, query=None, relationship=relationship):
                 result = original_get(path, query)
                 if path == "/v1/builds":
                     result["data"][0]["relationships"][relationship]["data"] = None
@@ -311,6 +317,44 @@ class InternalTestFlightTests(unittest.TestCase):
                     client._request(method, path, payload=payload)
             with self.assertRaises(SafetyError):
                 AppleClient(None, None, None).assign_build("internal-1", "build-150")
+
+    def test_monotonic_deadline_bounds_polling_and_records_each_poll(self):
+        now = [100.0]
+        polls, sleeps = [], []
+        def pause(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+        with patch.object(self.client, 'build', None), self.assertRaises(TimeoutError):
+            run(self.client, '1.5.0', '15001', attempts=1000, timeout_seconds=25,
+                clock=lambda: now[0], pause=pause, on_poll=polls.append)
+        self.assertEqual([20, 5], sleeps)
+        self.assertEqual(2, len(polls))
+        self.assertTrue(all(p['timestamp_utc'] for p in polls))
+        self.assertEqual(['NOT_FOUND', 'NOT_FOUND'], [p['processing_state'] for p in polls])
+        self.assertEqual([], self.client.writes)
+
+    def test_status_inspection_is_not_a_claim_of_availability(self):
+        report = run(self.client, '1.5.0', '15001', attempts=1)
+        self.assertTrue(report['status_inspected'])
+        self.assertFalse(report['available_for_internal_testers'])
+        self.assertEqual(1, len(report['polls']))
+        self.assertFalse(report['physical_installation_verified'])
+
+    def test_transport_timeout_cannot_outlive_observation_budget(self):
+        client = AppleClient(None, None, None)
+        client.deadline = 125
+        with patch('testflight_internal.time.monotonic', return_value=120), \
+                patch('testflight_internal.token', return_value='fixture'), \
+                patch('testflight_internal.urlopen') as request:
+            request.return_value.__enter__.return_value.read.return_value = b'{"data": []}'
+            client.get('/v1/apps')
+            self.assertEqual(5, request.call_args.kwargs['timeout'])
+        client.deadline = 100
+        with patch('testflight_internal.time.monotonic', return_value=120), \
+                patch('testflight_internal.token', return_value='fixture'), \
+                patch('testflight_internal.urlopen') as request, self.assertRaises(TimeoutError):
+            client.get('/v1/apps')
+        request.assert_not_called()
 
     def test_es256_der_integer_padding_and_invalid_sequences(self):
         der = bytes.fromhex("3006020101020102")

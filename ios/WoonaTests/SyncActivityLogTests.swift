@@ -69,8 +69,10 @@ final class SyncActivityLogTests: XCTestCase {
     func testAppendRepairsCorruptStorageAndCapsPersistedJournal() throws {
         let suite = "SyncActivityLogTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let persisted = expectation(description: "Final http_409 journal write completed")
+        let observedDefaults = try XCTUnwrap(PersistObservationSyncActivityDefaults(suiteName: suite, persisted: persisted))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let log = SyncActivityLog(defaults: defaults)
+        let log = SyncActivityLog(defaults: observedDefaults)
         defaults.set(Data("broken JSON".utf8), forKey: SyncActivityLog.preferenceKey)
         XCTAssertTrue(log.recent(kind: "recording", id: id).isEmpty)
         log.record(kind: "recording", id: id, action: .localSaved, outcome: .succeeded)
@@ -78,10 +80,9 @@ final class SyncActivityLogTests: XCTestCase {
         XCTAssertEqual(log.recent(kind: "recording", id: id).first?.action, "local_saved")
         defaults.set(try JSONEncoder().encode((0..<128).map { event($0) }), forKey: SyncActivityLog.preferenceKey)
         log.record(kind: "recording", id: id, action: .upload, outcome: .succeeded, code: "http_409")
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline && log.recent(kind: "recording", id: id).first?.outcome != "succeeded" {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
+        // Observe the actual write without polling recent(), which takes the
+        // same IO lock needed by the utility-priority writer.
+        wait(for: [persisted], timeout: 5)
         let events = log.recent(kind: "recording", id: id, limit: 999)
         XCTAssertEqual(events.count, 128)
         XCTAssertEqual(events.first?.outcome, "succeeded")
@@ -172,6 +173,27 @@ final class SyncActivityLogTests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.01)
         }
         XCTFail("Journal did not reach \(count) actual events", file: file, line: line)
+    }
+}
+
+/// Observe real preference persistence without contending for the journal's read/IO lock.
+private final class PersistObservationSyncActivityDefaults: UserDefaults, @unchecked Sendable {
+    private let persisted: XCTestExpectation
+    private var observed = false // only the final journal writer matches the marker
+
+    init?(suiteName: String, persisted: XCTestExpectation) {
+        self.persisted = persisted
+        super.init(suiteName: suiteName)
+    }
+
+    override func set(_ value: Any?, forKey defaultName: String) {
+        super.set(value, forKey: defaultName)
+        guard defaultName == SyncActivityLog.preferenceKey, let data = value as? Data,
+              let last = (try? JSONDecoder().decode([SyncActivityEvent].self, from: data))?.last,
+              last.action == "upload", last.outcome == "succeeded", last.code == "http_409",
+              !observed else { return }
+        observed = true
+        persisted.fulfill()
     }
 }
 

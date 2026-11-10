@@ -137,7 +137,7 @@ This records the CI engine's actual local identity, **not** a claim of a pullabl
 registry reference or authenticated attestation. Record its kind before comparing
 across engines. No image digest is inserted into its own image.
 
-Ordinary successful runs retain only small `server-image-provenance` metadata
+Successful server jobs retain small `server-image-provenance` metadata
 for seven days: input list, manifest, verification, image binding and explicit
 build configuration files, including both production overlays. The API suite runs
 on that same image in isolated
@@ -145,19 +145,22 @@ Compose with PostgreSQL 18. Test dependencies are installed only in the disposab
 container from its copied hashed wheel-only test lock, followed by `pip check`;
 this does not change the retained image. Runtime dependency layers remain shared.
 
-An explicit `workflow_dispatch` with scope `server` or `all` and boolean
-`export_server_image=true` additionally retains `server-verified-image` for **one
-day**: `docker image save` of the verified immutable ID, archive SHA-256 and JSON
-provenance. Use only repository-authorized private Actions artifact access; no
-access policy or workflow permissions are changed and nothing is published to
-GHCR. There is no scheduled export, release asset, environment dump, DB, or storage
+Trusted `main` pushes additionally retain `server-verified-image` for **seven
+days**; explicit `workflow_dispatch` with scope `server` or `all` and boolean
+`export_server_image=true` retains the same export. Both save the already tested
+immutable ID, archive SHA-256 and JSON provenance, never a rebuilt image. PRs and
+Android tags are not production image producers. Manual exports on other branches
+remain diagnostics, not promotable production artifacts. Artifacts contain public
+code images, not secrets or private data; normal repository Actions access applies.
+No access policy changes or GHCR publication are implied. There is no scheduled export, release asset, environment dump, DB, or storage
 export. Before any separately authorized exact-image deployment, check archive
 SHA-256, load in an isolated environment, compare same-kind loaded identities
 against `image-binding.json` (or establish the archive bridge below), rerun the
 no-migration tree/UID verification and consumer-side `compare`,
 and independently apply the operator gates below. Artifacts are not permanent
-rollback retention or deployment authorization. Local Docker is absent in the
-current integration environment; CI must still prove build and Docker-backed tests.
+rollback retention or deployment authorization. The promotion helper below enforces
+this chain without rebuilding. Its local synthetic Docker check does not replace
+CI's full candidate build and Docker-backed server tests.
 
 ### Image-store transitions: prove the archive identity chain
 
@@ -174,7 +177,9 @@ chain. Without extracting into a host filesystem:
    member names, links, unsafe paths, ambiguous platforms or unsupported layouts.
 2. Verify the OCI index's selected platform-manifest digest/size against that blob's
    actual bytes; verify the manifest's configuration digest/size against the actual
-   configuration blob. The latter must equal the CI producer configuration identity.
+   configuration blob. The CI producer's observed ID must equal the corresponding
+   proven configuration **or** platform-manifest identity; derive and retain its
+   type, rather than assuming `.Id` always means configuration on every engine.
    Check OS/architecture, ordered layers, descriptor sizes/hashes and configuration
    rootfs diff IDs. Compressed layers need correct compressed/diff-ID handling;
    do not apply an uncompressed-only proof to another format.
@@ -188,8 +193,9 @@ chain. Without extracting into a host filesystem:
    running container after an authorized rollout. Unknown/missing links are a stop,
    not permission to accept an arbitrary replacement ID.
 
-The source-manifest CLI does not parse OCI archives or authenticate this bridge;
-that remains an independently reviewed operator gate. Five synthetic transfer-proof
+The source-manifest CLI does not parse OCI archives or authenticate this bridge.
+`tools/promote_server.py` now implements the bounded supported OCI bridge for the
+promotion workflow; unsupported layouts stop rather than delegating to a bypass. Five synthetic transfer-proof
 cases (valid, wrong producer, broken config link, changed layer, duplicate member)
 and an actual15-layer archive were checked for the observed transition. This does
 not promise support for every archive format or engine. No production data is
@@ -220,9 +226,10 @@ Build-maintainer invariants:
 
 ## Operator preflight, post-deploy, and rollback gates
 
-These are manual review gates, not executable deployment automation. The parent
-operator handles authorized live, read-only observations; no SSH or production
-writes are part of this implementation.
+These remain the review requirements. `deployment_provenance.py` is read-only and
+never performs SSH or writes production; the separate, single promotion entrypoint
+below now enforces the supported replacement procedure. No production operations
+were performed while implementing it.
 
 1. Record currently running immutable image identity, actual process UID,
    observed DB Alembic revision, health/readiness, configuration *identifiers*
@@ -294,3 +301,186 @@ outside the COPY scopes; review/retain those separately as build/deployment
 configuration evidence. Root UID, group/ACL behavior, runtime dependencies and
 health need independent checks. Public file hashes may identify public code;
 never use this manifest format as a private-data inventory.
+
+## Serialized exact-image promotion
+
+[`deploy-server.yml`](../../.github/workflows/deploy-server.yml) is the only
+production promotion workflow. Its one entrypoint is
+[`tools/promote_server.py`](../tools/promote_server.py), a stdlib Linux tool outside
+Docker COPY scopes. It reuses `compare_observation` from the canonical provenance
+module. It never rebuilds, runs Alembic, changes a checkout, copies live data,
+creates backups, downgrades schema, prunes images, or performs automatic rollback.
+The source CLI described above remains read-only and separate in responsibility.
+
+### Owner setup and review (not performed by this implementation)
+
+Before using this workflow, the owner must configure GitHub's **production**
+environment with required reviewers (prevent self-review), main-only deployment
+branches, and protected main/reviewed workflows. Add environment secrets only:
+
+- `SERVER_SSH_KEY`: dedicated authorized key for fixed `root@167.99.223.71`;
+- `SERVER_SSH_KNOWN_HOSTS`: independently verified pinned OpenSSH host-key entry
+  for `167.99.223.71`, never generated by `ssh-keyscan` during deployment;
+- `SERVER_PROMOTION_PLAN`: owner-reviewed JSON below, with real full identities.
+
+The helper requires actual GitHub production approval history for **this dispatch**
+(including dry runs), not merely an environment with that name. Missing approval,
+unavailable/denied approval API, missing secrets or missing host keys stops it.
+It has only `contents:read` and `actions:read`; it cannot configure environments,
+approve itself, write tokens, change permissions, or adopt unknown provenance.
+Do not enable a bypass if environment/API support is unavailable.
+
+The protected plan has exactly these fields (placeholders intentionally invalid):
+
+```json
+{
+  "services": {
+    "api": {
+      "current_image": "sha256:CURRENT_API_IMMUTABLE_IMAGE",
+      "current_source": "CURRENT_API_FULL_REVIEWED_SOURCE",
+      "rollback_image": "sha256:CURRENT_API_IMMUTABLE_IMAGE"
+    },
+    "label_sync": {
+      "current_image": "sha256:CURRENT_WORKER_IMMUTABLE_IMAGE",
+      "current_source": "CURRENT_WORKER_FULL_REVIEWED_SOURCE",
+      "rollback_image": "sha256:CURRENT_WORKER_IMMUTABLE_IMAGE"
+    }
+  },
+  "schema_revision": "0009",
+  "rollback_schema_compatible": true,
+  "storage_compatible": true,
+  "reviewed_source": "CANDIDATE_FULL_REVIEWED_SOURCE",
+  "observation_seconds": 60,
+  "compose_sha256": {
+    "compose.yaml": "sha256:REVIEWED_FILE_HASH",
+    "compose.production.yaml": "sha256:REVIEWED_FILE_HASH",
+    "compose.label.yaml": "sha256:REVIEWED_FILE_HASH"
+  }
+}
+```
+
+The owner reviews installed-client compatibility, runtime/dependency/schema and
+storage compatibility, current source provenance, prior image retention and the
+rollback procedure before setting these values and approving the dispatch.
+`services` must contain exactly `api` and `label_sync`, each with exactly
+`current_image`, `current_source` and `rollback_image`; no global identity aliases,
+missing/extra roles or extra per-role fields are accepted. Each role's rollback
+must equal that role's current immutable image. The roles may have different
+reviewed current image/source identities: preflight matches and probes each role
+against its own baseline, never against the other role or the candidate.
+Every unique reviewed local rollback image must still be independently inspectable
+by its exact ID before any image load; a running container alone is not proof that
+its original image remains available. Shared rollback IDs are inspected once.
+Both roles still require readable verified public trees, actual interpreter and
+PID1 UID10001, and exact image/DB revision0009. Unknown legacy baseline provenance cannot be filled in from Git HEAD
+or the desired candidate. It needs a separate owner plan; there is no adoption flag.
+The three public Compose files on the host must match the reviewed plan hashes.
+Environment files stay on the host and are not exported, hashed or logged.
+
+The target is fixed: `/opt/woona/shared`, project-directory `shared`,
+`/opt/woona/.env`, and the three Compose files listed above. An unreviewed different
+stack must stop for code/plan review, not accept a dispatch-supplied host/path/SSH
+command. No production SSH was performed to discover or modify these settings.
+
+### Dispatch and fail-closed behavior
+
+Dispatch on **main**, supply numeric producer `run_id`, exact `artifact_id`, full
+40-character `source`, and leave `apply=false` initially. The concurrency group
+uses `cancel-in-progress: false` and `queue: max`: running promotions are not
+cancelled and pending requests are queued rather than replaced. Each queued
+request must still pass its own current baseline and environment approval gates;
+an earlier promotion can make a later request's reviewed baseline stale. The
+producer must be a
+completed successful same-repository main push/manual Mobile CI run, with one
+successful `server` job. PRs, forks, tags, different workflows/source, expired or
+renamed artifacts and reruns are rejected. Reruns are deliberately unsupported:
+run-level artifact metadata does not unambiguously authenticate the producing
+attempt. Obtain another reviewed main producer rather than relaxing the check.
+
+The helper checks GitHub's artifact digest against the actual downloaded ZIP,
+then enforces the exact six exported filenames, strict JSON, manifest/binding
+comparison and archive checksum. It parses OCI without filesystem extraction:
+unique safe regular members, bounded files/counts, all content-addressed blobs,
+exactly one linux/amd64 platform, config/platform descriptors, ordered layers and
+uncompressed diff IDs. Raw and gzip OCI layers are supported. The optional Docker
+compatibility manifest must point to the same config/layers. Configuration and
+platform-manifest digests are retained as **different typed identities**; producer
+kind is established by its equality to a verified descriptor, not guessed from
+Docker's version. Index identities, legacy-only Docker archives, nested/multiple
+platforms, zstd, unsafe/duplicate/link/special/sparse members or unknown layouts
+stop. There is no operator checkbox to skip the archive bridge. A new supported
+format requires reviewed implementation and hermetic tests first.
+
+Preflight streams only trusted helper code and bounded public plan to pinned SSH.
+It checks reviewed Compose bytes, existing API/worker identities and public source,
+PID1 UID, read-only SQL Alembic revision, per-role rollback-image availability
+and baseline health. It does **not** load
+an image, create a container/file on the host, restart a service, or run migrations.
+Local runner artifact download/unpack is not a production mutation.
+
+A separate `apply=true` dispatch requires production environment approval again.
+It repeats preflight, streams **only the code image** into `docker image load`,
+independently inspects the consumer identity against the proven archive chain,
+then probes the loaded image with no network, read-only filesystem, no mounts and
+explicit Python entrypoint. No default image CMD runs. Immediately before Compose
+replacement, a fresh runtime snapshot must exactly match the preflight snapshot.
+Any runtime change during image loading or candidate verification aborts for
+separate review: the code image may already be loaded, but no Compose replacement
+or automatic rollback follows. Only after identical source/manifest/schema/UID
+observations and this unchanged-runtime check does Compose replace `api` and `label_sync`
+with that immutable identity, `--no-build --no-deps --pull never`, bounded wait/stop
+limits, direct `uvicorn` for API and explicit Python module for worker. It does
+not rewrite the operational checkout or persist an overlay to its files. Container
+restart/reboot retains its explicit command; an ad-hoc future `compose up` without
+the helper may reintroduce the Dockerfile's migration CMD and is not this procedure.
+
+Post-deploy gates repeatedly verify running source/manifest/UID, schema, readiness,
+API/worker stable container IDs, no worker/API restart, and unchanged other Compose
+container IDs throughout the 30–300 second reviewed observation window. Worker
+observation is process stability, **not proof of successful labeling of real data**.
+An authenticated status-only `/v1/accounts` smoke runs only if a real dedicated
+`WOONA_PROMOTION_SMOKE_TOKEN` is already configured inside the API container; it
+never falls back to an example/debug token or exports a response body. No token
+means explicit `not-configured`, not an authenticated-test claim. Do not configure
+credentials merely to make a test report green.
+
+A failed post-load/apply gate may leave a loaded image or replaced API/worker.
+Stop dependent client distribution and inspect the bounded redacted evidence;
+never assume failure means production unchanged. No automatic rollback, data
+restore/reset/downgrade, backup or deletion is attempted. Each retained role's
+baseline image is a rollback candidate only under the explicitly reviewed current-schema
+and storage compatibility plan; a rollback rehearsal remains separate acceptance.
+Successful evidence is retained seven days, rejected evidence fourteen days;
+identities/status only, no config/env dumps, credentials, logs or private bodies.
+This is not permanent rollback-image retention or an attestation service.
+
+### Implementation checks and remaining acceptance
+
+```sh
+# Repository root: hermetic Docker/SSH/API mocks, no live services.
+python3 -B -m unittest discover -s shared/tools -p 'test_promote_server.py' -v
+# shared/: original source/identity policy remains independently tested.
+python3 -B -m unittest server.tests.test_deployment_provenance -v
+```
+
+Implementation checks include malicious outer tar/ZIP paths, duplicates/links,
+changed config/layers, raw/gzip diff IDs, typed config/platform producer bridges,
+wrong repo/run/source/job/artifact, actual environment approval, pinned SSH with
+no archive stdin in dry-run, schema/baseline/consumer mismatch, stable worker and
+unrelated IDs, direct no-migration startup and no destructive fallback. A local
+Docker29.9.2 **scratch-only synthetic** image was built with network disabled,
+saved and bridge-verified, then its unique tag/image removed. Its producer ID was
+a platform-manifest digest, exercising the real engine distinction; this does not
+prove the real CI archive format, application compatibility or production rollout.
+No production preflight/apply, production token setup, production migration, real
+worker functional acceptance, rollback rehearsal, mobile distribution or backup
+occurred. The existing local `./woona check server` harness initialized only its
+own disposable test database and cleaned its containers/volume; that harness failed
+because its runtime lacks test-only HTTP dependencies and media tools. Separate
+host media tests and dependency/provenance checks passed. Network-isolated schema,
+backend unit and server-audit checks passed; they do not replace a full CI API run
+with its locked test dependencies and disposable PostgreSQL.
+After integration, the owner must verify the next trusted main export/format and
+protected environment configuration, then separately approve a read-only preflight.
+Unsupported producer/archive layouts or unknown baseline provenance remain blockers,
+not permission to skip a gate.

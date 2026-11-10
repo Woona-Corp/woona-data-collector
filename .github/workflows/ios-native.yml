@@ -1,0 +1,148 @@
+# yamllint disable rule:line-length
+name: Canonical iOS native validation
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        default: full
+      zip64-large:
+        type: boolean
+        default: true
+      test-filter:
+        type: string
+        default: ''
+      sanitizer:
+        type: string
+        default: none
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
+jobs:
+  native-build-unit:
+    name: native-build-test
+    env:
+      CI_PHASE_SCOPE: producer
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Validate mode and hermetic tooling tests
+        env:
+          MODE: ${{ inputs.mode }}
+          FILTER: ${{ inputs.test-filter }}
+          SANITIZER: ${{ inputs.sanitizer }}
+          LARGE: ${{ inputs.zip64-large }}
+        run: |
+          python3 -m unittest discover -s ios/tools -p 'test_native_ci.py' -v
+          python3 - <<'PY'
+          import os
+          mode = os.environ['MODE']
+          assert mode in ('full', 'unit', 'diagnostic'), 'Invalid native mode'
+          assert mode == 'diagnostic' or (not os.environ['FILTER'] and os.environ['SANITIZER'] == 'none'), 'Diagnostic inputs cannot authorize proof'
+          PY
+      - name: Verify pinned host without booting Simulator (all modes)
+        env:
+          MODE: ${{ inputs.mode }}
+        run: python3 ios/tools/native_ci.py prepare --mode "$MODE"
+      - name: Build both simulator test targets once, unsigned
+        env:
+          SANITIZER: ${{ inputs.sanitizer }}
+          MODE: ${{ inputs.mode }}
+        run: python3 ios/tools/native_ci.py build --mode "$MODE" --sanitizer "$SANITIZER"
+      - name: Independent archive SQLite/ZIP oracle
+        env:
+          WOONA_SKIP_ZIP64_LARGE: ${{ inputs.zip64-large && '0' || '1' }}
+        run: python3 ios/tools/native_ci.py archive
+      - name: One serial native invocation and independent session export proof
+        env:
+          MODE: ${{ inputs.mode }}
+          FILTER: ${{ inputs.test-filter }}
+          SANITIZER: ${{ inputs.sanitizer }}
+        run: python3 ios/tools/native_ci.py test --mode "$MODE" --test-filter "$FILTER" --sanitizer "$SANITIZER"
+      - name: Retain complete result bundle with symlinks
+        if: always()
+        run: |
+          cd "$RUNNER_TEMP/woona-native-ci"
+          for label in full unit; do
+            if test -d "$label.xcresult"; then tar -cf "$label-xcresult.tar" "$label.xcresult"; fi
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: ${{ inputs.mode == 'full' && 'ios-native-full-evidence' || 'ios-native-unit-evidence' }}
+          path: |
+            ${{ runner.temp }}/woona-native-ci/*.json
+            ${{ runner.temp }}/woona-native-ci/*-xcresult.tar
+            ${{ runner.temp }}/woona-native-ci/*-attachments/
+          retention-days: ${{ job.status == 'success' && 7 || 14 }}
+          if-no-files-found: warn
+
+  ios-required:
+    needs: native-build-unit
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Require selected job success, never skipped/failed proof
+        env:
+          PRODUCER: ${{ needs.native-build-unit.result }}
+        run: test "$PRODUCER" = success
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: ios-native-*-evidence
+          path: native-evidence
+          merge-multiple: true
+      - name: Exact identity completeness and independent export acceptance
+        env:
+          MODE: ${{ inputs.mode }}
+        run: python3 ios/tools/native_ci.py aggregate --mode "$MODE" --directory native-evidence
+      - name: Bind same-run evidence artifact IDs and service digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          gh api "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" > native-evidence/artifacts.json
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          root = Path('native-evidence')
+          if os.environ['MODE'] == 'full':
+              names = ['ios-native-full-evidence']
+          else:
+              names = ['ios-native-unit-evidence']
+          artifacts = json.loads((root / 'artifacts.json').read_text())['artifacts']
+          bindings = []
+          for name in names:
+              matches = [a for a in artifacts if a['name'] == name and not a['expired']]
+              assert len(matches) == 1, 'Missing/ambiguous same-run artifact: ' + name
+              a = matches[0]
+              assert type(a['id']) is int and a['id'] > 0, 'Invalid evidence artifact ID'
+              assert type(a['size_in_bytes']) is int and a['size_in_bytes'] > 0, 'Empty evidence artifact'
+              assert isinstance(a['digest'], str) and re.fullmatch(r'sha256:[0-9a-f]{64}', a['digest']), 'Missing/invalid service digest'
+              bindings.append({k: a[k] for k in ('id', 'name', 'digest', 'size_in_bytes')})
+          proof_path = root / 'native-proof.json'
+          proof = json.loads(proof_path.read_text())
+          proof['artifacts'] = bindings
+          proof_path.write_text(json.dumps(proof, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: ios-native-proof
+          path: native-evidence/native-proof.json
+          if-no-files-found: warn
+          retention-days: ${{ job.status == 'success' && 7 || 14 }}
