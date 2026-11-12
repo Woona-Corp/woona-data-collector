@@ -128,8 +128,10 @@ jobs:
           bindings = []
           for name in names:
               matches = [a for a in artifacts if a['name'] == name and not a['expired']]
-              assert len(matches) == 1, 'Missing/ambiguous same-run artifact: ' + name
-              a = matches[0]
+              assert matches, 'Missing same-run artifact: ' + name
+              matches.sort(key=lambda a: (a.get('created_at') or '', a.get('id') or 0))
+              a = matches[-1]
+              assert sum((candidate.get('created_at'), candidate.get('id')) == (a.get('created_at'), a.get('id')) for candidate in matches) == 1, 'Ambiguous same-run artifact: ' + name
               assert type(a['id']) is int and a['id'] > 0, 'Invalid evidence artifact ID'
               assert type(a['size_in_bytes']) is int and a['size_in_bytes'] > 0, 'Empty evidence artifact'
               assert isinstance(a['digest'], str) and re.fullmatch(r'sha256:[0-9a-f]{64}', a['digest']), 'Missing/invalid service digest'

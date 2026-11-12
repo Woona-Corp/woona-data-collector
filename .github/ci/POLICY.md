@@ -78,7 +78,8 @@ before signing; diagnostic reports remain `fullproof=false`.
 Compiled products stay on the producer; the existing tree digest records their
 binary hash without publishing a product artifact. Producer metadata, full result
 bundle tar, attachments and timings are retained 7 days on success or 14 on
-failure. The final proof binds the single evidence artifact ID/service digest.
+failure. The final proof binds the newest evidence artifact ID/service digest for the
+current attempt; older same-run attempt artifacts cannot replace it.
 Native validation is required before accepting this single-Mac fallback;
 it is not a demonstrated AX timeout root cause or application fix. No Swift application,
 XCTest assertion, fixture, launch/orientation lifecycle, retry or post-tap wait is

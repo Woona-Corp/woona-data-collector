@@ -313,8 +313,12 @@ class NativeCITests(unittest.TestCase):
         assert match is not None
         script = textwrap.dedent(match[0].removesuffix('          PY'))
         valid = {'id': 123, 'name': 'ios-native-full-evidence', 'expired': False,
+                 'created_at': '2026-11-12T11:35:33Z',
                  'digest': 'sha256:' + 'a' * 64, 'size_in_bytes': 100}
-        variants = [('valid', [valid]), ('missing', []), ('duplicate', [valid, valid])]
+        previous = {**valid, 'id': 122, 'created_at': '2026-11-12T11:04:32Z',
+                    'digest': 'sha256:' + 'b' * 64}
+        variants = [('valid', [valid]), ('missing', []), ('duplicate', [valid, valid]),
+                    ('rerun_latest', [previous, valid]), ('rerun_latest_reordered', [valid, previous])]
         variants += [(key, [{**valid, key: value}]) for key, value in (
             ('expired', True), ('id', 0), ('id', True), ('size_in_bytes', 0),
             ('digest', None), ('digest', ''), ('digest', 'sha256:invalid'))]
@@ -322,15 +326,18 @@ class NativeCITests(unittest.TestCase):
             evidence = Path(directory) / 'native-evidence'
             evidence.mkdir()
             for name, artifacts in variants:
+                accepted = name in ('valid', 'rerun_latest', 'rerun_latest_reordered')
                 with self.subTest(name=name, artifacts=artifacts):
                     ci.write(evidence / 'artifacts.json', {'artifacts': artifacts})
                     ci.write(evidence / 'native-proof.json', {'mode': 'full', 'fullproof': True})
                     result = subprocess.run([sys.executable, '-c', script], cwd=directory,
                                             env={**ci.os.environ, 'MODE': 'full'},
                                             capture_output=True, text=True)
-                    self.assertEqual(name == 'valid', result.returncode == 0, result.stderr)
+                    self.assertEqual(accepted, result.returncode == 0, result.stderr)
                     proof = json.loads((evidence / 'native-proof.json').read_text())
-                    self.assertEqual(name == 'valid', 'artifacts' in proof)
+                    self.assertEqual(accepted, 'artifacts' in proof)
+                    if accepted:
+                        self.assertEqual([123], [a['id'] for a in proof['artifacts']])
 
     def test_aggregate_unit_mode_does_not_require_full_or_ui_reports(self):
         identities = {'source': 'sha', 'run': 'run', 'attempt': '1', 'inputs_sha256': 'inputs'}
