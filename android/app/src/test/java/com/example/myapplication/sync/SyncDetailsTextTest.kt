@@ -57,7 +57,8 @@ class SyncDetailsTextTest {
     @Test fun identityNamesAndIdsAreNotInferredFromTheServerPayload() {
         val text = serverSyncErrorText("""Server returned HTTP 409: {"code":"animal_id_already_exists","animalId":"not-local","name":"unknown-dog"}""", AppLanguage.RUSSIAN)
         assertFalse(text.contains("not-local")); assertFalse(text.contains("unknown-dog"))
-        assertTrue(text.contains("Эта запись связана с новой карточкой"))
+        assertFalse(text.contains("Эта запись связана с новой карточкой"))
+        assertTrue(text.contains("историческую привязку"))
         assertTrue(animalIdentityConflictText(AppLanguage.RUSSIAN, "local-42").contains("ID local-42"))
     }
 }

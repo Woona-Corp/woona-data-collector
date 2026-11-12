@@ -400,9 +400,10 @@ data class Recording(
     val serverSyncError: String? = null,
     val remoteOrigin: Boolean = false,
     val serverReceiptSha256: String? = null,
+    val serverSyncAttemptCount: Int = 0,
 ) {
     val requiresServerQuestionnaireEdit: Boolean
-        get() = remoteOrigin || serverReceiptSha256 != null || serverSyncState in setOf("synced", "remote")
+        get() = remoteOrigin || serverReceiptSha256 != null || serverSyncAttemptCount > 0 || serverSyncState in setOf("synced", "remote")
 }
 
 data class RecordingHistoryCursor(val sortTimeMillis: Long, val id: String, val snapshotRowId: Long? = null)
@@ -695,6 +696,8 @@ class WoonaDatabase(
     null,
     DATABASE_VERSION,
 ) {
+    internal val applicationContext: Context = context.applicationContext
+
     init {
         rootDirectory.mkdirs()
         writableDatabase
@@ -1217,6 +1220,15 @@ class WoonaDatabase(
                     "UPDATE dog_profile_versions SET server_sync_state='pending' WHERE dog_id=? AND superseded_at_utc IS NULL",
                     arrayOf(dogId),
                 )
+                writableDatabase.execSQL(
+                    """
+                    UPDATE server_sync_state
+                    SET state='pending',last_error_code=NULL,last_error_message=NULL,updated_at_utc=?
+                    WHERE state='permanent_error' AND last_error_code='http_404'
+                      AND recording_id IN (SELECT id FROM recordings WHERE dog_id=?)
+                    """.trimIndent(),
+                    arrayOf(Instant.now().toString(), dogId),
+                )
             }
             writableDatabase.setTransactionSuccessful()
         } finally {
@@ -1512,8 +1524,10 @@ class WoonaDatabase(
     private fun recordingRows(profileId: String, limit: Int, after: RecordingHistoryCursor?, snapshotRowId: Long? = null): List<HistoryRow> {
         if (limit == 0) return emptyList()
         val timeKey = HISTORY_TIME_KEY.replace("started_at_utc", "r.started_at_utc")
-        val projection = RECORDING_COLUMNS.dropLast(1).joinToString(",") { if (it == "started_at_utc") "COALESCE(r.started_at_utc,'')" else "r.$it" } +
-            ",s.server_receipt_sha256,COALESCE(s.state,'pending')," +
+        val projection = RECORDING_COLUMNS.dropLast(2).joinToString(",") {
+            if (it == "started_at_utc") "COALESCE(r.started_at_utc,'')" else "r.$it"
+        } +
+            ",s.attempt_count,s.server_receipt_sha256,COALESCE(s.state,'pending')," +
             "CASE WHEN s.state IN ('retryable_error','permanent_error') THEN COALESCE(NULLIF(s.last_error_message,''),s.last_error_code) END,$timeKey"
         val cursorClause = if (after == null) "" else " AND ($timeKey,r.id)<(CAST(? AS INTEGER),?)"
         val watermarkClause = if (snapshotRowId == null) "" else " AND r.rowid<=?"
@@ -1526,9 +1540,9 @@ class WoonaDatabase(
                 "WHERE r.dog_id=?$watermarkClause$cursorClause ORDER BY $timeKey DESC,r.id DESC LIMIT ?", args,
         ).use { cursor -> buildList {
             while (cursor.moveToNext()) add(HistoryRow(cursor.toRecording().copy(
-                serverSyncState = cursor.getString(17),
-                serverSyncError = if (cursor.isNull(18)) null else cursor.getString(18),
-            ), cursor.getLong(19)))
+                serverSyncState = cursor.getString(18),
+                serverSyncError = if (cursor.isNull(19)) null else cursor.getString(19),
+            ), cursor.getLong(20)))
         } }
         val grouped = rows.map { it.recording.id }.chunked(500).flatMap { ids ->
             readableDatabase.query("artifacts", ARTIFACT_COLUMNS,
@@ -1821,7 +1835,8 @@ class WoonaDatabase(
         captureErrorCode = if (isNull(13)) null else getString(13),
         captureErrorMessage = if (isNull(14)) null else getString(14),
         remoteOrigin = getInt(15) != 0,
-        serverReceiptSha256 = if (isNull(16)) null else getString(16),
+        serverSyncAttemptCount = getInt(16),
+        serverReceiptSha256 = if (isNull(17)) null else getString(17),
     )
 
     companion object {
@@ -1846,6 +1861,7 @@ class WoonaDatabase(
             "capture_error_code",
             "capture_error_message",
             "remote_copy",
+            "(SELECT attempt_count FROM server_sync_state WHERE recording_id=recordings.id)",
             "(SELECT server_receipt_sha256 FROM server_sync_state WHERE recording_id=recordings.id)",
         )
         private val ARTIFACT_COLUMNS = arrayOf(

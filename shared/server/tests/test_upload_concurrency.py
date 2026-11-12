@@ -126,7 +126,7 @@ class UploadConcurrencyTest(unittest.TestCase):
                     ({'Content-Length': '2'}, b'X', 400)]:
                 with self.subTest(expected=expected):
                     sent = False
-                    async def receive():
+                    async def receive(content=content):
                         nonlocal sent
                         if sent:
                             return {'type': 'http.disconnect'}
@@ -140,3 +140,76 @@ class UploadConcurrencyTest(unittest.TestCase):
         with patch.object(api.engine, 'begin') as begin:
             asyncio.run(exercise())
         begin.assert_not_called()
+
+
+class ObservabilityTest(unittest.TestCase):
+    def test_client_cancellation_logs_sanitized_abort_and_propagates(self):
+        path = f'/v1/artifacts/{uuid.uuid4()}/content'
+        request = api.Request({
+            'type': 'http', 'scheme': 'http', 'server': ('isolated.test', 80),
+            'method': 'PATCH', 'path': path, 'query_string': b'token=query-secret',
+            'headers': [(b'x-request-id', b'cancel-test'),
+                        (b'authorization', b'Bearer header-secret'),
+                        (b'cookie', b'session=cookie-secret')],
+        })
+
+        async def cancelled(_):
+            raise asyncio.CancelledError
+
+        async def exercise():
+            with self.assertRaises(asyncio.CancelledError):
+                await api.request_id_middleware(request, cancelled)
+
+        with patch.object(api, 'log_event') as event:
+            asyncio.run(exercise())
+        event.assert_called_once()
+        self.assertEqual(event.call_args.args, ('request_aborted',))
+        self.assertEqual(set(event.call_args.kwargs), {
+            'requestId', 'method', 'path', 'durationMs',
+        })
+        self.assertEqual(event.call_args.kwargs['requestId'], 'cancel-test')
+        self.assertEqual(event.call_args.kwargs['method'], 'PATCH')
+        self.assertEqual(event.call_args.kwargs['path'], path)
+        self.assertIsInstance(event.call_args.kwargs['durationMs'], float)
+        self.assertGreaterEqual(event.call_args.kwargs['durationMs'], 0)
+
+    def test_durable_chunk_commit_is_info_and_contains_no_payload(self):
+        identity, device = uuid.uuid4(), uuid.uuid4()
+        row = {'capture_device_id': device, 'storage_status': 'uploading',
+               'stored_size_bytes': 0, 'expected_size_bytes': 6}
+
+        @contextmanager
+        def transaction():
+            yield SimpleNamespace(execute=lambda *args, **kwargs: None)
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(api, 'STORAGE_ROOT', Path(directory)), \
+                patch.object(api.engine, 'begin', side_effect=transaction), \
+                patch.object(api, 'artifact_row', return_value=row), \
+                patch.object(api, 'log_event') as event:
+            response = api.persist_artifact_chunk_locked(
+                identity, device, 0, bytearray(b'SECRET'), 'chunk-request')
+        self.assertEqual(response.headers['Upload-Offset'], '6')
+        event.assert_called_once()
+        self.assertEqual(event.call_args.args, ('chunk_committed',))
+        self.assertEqual(event.call_args.kwargs.pop('level'), api.logging.INFO)
+        self.assertEqual(event.call_args.kwargs, {
+            'requestId': 'chunk-request', 'artifactId': str(identity),
+            'uploadOffset': 6, 'bytes': 6,
+        })
+
+    def test_caddy_access_log_uses_normalized_response_id_and_excludes_unsafe_request_data(self):
+        config = Path(api.__file__).with_name('Caddyfile').read_text(encoding='utf-8')
+        for expected in (
+            'log {', 'format filter {', 'wrap json',
+            'request>headers delete', 'resp_headers delete',
+            r'request>uri regexp \?.*$ ""',
+            'log_append requestId {http.response.header.X-Request-ID}',
+        ):
+            self.assertIn(expected, config)
+        for forbidden in (
+            'log_append authorization', 'log_append cookie',
+            '{http.request.header.Authorization}', '{http.request.header.Cookie}',
+            '{http.request.header.X-Request-ID}',
+        ):
+            self.assertNotIn(forbidden, config, 'Malformed request IDs must not be logged')

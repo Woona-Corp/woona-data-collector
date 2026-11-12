@@ -53,13 +53,24 @@ class QaUiRegressionTest {
     }
 
     @Test fun landscapeServerActionsHaveReadableLabels() {
-        compose.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        compose.waitUntil(10_000) { val v = compose.activity.findViewById<View>(android.R.id.content); v.width > v.height }
-        compose.setContent { MaterialTheme {
-            ServerSettingsDialog(ServerSettings("https://example.invalid", "", "qa-device", true), AppLanguage.ENGLISH, {}, { _, _ -> })
-        } }
-        readableAction("Cancel")
-        readableAction("Save")
+        val orientation = compose.activity.requestedOrientation
+        val content = compose.activity.findViewById<View>(android.R.id.content)
+        val wasPortrait = content.height > content.width
+        try {
+            compose.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            compose.waitUntil(10_000) { val v = compose.activity.findViewById<View>(android.R.id.content); v.width > v.height }
+            compose.setContent { MaterialTheme {
+                ServerSettingsDialog(ServerSettings("https://example.invalid", "", "qa-device", true), AppLanguage.ENGLISH, {}, { _, _ -> })
+            } }
+            readableAction("Cancel")
+            readableAction("Save")
+        } finally {
+            compose.activity.restoreTestOrientation(orientation)
+            if (wasPortrait) compose.waitUntil(10_000) {
+                val v = compose.activity.findViewById<View>(android.R.id.content)
+                v.height > v.width
+            }
+        }
     }
 
     @Test fun portraitNotesRegularImeKeepsHeaderAndActionsVisible() {

@@ -122,7 +122,7 @@ private let serverReasons: [String: (String, String)] = [
     "account_header_mismatch": ("Аккаунт запроса не совпадает с аккаунтом животного", "The request account does not match the animal account"),
     "dog_account_conflict": ("Аккаунт запроса не совпадает с аккаунтом животного", "The request account does not match the animal account"),
     "account_required": ("Не выбран аккаунт", "No account is selected"),
-    "animal_id_already_exists": ("Этот ID животного уже занят другой карточкой. Восстановите анкеты и выберите существующее животное", "This animal ID belongs to another profile. Restore profiles and select the existing animal"),
+    "animal_id_already_exists": ("Этот ID уже занят другой карточкой или исторической анкетой. Сохраните экспорт и проверьте историческую привязку записи и аккаунт; выбор другой карточки не изменяет уже созданную запись", "This animal ID is reserved by another profile or historical questionnaire. Preserve the export and review the recording's historical identity and account; selecting another profile does not rewrite an existing recording"),
     "invalid_account_identifier": ("Недопустимый идентификатор аккаунта", "The account identifier is invalid"),
     "invalid_bearer_token": ("Токен устройства отсутствует или отклонён сервером. Переподключите сервер в настройках", "The device token is missing or rejected. Reconnect the server in Settings"),
     "missing_bearer_token": ("Токен устройства отсутствует или отклонён сервером. Переподключите сервер в настройках", "The device token is missing or rejected. Reconnect the server in Settings"),

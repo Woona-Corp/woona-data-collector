@@ -26,8 +26,8 @@ def fixture(identifier='ExampleTests/testExample()', status='Passed'):
 class NativeCITests(unittest.TestCase):
     def test_current_source_inventory_and_exact_reviewed_ui(self):
         items = ci.inventory()
-        self.assertEqual(355, len([i for i in items if i.startswith('WoonaTests/')]))
-        self.assertEqual(373, len(items))
+        self.assertEqual(359, len([i for i in items if i.startswith('WoonaTests/')]))
+        self.assertEqual(377, len(items))
         self.assertIn('WoonaTests/BleControlWriteQueueTests/testQueueBoundsFourFramesAndDisconnectFailsEveryPendingCommandOnce', items)
         self.assertIn('WoonaTests/V2PreviewTests/testCoarseningKeepsEndpointsAndPropagatesSegmentBreaks', items)
         self.assertEqual(18, len([i for i in items if i.startswith('WoonaUITests/')]))
@@ -267,8 +267,8 @@ class NativeCITests(unittest.TestCase):
                 proof = json.loads((root / 'native-proof.json').read_text())
                 self.assertTrue(proof['fullproof'])
                 self.assertTrue(proof['zip64_large'])
-                self.assertEqual(373, len(proof['passed']))
-                self.assertEqual(355, proof['counts']['unit']['passed'])
+                self.assertEqual(377, len(proof['passed']))
+                self.assertEqual(359, proof['counts']['unit']['passed'])
                 self.assertEqual(18, proof['counts']['ui']['passed'])
                 self.assertEqual({'full': 'result'}, proof['result_hashes'])
                 self.assertEqual('products', proof['products_sha256'])

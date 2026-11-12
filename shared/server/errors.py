@@ -15,7 +15,7 @@ ERRORS = {
     'account_required': ('Choose an account before moving these records. Local data is unchanged.', 'review_account'),
     'dog_account_conflict': ('This animal belongs to another account. Check the selected account before changing its ownership.', 'review_account'),
     'resource_not_found': ('This item is absent or belongs to another account. Check the selected account and restore its server list; preserve local data.', 'check_account_and_restore'),
-    'animal_id_already_exists': ('This animal ID is already reserved by another animal, possibly a historical profile. Restore the existing profile or correct the ID; do not delete local recordings.', 'resolve_animal_identity'),
+    'animal_id_already_exists': ('This animal ID is reserved by another animal or historical profile. Preserve the original recording/export and review the recording\'s historical identity and account before selecting a profile or correcting data; selecting another profile does not rewrite an existing recording.', 'resolve_animal_identity'),
     'revision_conflict': ('The server has a newer profile revision. Restore it and review your edits before saving again.', 'restore_and_review_changes'),
     'questionnaire_revision_conflict': ('The server questionnaire changed after it was opened. Reload it and review your edits before saving again.', 'restore_and_review_changes'),
     'immutable_profile_conflict': ('A saved profile version cannot be overwritten with different content. Preserve local data and create a new reviewed version.', 'review_manifest_conflict'),

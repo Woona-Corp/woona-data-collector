@@ -76,6 +76,7 @@ class BleFileShareIntentFactory(
         return when (file.extension.lowercase()) {
             "csv" -> "text/csv"
             "log" -> "text/plain"
+            "zip" -> "application/zip"
             else -> "application/octet-stream"
         }
     }

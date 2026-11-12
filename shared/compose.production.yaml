@@ -46,6 +46,11 @@ services:
       - ./server/filebrowser.yaml:/home/filebrowser/config.yaml:ro
       - ${WOONA_STORAGE_ROOT_HOST:?set WOONA_STORAGE_ROOT_HOST}:/data/recordings:ro
       - ${WOONA_BACKUP_ROOT_HOST:-/srv/woona/backups}:/data/backups:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     mem_limit: 768m
     pids_limit: 256
     logging:

@@ -1019,12 +1019,12 @@ final class AppShellTests: XCTestCase {
             }
         }
         let body = Data(#"{"code":"revision_conflict","message":"Reload revision"}"#.utf8)
-        guard case .requestFailed(let status, let message) = ServerSyncError.responseError(status: 409, data: body) else {
+        guard case .requestFailed(let status, let message, _) = ServerSyncError.responseError(status: 409, data: body) else {
             return XCTFail("Revision conflicts must retain their own recovery path")
         }
         XCTAssertEqual(status, 409)
         XCTAssertEqual(message, "revision_conflict: Reload revision")
-        guard case .requestFailed(500, _) = ServerSyncError.responseError(status: 500,
+        guard case .requestFailed(500, _, _) = ServerSyncError.responseError(status: 500,
                 data: Data(#"{"code":"animal_id_already_exists"}"#.utf8)) else {
             return XCTFail("Server failures must not be treated as identity conflicts")
         }

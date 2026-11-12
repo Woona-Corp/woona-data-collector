@@ -155,7 +155,7 @@ internal fun recordingCaptureText(status: String, code: String?, message: String
         "notification_timeout" -> errorText(language, "ошейник перестал передавать данные; восстановить поток не удалось", "the collar stopped sending data and recovery failed")
         "camera_failed" -> errorText(language, "сбой камеры; видео могло записаться не полностью", "camera failure; the video may be incomplete")
         "queue_overflow" -> errorText(language, "переполнена очередь обработки данных датчика", "the sensor data processing queue overflowed")
-        "storage_error", "storage_failed" -> errorText(language, "не удалось сохранить файлы записи", "recording files could not be saved")
+        "storage_error", "storage_failed", "packet_persistence_failed", "polar_persistence_failed" -> errorText(language, "не удалось сохранить файлы записи", "recording files could not be saved")
         "process_interrupted" -> errorText(language, "приложение завершилось до сохранения сессии; время окончания не подтверждено", "the app closed before session finalization; the end time is not verified")
         "no_sensor_data" -> errorText(language, "не получено ни одного корректного пакета датчика", "no valid sensor packets were received")
         null -> message?.takeIf { it.isNotBlank() }?.let { errorText(language, "причина не распознана; откройте подробности", "unrecognized cause; open Details") }

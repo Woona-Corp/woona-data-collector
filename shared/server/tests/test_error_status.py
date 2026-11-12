@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 import asyncio
 import json
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from server.app import ready, request_id_middleware, http_error, unexpected_error
+from server.app import app as application, ready, request_id_middleware, http_error, unexpected_error
 from server.errors import ERRORS, error_guidance
 
 
@@ -90,6 +90,8 @@ class ErrorStatusTest(unittest.TestCase):
         self.assertFalse(conflict['retryable'])
         self.assertEqual(conflict['nextAction'], 'resolve_animal_identity')
         self.assertEqual(conflict['existingDogId'], 'test-id')
+        self.assertIn('historical identity', conflict['message'])
+        self.assertIn('does not rewrite an existing recording', conflict['message'])
 
     def test_route_not_found_is_structured_and_bad_correlation_id_is_replaced(self):
         response = self.client().get('/absent', headers={'X-Request-ID': 'a' * 1000})
@@ -106,6 +108,57 @@ class ErrorStatusTest(unittest.TestCase):
                 self.assertTrue(value['nextAction'])
         self.assertTrue(error_guidance('database_unavailable', 503)['retryable'])
         self.assertFalse(error_guidance('resource_not_found', 404)['retryable'])
+
+    def assert_readiness_failure(self, response, code, request_id, private_path, private_text):
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers['x-request-id'], request_id)
+        result = response.json()
+        self.assertEqual(result['requestId'], request_id)
+        self.assertEqual(result['code'], code)
+        self.assertNotIn(private_path, response.text)
+        self.assertNotIn(private_text, response.text)
+
+    def test_database_connect_failure_is_safe_and_skips_storage_probe(self):
+        private_path = '/private/woona/postgresql.conf'
+        private_text = 'sensitive database credentials'
+        engine = MagicMock()
+        engine.connect.side_effect = RuntimeError(f'{private_path}: {private_text}')
+        with patch('server.app.engine', engine), patch('server.app.tempfile.NamedTemporaryFile') as storage_probe:
+            response = AsgiClient(application).get('/health/ready', headers={'X-Request-ID': 'ready-db-connect'})
+        storage_probe.assert_not_called()
+        self.assert_readiness_failure(response, 'database_unavailable', 'ready-db-connect', private_path, private_text)
+
+    def test_database_select_failure_is_safe_and_skips_storage_probe(self):
+        private_path = '/private/woona/query.sql'
+        private_text = 'sensitive SELECT failure'
+        engine = MagicMock()
+        engine.connect.return_value.__enter__.return_value.execute.side_effect = RuntimeError(f'{private_path}: {private_text}')
+        with patch('server.app.engine', engine), patch('server.app.tempfile.NamedTemporaryFile') as storage_probe:
+            response = AsgiClient(application).get('/health/ready', headers={'X-Request-ID': 'ready-db-select'})
+        storage_probe.assert_not_called()
+        self.assert_readiness_failure(response, 'database_unavailable', 'ready-db-select', private_path, private_text)
+
+    def test_storage_temporary_file_create_failure_is_safe(self):
+        private_path = '/private/woona/storage'
+        private_text = 'sensitive temp create failure'
+        with patch('server.app.engine', MagicMock()), patch('server.app.tempfile.NamedTemporaryFile',
+                side_effect=OSError(f'{private_path}: {private_text}')):
+            response = AsgiClient(application).get('/health/ready', headers={'X-Request-ID': 'ready-storage-create'})
+        self.assert_readiness_failure(response, 'storage_unavailable', 'ready-storage-create', private_path, private_text)
+
+    def test_storage_temporary_file_write_and_read_failures_are_safe(self):
+        for operation in ('write', 'read'):
+            with self.subTest(operation=operation):
+                private_path = f'/private/woona/{operation}.tmp'
+                private_text = f'sensitive temp {operation} failure'
+                probe_file = MagicMock()
+                getattr(probe_file, operation).side_effect = OSError(f'{private_path}: {private_text}')
+                storage_probe = MagicMock()
+                storage_probe.return_value.__enter__.return_value = probe_file
+                request_id = f'ready-storage-{operation}'
+                with patch('server.app.engine', MagicMock()), patch('server.app.tempfile.NamedTemporaryFile', storage_probe):
+                    response = AsgiClient(application).get('/health/ready', headers={'X-Request-ID': request_id})
+                self.assert_readiness_failure(response, 'storage_unavailable', request_id, private_path, private_text)
 
     def test_concurrent_readiness_probes_use_independent_files(self):
         with TemporaryDirectory() as directory, patch('server.app.STORAGE_ROOT', Path(directory)), patch('server.app.engine', MagicMock()):

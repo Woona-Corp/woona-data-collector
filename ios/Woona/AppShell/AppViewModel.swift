@@ -239,7 +239,7 @@ final class AppViewModel: ObservableObject {
             } catch {
                 guard let self, !Task.isCancelled, generation == self.storageCheckGeneration,
                       configuration == ServerConfiguration(baseURL: self.serverBaseURL, wifiOnly: self.serverWifiOnly, accountID: self.selectedAccountID), token == self.serverToken else { return }
-                if case ServerSyncError.requestFailed(let status, _) = error, status == 404 { self.serverStorageCheck = "unavailable" }
+                if case ServerSyncError.requestFailed(let status, _, _) = error, status == 404 { self.serverStorageCheck = "unavailable" }
                 else { self.serverStorageCheck = "failed" }
                 self.serverStorageError = error.localizedDescription
                 self.serverStorageCheckedAt = WoonaStore.iso8601(Date())
@@ -648,7 +648,7 @@ final class AppViewModel: ObservableObject {
             do {
                 let client = try serverClient(accountID: account)
                 do { try await client.linkDog(dog.id) }
-                catch ServerSyncError.requestFailed(404, _) {
+                catch ServerSyncError.requestFailed(404, _, _) {
                     guard dog.revision == 0 else { throw WoonaStoreError.invalidData("Server dog was not found; restore before linking") }
                     // A never-uploaded local dog can be explicitly assigned before its first upload.
                 }
@@ -1558,7 +1558,7 @@ final class AppViewModel: ObservableObject {
                     questionnaire: questionnaire, expectedRevision: expectedRevision ?? displayedRecording.questionnaireRevision)
                 canonical = try JSONDecoder().decode(SessionQuestionnaire.self, from: JSONEncoder().encode(detail.sessionQuestionnaire))
                 revision = detail.questionnaireRevision ?? 1
-            } catch ServerSyncError.requestFailed(409, _) {
+            } catch ServerSyncError.requestFailed(409, _, _) {
                 // The previous timed-out PUT may already have committed. Read only;
                 // a different answer set requires an explicit choice in the editor.
                 let latest = try await client.recordingDetail(displayedRecording.id)
@@ -2423,11 +2423,14 @@ final class AppViewModel: ObservableObject {
 
     private func showError(_ message: String, error: Error?) {
         hasDogIdentityConflict = false
-        if let syncError = error as? ServerSyncError, case .animalIDConflict = syncError {
+        if let syncError = error as? ServerSyncError, case .animalIDConflict(let diagnostics) = syncError {
             hasDogIdentityConflict = true
-            errorMessage = selectedLanguage == .russian
-                ? "Этот ID животного уже закреплён за другой карточкой. Проверьте аккаунт, восстановите анкеты и выберите существующую собаку. Локальные записи сохранены. Смена клички не освобождает ID. Если карточка не найдена, сохраните экспорт для сверки."
+            let message = selectedLanguage == .russian
+                ? "Этот ID уже закреплён за другой карточкой или исторической анкетой. Сохраните исходный экспорт и проверьте историческую привязку записи и аккаунт перед выбором карточки или исправлением данных. Выбор другой карточки не изменяет уже созданную запись. Локальные записи сохранены; смена клички не освобождает ID."
                 : syncError.localizedDescription
+            let identityConflictDiagnostics = safeSyncDiagnostic(diagnostics, secret: serverToken)
+            errorMessage = selectedLanguage == .russian && !identityConflictDiagnostics.isEmpty
+                ? message + "\n" + identityConflictDiagnostics : message
             return
         }
         if let error {

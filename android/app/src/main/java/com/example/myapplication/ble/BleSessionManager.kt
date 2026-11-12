@@ -30,6 +30,27 @@ import java.util.Locale
 import java.util.IdentityHashMap
 import java.util.UUID
 
+internal fun gattConnectionStateDiagnostic(
+    status: Int,
+    newState: Int,
+    captureActive: Boolean,
+    recoveryInProgress: Boolean,
+    manualDisconnectRequested: Boolean,
+    currentGatt: Boolean,
+    generation: Long?,
+    activeGeneration: Long?,
+): String = listOf(
+    "GATT connection state: status=$status",
+    "newState=$newState",
+    "captureActive=$captureActive",
+    "recoveryInProgress=$recoveryInProgress",
+    "manualDisconnectRequested=$manualDisconnectRequested",
+    "currentGatt=$currentGatt",
+    "lateEvent=${!currentGatt}",
+    "generation=${generation ?: "?"}",
+    "activeGeneration=${activeGeneration ?: "?"}",
+).joinToString(", ")
+
 interface BleSessionListener {
     fun onDeviceFound(device: BleDevice)
     fun onPacketReceived(packetFragment: ByteArray)
@@ -282,7 +303,25 @@ class BleSessionManager(
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             synchronized(this@BleSessionManager) {
-            if (!isCurrentGatt(gatt)) {
+            val currentGatt = isCurrentGatt(gatt)
+            emitDiagnostic(
+                message = gattConnectionStateDiagnostic(
+                    status = status,
+                    newState = newState,
+                    captureActive = captureActive,
+                    recoveryInProgress = recoveryInProgress,
+                    manualDisconnectRequested = manualDisconnectRequested,
+                    currentGatt = currentGatt,
+                    generation = gattGenerations[gatt],
+                    activeGeneration = activeGattGeneration,
+                ),
+                level = if (status == BluetoothGatt.GATT_SUCCESS && currentGatt) {
+                    DiagnosticLevel.INFO
+                } else {
+                    DiagnosticLevel.WARNING
+                },
+            )
+            if (!currentGatt) {
                 Log.w(TAG, "Ignoring stale GATT state callback generation=${gattGenerations[gatt]}")
                 return
             }

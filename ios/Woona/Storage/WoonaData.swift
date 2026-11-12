@@ -798,7 +798,7 @@ final class WoonaStore {
             SELECT
               SUM(CASE WHEN server_sync_state='pending' THEN 1 ELSE 0 END),
               SUM(CASE WHEN server_sync_state='uploading' THEN 1 ELSE 0 END),
-              SUM(CASE WHEN server_sync_state IN ('synced','remote') THEN 1 ELSE 0 END),
+              SUM(CASE WHEN server_sync_state='synced' THEN 1 ELSE 0 END),
               SUM(CASE WHEN server_sync_state IN ('retryable_error','permanent_error') THEN 1 ELSE 0 END),
               (SELECT last_error_message FROM server_sync_state WHERE state IN ('retryable_error','permanent_error') ORDER BY updated_at_utc DESC LIMIT 1)
             FROM recordings
@@ -1144,8 +1144,17 @@ final class WoonaStore {
             throw WoonaStoreError.invalidData("Remote recording conflicts with local metadata")
         }
         let didExist = existingRecording != nil
-        let restoredSyncState = remote.ingestStatus == "complete" && existingRecording?.questionnaireDirty != true
-            ? "synced" : (existingRecording?.serverSyncState ?? "remote")
+        let hasUnfinishedLocalReference = try artifacts(recordingID: remote.id).contains { local in
+            guard ["ecg", "heart_rate", "rr"].contains(local.type), local.uploadState != "available" else { return false }
+            return !remote.artifacts.contains { artifact in
+                artifact.storageStatus == "available" &&
+                    (artifact.id == local.id || (artifact.type == local.type && artifact.fileName == local.fileName &&
+                                                artifact.sizeBytes == local.sizeBytes && artifact.sha256 == local.sha256))
+            }
+        }
+        let restoredSyncState = remote.ingestStatus == "complete" && hasUnfinishedLocalReference ? "pending" :
+            remote.ingestStatus == "complete" && existingRecording?.questionnaireDirty != true
+                ? "synced" : (existingRecording?.serverSyncState ?? "remote")
         let relative = "recordings/\(remote.dogId.uuidString)/\(remote.startedAtUtc.prefix(10))/\(remote.id.uuidString)"
         try FileManager.default.createDirectory(
             at: rootDirectory.appendingPathComponent(relative, isDirectory: true),

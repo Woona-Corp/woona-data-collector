@@ -154,15 +154,21 @@ final class SyncActivityLogTests: XCTestCase {
     func testHTTPErrorSanitizesConfiguredTokenBeforePersistenceAndKeepsCodeAndRequestID() throws {
         let body = Data(#"{"detail":{"code":"server_busy","message":"reflected sentinel-configured https://host.test/path?unknown=sentinel-query#sentinel-fragment","requestId":"req-fixture"}}"#.utf8)
         let error = ServerSyncError.responseError(status: 503, data: body, secret: "sentinel-configured")
-        guard case .requestFailed(let status, let message) = error else { return XCTFail("Expected HTTP error") }
+        guard case .requestFailed(let status, let message, let retryable) = error else { return XCTFail("Expected HTTP error") }
+        XCTAssertNil(retryable)
         XCTAssertEqual(status, 503)
         XCTAssertFalse(message.contains("sentinel"))
         XCTAssertTrue(message.contains("server_busy"))
         XCTAssertTrue(message.contains("req-fixture"))
         let conflict = ServerSyncError.responseError(status: 409,
-            data: Data(#"{"detail":{"code":"animal_id_already_exists","message":"sentinel-configured"}}"#.utf8),
+            data: Data(#"{"detail":{"code":"animal_id_already_exists","message":"sentinel-configured","requestId":"req-identity-409","nextAction":"resolve_animal_identity","retryable":false}}"#.utf8),
             secret: "sentinel-configured")
-        guard case .animalIDConflict = conflict else { return XCTFail("Expected actionable identity conflict") }
+        guard case .animalIDConflict(let details) = conflict else { return XCTFail("Expected actionable identity conflict") }
+        XCTAssertTrue(details.contains("animal_id_already_exists"))
+        XCTAssertTrue(details.contains("req-identity-409"))
+        XCTAssertTrue(details.contains("resolve_animal_identity"))
+        XCTAssertFalse(details.contains("sentinel-configured"))
+        XCTAssertNotEqual(recordingUploadErrorText(conflict.localizedDescription, language: .russian), conflict.localizedDescription)
     }
 
     private func waitForCount(_ count: Int, log: SyncActivityLog,

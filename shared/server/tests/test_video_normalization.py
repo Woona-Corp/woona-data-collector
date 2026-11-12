@@ -74,6 +74,52 @@ class NormalizationTest(unittest.TestCase):
             self.assertEqual(json.loads(registry.read_text())['entries'],{rows[1]['recording_id']:item})
 
 
+class DerivativeReadTest(unittest.TestCase):
+    def fixture(self, root):
+        source = root/'source.mp4'
+        source.write_bytes(b'source')
+        derivative = root/'derived/cfr30/clip.mp4'
+        derivative.parent.mkdir(parents=True)
+        derivative.write_bytes(b'video')
+        row = dict(id='artifact', recording_id='20000000-0000-0000-0000-000000000001',
+                   server_relative_path='source.mp4', sha256=sha256(source), expected_size_bytes=6)
+        item = dict(transform='cfr30', frame_rate=30, frame_count=30, duration_seconds=1,
+            source_duration_seconds=1, grid_error_seconds=0, video_start_seconds=0,
+            time_mapping={'scale': 1, 'offset_seconds': 0, 'max_error_seconds': 1/30},
+            source_artifact_id='artifact', source_sha256=row['sha256'], source_relative_path='source.mp4',
+            relative_path='derived/cfr30/clip.mp4', size_bytes=5, sha256=sha256(derivative),
+            encoder={'codec': 'libx264', 'preset': 'ultrafast', 'crf': 18, 'maxrate_kbps': 12000})
+        return row, item
+
+    def test_noop_prepare_persists_fingerprint_and_changed_file_is_rehashed(self):
+        from server.video_normalization import prepared
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            row, item = self.fixture(root)
+            registry_path = root/'derived/video-presentations.json'
+            entries = {row['recording_id']: item}
+            registry_path.write_text(json.dumps({'schema_version': 2, 'entries': entries}))
+            with patch('server.video_normalization.sha256', wraps=sha256) as digest:
+                prepare(root, [row], registry_path)
+                self.assertEqual(digest.call_count, 1, 'legacy entry needs one full verification')
+                prepare(root, [row], registry_path)
+                self.assertEqual(digest.call_count, 1, 'persisted no-op must not reread the derivative')
+                (root/item['relative_path']).write_bytes(b'other')
+                self.assertFalse(prepared(root, row, item, 'ultrafast', 18))
+                self.assertEqual(digest.call_count, 2, 'changed fingerprint requires full verification')
+
+    def test_cached_normalize_one_hashes_derivative_at_most_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            row, item = self.fixture(root)
+            derivative = root/item['relative_path']
+            with patch('server.video_normalization.sha256', wraps=sha256) as digest:
+                registry = {'entries': {row['recording_id']: item}}
+                self.assertEqual(normalize_one(root, row, registry), item)
+            derivative_reads = sum(Path(call.args[0]) == derivative for call in digest.call_args_list)
+            self.assertEqual(derivative_reads, 1)
+
+
 class NormalizationSafetyTest(unittest.TestCase):
     """Real offline media, generated once or supplied by the sealed private runner."""
     @staticmethod
@@ -124,7 +170,7 @@ class NormalizationSafetyTest(unittest.TestCase):
                     packets = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_packets',
                         '-select_streams', 'v:0', '-of', 'json', str(root/'source.mp4')]))['packets']
                     pts = sorted(Fraction(p['pts_time']) for p in packets)
-                    self.assertGreater(len(set(b-a for a,b in zip(pts, pts[1:]))), 1)
+                    self.assertGreater(len(set(b-a for a,b in zip(pts, pts[1:], strict=False))), 1)
                 item = normalize_one(root, row, {}, threads=1)
                 grid = packet_grid(root/item['relative_path'])
                 self.assertTrue(grid['cfr30'])

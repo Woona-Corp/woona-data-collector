@@ -287,6 +287,15 @@ async def request_id_middleware(request: Request, call_next):
             durationMs=round((time.monotonic() - started) * 1000, 2),
         )
         return response
+    except asyncio.CancelledError:
+        log_event(
+            "request_aborted",
+            requestId=request_id,
+            method=request.method,
+            path=request.url.path,
+            durationMs=round((time.monotonic() - started) * 1000, 2),
+        )
+        raise
     finally:
         request_id_var.reset(token)
 
@@ -1399,7 +1408,7 @@ def persist_artifact_chunk_locked(
             )
     log_event(
         "chunk_committed",
-        level=logging.DEBUG,
+        level=logging.INFO,
         requestId=request_id,
         artifactId=str(artifact_id),
         uploadOffset=next_offset,

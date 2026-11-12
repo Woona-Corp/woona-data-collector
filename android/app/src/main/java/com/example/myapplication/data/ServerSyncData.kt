@@ -670,24 +670,31 @@ fun WoonaDatabase.markRecordingSynced(
     receiptSha256: String,
     receiptAtUtc: String,
 ) {
-    writableDatabase.update(
-        "server_sync_state",
-        ContentValues().apply {
-            put("state", "synced")
-            put("server_receipt_sha256", receiptSha256)
-            put("server_receipt_at_utc", receiptAtUtc)
-            put("updated_at_utc", Instant.now().toString())
-            putNull("last_error_code")
-            putNull("last_error_message")
-        },
-        "recording_id=?",
-        arrayOf(recordingId),
-    )
-    writableDatabase.execSQL("""
-        UPDATE server_sync_state SET state='pending' WHERE recording_id=? AND EXISTS (
-            SELECT 1 FROM artifacts WHERE recording_id=? AND local_presence IN ('local','both') AND upload_state<>'available'
+    val database = writableDatabase
+    database.beginTransaction()
+    try {
+        database.update(
+            "server_sync_state",
+            ContentValues().apply {
+                put("state", "synced")
+                put("server_receipt_sha256", receiptSha256)
+                put("server_receipt_at_utc", receiptAtUtc)
+                put("updated_at_utc", Instant.now().toString())
+                putNull("last_error_code")
+                putNull("last_error_message")
+            },
+            "recording_id=?",
+            arrayOf(recordingId),
         )
-    """.trimIndent(), arrayOf(recordingId, recordingId))
+        database.execSQL("""
+            UPDATE server_sync_state SET state='pending' WHERE recording_id=? AND EXISTS (
+                SELECT 1 FROM artifacts WHERE recording_id=? AND local_presence IN ('local','both') AND upload_state<>'available'
+            )
+        """.trimIndent(), arrayOf(recordingId, recordingId))
+        database.setTransactionSuccessful()
+    } finally {
+        database.endTransaction()
+    }
 }
 
 fun WoonaDatabase.markRecordingSyncError(
@@ -757,6 +764,7 @@ fun WoonaDatabase.restoreServerMetadata(
     var recordingConflicts = 0
     val database = writableDatabase
     val rejectedDogs = mutableSetOf<String>()
+    val pendingBefore = pendingRecordingIds().toSet()
     database.beginTransaction()
     try {
         dogs.forEach { dog ->
@@ -951,6 +959,18 @@ fun WoonaDatabase.restoreServerMetadata(
                     "recording_id=?",
                     arrayOf(recording.id),
                 )
+            } else {
+                database.update(
+                    "server_sync_state",
+                    ContentValues().apply {
+                        put("state", "pending")
+                        put("updated_at_utc", now.toString())
+                        putNull("last_error_code")
+                        putNull("last_error_message")
+                    },
+                    "recording_id=? AND state='permanent_error' AND last_error_code='http_404'",
+                    arrayOf(recording.id),
+                )
             }
             recording.artifacts.forEach { artifact ->
                 val relativePath = "$relativeDirectory/${artifact.fileName}"
@@ -1008,10 +1028,24 @@ fun WoonaDatabase.restoreServerMetadata(
                 )
                 if (insertedArtifact != -1L) restoredArtifacts++
             }
+            if (recording.receiptSha256 != null) {
+                database.execSQL(
+                    """
+                    UPDATE server_sync_state SET state='pending' WHERE recording_id=? AND EXISTS (
+                        SELECT 1 FROM artifacts WHERE recording_id=? AND local_presence IN ('local','both')
+                          AND type IN ('ecg','heart_rate','rr') AND upload_state<>'available'
+                    )
+                    """.trimIndent(),
+                    arrayOf(recording.id, recording.id),
+                )
+            }
         }
         database.setTransactionSuccessful()
     } finally {
         database.endTransaction()
+    }
+    pendingRecordingIds().filterNot { it in pendingBefore }.forEach { recordingId ->
+        com.example.myapplication.sync.ServerSyncScheduler.enqueueRecording(applicationContext, recordingId)
     }
     return RestoreResult(restoredDogs, restoredRecordings, restoredArtifacts, conflicts, recordingConflicts)
 }

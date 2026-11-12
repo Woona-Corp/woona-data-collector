@@ -75,6 +75,73 @@ class PacketValidatorTest {
     }
 
     @Test
+    fun validate_rejectsIncompleteSecondBlockWithFactualMetadata() {
+        val result = validator.validate(
+            packetBytes = testPacket(
+                counter = 7,
+                timerMillis = 99,
+                measurementCount = 3,
+                blocks = listOf(
+                    sensorBlock(sensorType = 2, channelSamples = listOf(listOf(10, 20))),
+                    ByteArray(4),
+                ),
+            ),
+        )
+
+        val rejected = result as PacketValidationResult.Rejected
+        assertEquals(PacketValidationFailureReason.INVALID_SENSOR_BLOCKS, rejected.reason)
+        assertEquals(1, rejected.parsedBlockCount)
+        assertEquals(26, rejected.consumedBytes)
+        assertEquals(4, rejected.trailingBytes)
+        assertEquals(1, rejected.failedBlockIndex)
+    }
+
+    @Test
+    fun validate_rejectsInvalidThirdBlockLayoutWithFactualMetadata() {
+        val result = validator.validate(
+            packetBytes = testPacket(
+                counter = 7,
+                timerMillis = 99,
+                measurementCount = 3,
+                blocks = listOf(
+                    sensorBlock(sensorType = 2, channelSamples = listOf(listOf(10, 20))),
+                    sensorBlock(sensorType = 3, channelSamples = listOf(listOf(30))),
+                    sensorBlock(sensorType = 4, channelSamples = emptyList()),
+                ),
+            ),
+        )
+
+        val rejected = result as PacketValidationResult.Rejected
+        assertEquals(PacketValidationFailureReason.INVALID_SENSOR_BLOCKS, rejected.reason)
+        assertEquals(3, rejected.parsedBlockCount)
+        assertEquals(40, rejected.consumedBytes)
+        assertEquals(0, rejected.trailingBytes)
+        assertEquals(2, rejected.failedBlockIndex)
+    }
+
+    @Test
+    fun validate_rejectsOversizedTrailerWithoutInventingFailedBlock() {
+        val block = sensorBlock(sensorType = 2, channelSamples = listOf(listOf(10, 20)))
+        val packet = testPacket(
+            counter = 7,
+            timerMillis = 99,
+            measurementCount = 3,
+            blocks = listOf(block, block, block),
+        ) + ByteArray(5)
+        packet[4] = (packet.size and 0xFF).toByte()
+        packet[5] = ((packet.size shr 8) and 0xFF).toByte()
+
+        val result = validator.validate(packet)
+
+        val rejected = result as PacketValidationResult.Rejected
+        assertEquals(PacketValidationFailureReason.INVALID_SENSOR_BLOCKS, rejected.reason)
+        assertEquals(3, rejected.parsedBlockCount)
+        assertEquals(46, rejected.consumedBytes)
+        assertEquals(5, rejected.trailingBytes)
+        assertTrue(rejected.failedBlockIndex == null)
+    }
+
+    @Test
     fun validate_acceptsPacketWithFourByteTrailer() {
         val block = sensorBlock(
             sensorType = 2,
