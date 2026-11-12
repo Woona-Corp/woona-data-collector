@@ -214,6 +214,25 @@ class RuntimeTests(unittest.TestCase):
             return b"absent\n"
         return b""
 
+    def test_snapshot_uses_real_env_files_and_ignores_unrelated_team_env(self):
+        calls = []
+
+        def compose_and_inspect(args, **kwargs):
+            calls.append((args, kwargs))
+            if "ps" in args:
+                return b'{"Service":"api","ID":"api-old"}\n{"Service":"label_sync","ID":"worker-old"}\n'
+            return p.canonical([args[-1], OLD_IMAGE, "running", 0])
+
+        with patch.object(p, "run", side_effect=compose_and_inspect):
+            result = p.snapshot()
+        args, kwargs = calls[0]
+        self.assertEqual(args, p.COMPOSE + ["-f", "-", "ps", "--all", "--format", "json"])
+        self.assertEqual([args[index + 1] for index, value in enumerate(args) if value == "--env-file"],
+                         ["/opt/woona/shared/.env", "/opt/woona/shared/.env.label"])
+        self.assertEqual(kwargs["data"], b"services:\n  filebrowser:\n    env_file: !reset []\n"
+                                         b"  cloudbeaver:\n    env_file: !reset []\n")
+        self.assertEqual(set(result), set(p.SERVICES))
+
     def test_dry_run_never_loads_starts_or_writes(self):
         with patch.object(p, "snapshot", return_value=self.before), patch.object(p, "probe", return_value=self.observed), \
                 patch.object(p, "run", side_effect=self.command), patch.object(p.subprocess, "run") as process:
@@ -257,8 +276,8 @@ class RuntimeTests(unittest.TestCase):
             if apply:
                 process.assert_called_once()
                 self.assertEqual(result["image"], self.new_image)
-                replacement = next(json.loads(kwargs["data"]) for argv, kwargs in self.commands if "up" in argv)
-                self.assertEqual({role["image"] for role in replacement["services"].values()}, {self.new_image})
+                replacement = next(kwargs["data"].decode() for argv, kwargs in self.commands if "up" in argv)
+                self.assertEqual(replacement.count(f'image: "{self.new_image}"'), 2)
             else:
                 process.assert_not_called()
                 self.assertEqual(len(inspected), 2)
@@ -329,10 +348,11 @@ class RuntimeTests(unittest.TestCase):
         for flag in ("--no-build", "--no-deps", "--pull", "never", "--wait-timeout", "--timeout"):
             self.assertIn(flag, args)
         self.assertEqual(args[-2:], list(p.SERVICES))
-        override = json.loads(kwargs["data"])
-        self.assertEqual(set(override["services"]), set(p.SERVICES))
-        self.assertEqual(override["services"]["api"]["entrypoint"], ["uvicorn"])
-        self.assertNotIn("alembic", kwargs["data"].decode())
+        override = kwargs["data"].decode()
+        self.assertTrue(override.startswith(p.compose_input().decode()))
+        self.assertIn('entrypoint: ["uvicorn"]', override)
+        self.assertIn("  label_sync:\n", override)
+        self.assertNotIn("alembic", override)
 
     def test_consumer_store_transition_uses_only_proven_manifest_lookup(self):
         self.payload["bridge"]["config"] = "sha256:" + "f" * 64

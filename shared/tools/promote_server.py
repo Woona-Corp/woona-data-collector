@@ -29,9 +29,19 @@ SOURCE = re.compile(r"[0-9a-f]{40}\Z")
 LIMIT = 4 * 1024 * 1024
 MAX_ARCHIVE = 4 * 1024**3
 SERVICES = ("api", "label_sync")
-COMPOSE = ["docker", "compose", "--project-directory", ROOT, "--env-file", "/opt/woona/.env",
+COMPOSE = ["docker", "compose", "--project-directory", ROOT,
+           "--env-file", ROOT + "/.env", "--env-file", ROOT + "/.env.label",
            "-f", ROOT + "/compose.yaml", "-f", ROOT + "/compose.production.yaml",
            "-f", ROOT + "/compose.label.yaml"]
+
+
+def compose_input(services=None):
+    lines = ["services:\n", "  filebrowser:\n    env_file: !reset []\n",
+             "  cloudbeaver:\n    env_file: !reset []\n"]
+    for name, values in (services or {}).items():
+        lines.append(f"  {name}:\n")
+        lines.extend(f"    {key}: {json.dumps(value, ensure_ascii=True)}\n" for key, value in values.items())
+    return "".join(lines).encode()
 
 
 class Rejected(ValueError):
@@ -264,7 +274,7 @@ def inspect_container(cid):
 
 
 def snapshot():
-    ids = run(COMPOSE + ["ps", "--all", "--format", "json"])
+    ids = run(COMPOSE + ["-f", "-", "ps", "--all", "--format", "json"], data=compose_input())
     # Compose emits one object per line (older versions may emit an array).
     text = ids.decode().strip()
     rows = json.loads(text) if text.startswith("[") else [decode(line.encode()) for line in text.splitlines() if line]
@@ -354,7 +364,8 @@ def remote(payload, apply=False):
         "label_sync": {"image": image, "entrypoint": ["python"], "command": ["-B", "-m", "server.label_sync"]}}}
     require(snapshot() == before, "runtime changed after preflight; separate review required")
     run(COMPOSE + ["-f", "-", "up", "-d", "--no-build", "--no-deps", "--pull", "never",
-                   "--wait", "--wait-timeout", "90", "--timeout", "30", *SERVICES], data=canonical(override), timeout=150)
+                   "--wait", "--wait-timeout", "90", "--timeout", "30", *SERVICES],
+        data=compose_input(override["services"]), timeout=150)
     # No automatic rollback. A failure stops clients; operator reviews current schema first.
     deadline = time.monotonic() + plan["observation_seconds"]
     after = snapshot()
