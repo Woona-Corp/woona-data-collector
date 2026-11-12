@@ -378,9 +378,12 @@ The three public Compose files on the host must match the reviewed plan hashes.
 Environment files stay on the host and are not exported, hashed or logged.
 
 The target is fixed: `/opt/woona/shared`, project-directory `shared`,
-`/opt/woona/.env`, and the three Compose files listed above. An unreviewed different
-stack must stop for code/plan review, not accept a dispatch-supplied host/path/SSH
-command. No production SSH was performed to discover or modify these settings.
+`/opt/woona/shared/.env`, `/opt/woona/shared/.env.label`, and the three Compose files
+listed above. An unreviewed different stack must stop for code/plan review, not accept
+a dispatch-supplied host/path/SSH command. API/worker-only Compose calls use a bounded
+stdin override with `env_file: !reset []` for filebrowser/cloudbeaver, so their unrelated
+`.env.team` is neither read nor required and those services are not replaced. A separate
+host rollout of those services still requires its own reviewed credentials/configuration.
 
 ### Dispatch and fail-closed behavior
 
