@@ -129,7 +129,7 @@ jobs:
           for name in names:
               matches = [a for a in artifacts if a['name'] == name and not a['expired']]
               assert matches, 'Missing same-run artifact: ' + name
-              matches.sort(key=lambda a: (a.get('created_at') or '', a.get('id') or 0))
+              matches.sort(key=lambda a: a.get('id') if type(a.get('id')) is int and a.get('id') > 0 else -1)
               a = matches[-1]
               assert sum((candidate.get('created_at'), candidate.get('id')) == (a.get('created_at'), a.get('id')) for candidate in matches) == 1, 'Ambiguous same-run artifact: ' + name
               assert type(a['id']) is int and a['id'] > 0, 'Invalid evidence artifact ID'
