@@ -1,6 +1,18 @@
 cool-trams.digital {
 	encode zstd gzip
 
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				resp_headers delete
+				request>uri regexp \?.*$ ""
+			}
+		}
+	}
+	log_append requestId {http.response.header.X-Request-ID}
+
 	redir /files /files/ 308
 	redir /db /db/ 308
 

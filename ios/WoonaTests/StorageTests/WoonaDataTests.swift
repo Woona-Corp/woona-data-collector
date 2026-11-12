@@ -1409,7 +1409,7 @@ final class WoonaDataTests: XCTestCase {
                     XCTAssertEqual(request.value(forHTTPHeaderField: "X-Woona-Account"), "scope-a")
                     puts += 1
                     XCTAssertTrue(request.url!.path.hasSuffix(profile.profileVersionID.uuidString))
-                    if reject { return .init(status: 409, body: Data(#"{"detail":{"code":"animal_id_already_exists","message":"Synthetic identity conflict"}}"#.utf8)) }
+                    if reject { return .init(status: 409, body: Data(#"{"detail":{"code":"animal_id_already_exists","message":"fixture","requestId":"req-immediate-identity","nextAction":"resolve_animal_identity","retryable":false}}"#.utf8)) }
                     return .init(body: Data(#"{"dogRevision":8}"#.utf8))
                 }
                 throw URLError(.badServerResponse)
@@ -1440,6 +1440,7 @@ final class WoonaDataTests: XCTestCase {
             XCTAssertTrue(model.canChangeAccount, model.serverMutationBlockedReason ?? "Startup did not become ready")
             XCTAssertTrue(model.transferNetworkAllowsWork)
             model.serverToken = "fixture"
+            model.selectedLanguage = .russian
             let rejected = await model.resumePendingSync()
             XCTAssertFalse(rejected, syncDiagnostics())
             XCTAssertEqual(puts, 1, syncDiagnostics())
@@ -1447,6 +1448,13 @@ final class WoonaDataTests: XCTestCase {
             XCTAssertEqual(model.profileUploadFailed, 1)
             XCTAssertEqual(model.profileIdentityStatuses[profile.profileVersionID], .conflict)
             XCTAssertNil(model.profileIdentityCheckedAt[profile.profileVersionID])
+            let immediateError = try XCTUnwrap(model.errorMessage)
+            XCTAssertTrue(immediateError.contains("req-immediate-identity"))
+            XCTAssertTrue(immediateError.contains("resolve_animal_identity"))
+            XCTAssertFalse(immediateError.contains("fixture"))
+            let persistedError = try XCTUnwrap(store.profileSyncDetails(versionID: profile.profileVersionID).error)
+            XCTAssertTrue(persistedError.contains("animal_id_already_exists"))
+            XCTAssertNotEqual(recordingUploadErrorText(persistedError, language: .russian), persistedError)
             XCTAssertFalse(model.uploadQueueExplanation.contains("queue is empty"))
             let automatic = await model.resumePendingSync()
             XCTAssertTrue(automatic, syncDiagnostics()) // No eligible retry remains; this does not mark it uploaded.
@@ -1648,7 +1656,7 @@ final class WoonaDataTests: XCTestCase {
                     return .init(status: status, body: Data(#"{"code":"entity_retired"}"#.utf8))
                 }
                 do { _ = try await networkClient().restoreRecordings(dogIDs: [profile.id], into: store); XCTFail("Unconfirmed failure must remain visible: \(status)") }
-                catch ServerSyncError.requestFailed(let actual, _) { XCTAssertEqual(actual, status) }
+                catch ServerSyncError.requestFailed(let actual, _, _) { XCTAssertEqual(actual, status) }
                 XCTAssertNotNil(try store.profile(dogID: profile.id, versionID: profile.profileVersionID))
             }
         }
@@ -1817,16 +1825,20 @@ final class WoonaDataTests: XCTestCase {
             NetworkFaultProtocol.handler = { request in
                 if request.httpMethod == "HEAD" { return .init(headers: ["Upload-Offset": "0"]) }
                 patches += 1
-                return .init(status: 409)
+                return .init(status: 409, body: Data("{\"code\":\"offset_mismatch\",\"message\":\"fixture\",\"requestId\":\"req-offset-\(patches)\",\"retryable\":true}".utf8))
             }
             do {
                 try await networkClient().uploadArtifactBytes(UUID(), file: source, size: 6)
                 XCTFail("A stalled conflict must terminate")
-            } catch ServerSyncError.transfer(let code, _, let retryable) {
+            } catch ServerSyncError.transfer(let code, let message, let retryable) {
                 XCTAssertEqual(code, "upload_conflict_stalled")
                 XCTAssertTrue(retryable)
+                XCTAssertTrue(message.contains("req-offset-4"))
+                XCTAssertFalse(message.contains("req-offset-3"))
+                XCTAssertFalse(message.contains("fixture"))
             }
             XCTAssertEqual(patches, 4)
+            XCTAssertEqual(try Data(contentsOf: source), Data("abcdef".utf8))
             var heads = 0
             patches = 0
             NetworkFaultProtocol.handler = { request in
@@ -2149,16 +2161,200 @@ final class WoonaDataTests: XCTestCase {
             if request.url!.path == "/v1/deletions" { return (200, ["entities": []]) }
             if request.url!.path.hasSuffix("/sync-status") { return (404, [:]) }
             if request.url!.path == "/v1/me" { return (200, ["deviceId": UUID().uuidString]) }
-            if request.httpMethod == "PUT" { return (409, ["code": "animal_id_already_exists"]) }
+            if request.httpMethod == "PUT" { return (409, ["code": "animal_id_already_exists", "requestId": "req-identity-409", "nextAction": "resolve_animal_identity", "retryable": false]) }
             throw ServerSyncError.responseInvalid
         }
         do {
             try await syncClient().upload(recording: saved, profile: profile, store: store)
             XCTFail("Conflicting identity must not be uploaded")
-        } catch ServerSyncError.animalIDConflict {}
+        } catch ServerSyncError.animalIDConflict(_) {}
         XCTAssertEqual(try store.recording(id: recording.id)?.serverSyncState, "permanent_error")
+        XCTAssertTrue(try XCTUnwrap(store.recordingSyncError(recordingID: recording.id)).contains("req-identity-409"))
+        XCTAssertTrue(try XCTUnwrap(store.recordingSyncError(recordingID: recording.id)).contains("resolve_animal_identity"))
         XCTAssertFalse(try store.artifacts(recordingID: recording.id).isEmpty)
         XCTAssertEqual(try store.profile(dogID: profile.id, versionID: profile.profileVersionID)?.id, profile.id)
+    }
+
+    func testCompleteRestoreKeepsPreexistingLocalReferencePendingAndDeclarationsUnchanged() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let (record, remote) = try localRemovalFixture(store)
+        let source = root.appendingPathComponent("reference.csv")
+        let bytes = Data("utc,value\n2026-10-05T12:00:00Z,1\n".utf8)
+        try bytes.write(to: source)
+        let metadata = ReferenceMetadata(source: "Polar H10", startedAtUtc: "2026-10-05T12:00:00Z", endedAtUtc: "2026-10-05T12:01:00Z", offsetFromRecordingMs: 0)
+        try store.attachReference(recordingID: record.id, type: "ecg", sourceURL: source, metadata: metadata)
+        let reference = try XCTUnwrap(store.artifacts(recordingID: record.id).first { $0.type == "ecg" })
+        let originalArtifacts = try store.artifacts(recordingID: record.id)
+        let originalHashes = Dictionary(uniqueKeysWithValues: try originalArtifacts.map {
+            ($0.id, try WoonaStore.sha256File(root.appendingPathComponent($0.relativePath)))
+        })
+
+        XCTAssertFalse(try store.restoreRemoteRecording(remote))
+
+        XCTAssertEqual(try store.recording(id: record.id)?.serverSyncState, "pending")
+        XCTAssertTrue(try store.pendingRecordings().contains { $0.id == record.id })
+        let restored = try XCTUnwrap(store.recording(id: record.id))
+        XCTAssertEqual(restored.questionnaire, record.questionnaire)
+        XCTAssertEqual(restored.profileVersionID, record.profileVersionID)
+        XCTAssertEqual(restored.startedAtUTC, record.startedAtUTC)
+        XCTAssertEqual(restored.endedAtUTC, record.endedAtUTC)
+        let restoredProfile = try XCTUnwrap(store.profile(dogID: record.dogID, versionID: record.profileVersionID))
+        XCTAssertEqual(restoredProfile.questionnaire, remote.profileVersion.questionnaire)
+        XCTAssertEqual(restoredProfile.contentSha256, remote.profileVersion.contentSha256)
+        let restoredReference = try XCTUnwrap(store.artifacts(recordingID: record.id).first { $0.id == reference.id })
+        XCTAssertEqual(restoredReference.referenceMetadata, metadata)
+        XCTAssertEqual(restoredReference.uploadState, "pending")
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(reference.relativePath)), bytes)
+        for artifact in try store.artifacts(recordingID: record.id) {
+            XCTAssertEqual(try WoonaStore.sha256File(root.appendingPathComponent(artifact.relativePath)), originalHashes[artifact.id])
+        }
+    }
+
+    private func remoteRestoreDetail(_ remote: ServerRecordingDetail, artifacts: [ServerArtifact]) -> ServerRecordingDetail {
+        ServerRecordingDetail(id: remote.id, dogId: remote.dogId, profileVersion: remote.profileVersion,
+            source: remote.source, captureStatus: remote.captureStatus, ingestStatus: remote.ingestStatus,
+            startedAtUtc: remote.startedAtUtc, endedAtUtc: remote.endedAtUtc, timezone: remote.timezone,
+            sessionLabel: remote.sessionLabel, questionnaireSchemaVersion: remote.questionnaireSchemaVersion,
+            questionnaireValidationState: remote.questionnaireValidationState, sessionQuestionnaire: remote.sessionQuestionnaire,
+            videoRequested: remote.videoRequested, sync: remote.sync, artifacts: artifacts,
+            appVersion: remote.appVersion, accountId: remote.accountId, questionnaireRevision: remote.questionnaireRevision,
+            captureErrorCode: remote.captureErrorCode, captureErrorMessage: remote.captureErrorMessage,
+            receiptSha256: remote.receiptSha256, serverVerifiedAtUtc: remote.serverVerifiedAtUtc)
+    }
+
+    func testCompleteRestoreTreatsSameIDReferenceAsUnfinishedUntilAvailable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let (record, remote) = try localRemovalFixture(store)
+        let source = root.appendingPathComponent("reference.csv")
+        try Data("utc,value\n2026-10-05T12:00:00Z,1\n".utf8).write(to: source)
+        try store.attachReference(recordingID: record.id, type: "ecg", sourceURL: source,
+            metadata: ReferenceMetadata(source: "Polar H10", startedAtUtc: "2026-10-05T12:00:00Z",
+                endedAtUtc: "2026-10-05T12:01:00Z", offsetFromRecordingMs: 0))
+        let reference = try XCTUnwrap(store.artifacts(recordingID: record.id).first { $0.type == "ecg" })
+        func remoteReference(_ storageStatus: String) -> ServerArtifact {
+            ServerArtifact(id: reference.id, type: reference.type, fileName: reference.fileName,
+                mimeType: reference.mimeType, sizeBytes: reference.sizeBytes, sha256: reference.sha256,
+                storageStatus: storageStatus, referenceMetadata: reference.referenceMetadata)
+        }
+
+        for status in ["uploading", "missing"] {
+            let unfinished = remoteRestoreDetail(remote, artifacts: remote.artifacts + [remoteReference(status)])
+            XCTAssertFalse(try store.restoreRemoteRecording(unfinished))
+            XCTAssertEqual(try store.recording(id: record.id)?.serverSyncState, "pending", status)
+            XCTAssertEqual(try store.syncOverview().synced, 0, status)
+            XCTAssertTrue(try store.pendingRecordings().contains { $0.id == record.id }, status)
+            XCTAssertEqual(try store.artifacts(recordingID: record.id).first { $0.id == reference.id }?.uploadState, status)
+        }
+
+        let available = remoteRestoreDetail(remote, artifacts: remote.artifacts + [remoteReference("available")])
+        XCTAssertFalse(try store.restoreRemoteRecording(available))
+        XCTAssertEqual(try store.recording(id: record.id)?.serverSyncState, "synced")
+        XCTAssertEqual(try store.syncOverview().synced, 1)
+        XCTAssertFalse(try store.pendingRecordings().contains { $0.id == record.id })
+        XCTAssertEqual(try store.artifacts(recordingID: record.id).first { $0.id == reference.id }?.uploadState, "available")
+    }
+
+    func testIncompleteRestoreKeepsPermanentErrorForLocalOnlyReference() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try WoonaStore(rootDirectory: root)
+        let (record, remote) = try localRemovalFixture(store)
+        let incomplete = ServerRecordingDetail(id: remote.id, dogId: remote.dogId, profileVersion: remote.profileVersion,
+            source: remote.source, captureStatus: remote.captureStatus, ingestStatus: "uploading",
+            startedAtUtc: remote.startedAtUtc, endedAtUtc: remote.endedAtUtc, timezone: remote.timezone,
+            sessionLabel: remote.sessionLabel, questionnaireSchemaVersion: remote.questionnaireSchemaVersion,
+            questionnaireValidationState: remote.questionnaireValidationState, sessionQuestionnaire: remote.sessionQuestionnaire,
+            videoRequested: remote.videoRequested, sync: remote.sync, artifacts: remote.artifacts,
+            captureErrorCode: remote.captureErrorCode, captureErrorMessage: remote.captureErrorMessage,
+            receiptSha256: remote.receiptSha256, serverVerifiedAtUtc: remote.serverVerifiedAtUtc)
+        let source = root.appendingPathComponent("reference.csv")
+        let bytes = Data("utc,value\n2026-10-05T12:00:00Z,1\n".utf8)
+        try bytes.write(to: source)
+        try store.attachReference(recordingID: record.id, type: "ecg", sourceURL: source,
+            metadata: ReferenceMetadata(source: "Polar H10", startedAtUtc: "2026-10-05T12:00:00Z",
+                endedAtUtc: "2026-10-05T12:01:00Z", offsetFromRecordingMs: 0))
+        try store.updateRecordingSync(record.id, state: "permanent_error", error: NSError(domain: "fixture", code: 409,
+            userInfo: [NSLocalizedDescriptionKey: "animal_id_already_exists"]))
+
+        XCTAssertFalse(try store.restoreRemoteRecording(incomplete))
+
+        XCTAssertEqual(try store.recording(id: record.id)?.serverSyncState, "permanent_error")
+        XCTAssertEqual(try store.syncOverview().failed, 1)
+        XCTAssertEqual(try store.recordingSyncError(recordingID: record.id), "animal_id_already_exists")
+        XCTAssertFalse(try store.pendingRecordings().contains { $0.id == record.id }, "A local-only reference must not re-enable automatic retry for an incomplete remote recording")
+        let reference = try XCTUnwrap(store.artifacts(recordingID: record.id).first { $0.type == "ecg" })
+        XCTAssertEqual(reference.uploadState, "pending")
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(reference.relativePath)), bytes)
+    }
+
+    @MainActor
+    func testServerRetryableFlagControlsRecordingErrorStateWithoutChangingDeclarations() async throws {
+        try await networkSource { root, _ in
+            let store = try WoonaStore(rootDirectory: root.appendingPathComponent("Woona"))
+            let profile = try store.saveProfile(completeDog())
+            let scenarios: [(code: String, status: Int, retryable: Bool, manifest: Bool, state: String)] = [
+                ("part_file_missing", 409, true, false, "retryable_error"),
+                ("upload_incomplete", 409, true, false, "retryable_error"),
+                ("artifact_hash_mismatch", 422, true, false, "retryable_error"),
+                ("content_length_required", 411, false, false, "permanent_error"),
+                ("animal_id_already_exists", 409, false, true, "permanent_error"),
+                ("immutable_profile_conflict", 409, false, true, "permanent_error"),
+                ("immutable_recording_conflict", 409, false, true, "permanent_error"),
+                ("immutable_artifact_conflict", 409, false, true, "permanent_error"),
+            ]
+            for scenario in scenarios {
+                let recording = try store.createRecording(profile: profile, source: "live", questionnaire: completeSession())
+                try store.finalize(recording: recording, status: "completed", files: [], syncJSON: Data("{}".utf8))
+                let saved = try XCTUnwrap(store.recording(id: recording.id))
+                let originalArtifacts = try store.artifacts(recordingID: recording.id)
+                let originalHashes = Dictionary(uniqueKeysWithValues: try originalArtifacts.map {
+                    ($0.id, try WoonaStore.sha256File(root.appendingPathComponent("Woona").appendingPathComponent($0.relativePath)))
+                })
+                NetworkFaultProtocol.handler = { request in
+                    let path = request.url!.path
+                    if path == "/v1/deletions" { return .init(body: Data(#"{"entities":[]}"#.utf8)) }
+                    if path.hasSuffix("/sync-status") { return .init(status: 404) }
+                    if path == "/v1/me" { return .init(body: Data(#"{"deviceId":"11111111-1111-1111-1111-111111111111"}"#.utf8)) }
+                    let error = try JSONSerialization.data(withJSONObject: [
+                        "code": scenario.code, "message": "fixture", "requestId": "req-\(scenario.code)",
+                        "nextAction": "review_upload", "retryable": scenario.retryable,
+                    ])
+                    if request.httpMethod == "PUT" {
+                        return scenario.manifest ? .init(status: scenario.status, body: error) : .init(body: Data(#"{"dogRevision":1}"#.utf8))
+                    }
+                    if request.httpMethod == "HEAD" { return .init(headers: ["Upload-Offset": "0"]) }
+                    if request.httpMethod == "PATCH" { return .init(status: 204, headers: ["Upload-Offset": "2"]) }
+                    if request.httpMethod == "POST" { return .init(status: scenario.status, body: error) }
+                    throw URLError(.badServerResponse)
+                }
+                do {
+                    try await networkClient().upload(recording: saved, profile: profile, store: store)
+                    XCTFail("Server error must fail the upload: \(scenario.code)")
+                } catch {}
+
+                XCTAssertEqual(try store.recording(id: recording.id)?.serverSyncState, scenario.state, scenario.code)
+                let persisted = try XCTUnwrap(store.recordingSyncError(recordingID: recording.id), scenario.code)
+                XCTAssertTrue(persisted.contains(scenario.code), scenario.code)
+                XCTAssertTrue(persisted.contains("req-\(scenario.code)"), scenario.code)
+                XCTAssertFalse(persisted.contains("fixture"), scenario.code)
+                XCTAssertEqual(try store.pendingRecordings().contains { $0.id == recording.id }, scenario.retryable, scenario.code)
+                let current = try XCTUnwrap(store.recording(id: recording.id))
+                XCTAssertEqual(current.questionnaire, saved.questionnaire, scenario.code)
+                XCTAssertEqual(current.profileVersionID, saved.profileVersionID, scenario.code)
+                XCTAssertEqual(current.startedAtUTC, saved.startedAtUTC, scenario.code)
+                XCTAssertEqual(current.endedAtUTC, saved.endedAtUTC, scenario.code)
+                let currentProfile = try XCTUnwrap(store.profile(dogID: profile.id, versionID: profile.profileVersionID))
+                XCTAssertEqual(currentProfile.questionnaire, profile.questionnaire, scenario.code)
+                XCTAssertEqual(currentProfile.contentSha256, profile.contentSha256, scenario.code)
+                for artifact in try store.artifacts(recordingID: recording.id) {
+                    XCTAssertEqual(try WoonaStore.sha256File(store.rootDirectory.appendingPathComponent(artifact.relativePath)), originalHashes[artifact.id], scenario.code)
+                }
+            }
+        }
     }
 
     @MainActor
@@ -2182,7 +2378,7 @@ final class WoonaDataTests: XCTestCase {
         do {
             try await syncClient().upload(recording: saved, profile: profile, store: store)
             XCTFail("The artifact request must fail")
-        } catch ServerSyncError.requestFailed(let status, _) {
+        } catch ServerSyncError.requestFailed(let status, _, _) {
             XCTAssertEqual(status, 503)
         }
         XCTAssertEqual(try store.profile(dogID: profile.id, versionID: profile.profileVersionID)?.revision, 1)
@@ -3224,12 +3420,12 @@ final class WoonaDataTests: XCTestCase {
         try store.finalize(recording: local, status: "completed", files: [], syncJSON: Data("{}".utf8))
         var canonical = completeSession(); canonical.sessionLabel = "Server correction"
         let answers = try JSONDecoder().decode(JSONValue.self, from: WoonaStore.sessionQuestionnaireData(canonical))
-        func detail(_ id: UUID) -> ServerRecordingDetail {
+        func detail(_ id: UUID, ingestStatus: String = "uploading") -> ServerRecordingDetail {
             ServerRecordingDetail(id: id, dogId: dog.id,
                 profileVersion: .init(id: dog.profileVersionID, schemaVersion: 1, validationState: "complete",
                     questionnaire: dog.questionnaire, contentSha256: dog.contentSha256,
                     clientCreatedAtUtc: dog.createdAtUTC, supersededAtUtc: nil),
-                source: "replay", captureStatus: "completed", ingestStatus: "uploading",
+                source: "replay", captureStatus: "completed", ingestStatus: ingestStatus,
                 startedAtUtc: local.startedAtUTC, endedAtUtc: "2026-10-10T12:00:00Z", timezone: "UTC",
                 sessionLabel: canonical.sessionLabel, questionnaireSchemaVersion: 1,
                 questionnaireValidationState: "complete", sessionQuestionnaire: answers,
@@ -3249,6 +3445,24 @@ final class WoonaDataTests: XCTestCase {
         XCTAssertEqual(try store.recording(id: local.id)?.serverSyncState, "pending")
         XCTAssertEqual(try store.recording(id: local.id)?.sessionLabel, canonical.sessionLabel)
         XCTAssertEqual(try store.pendingRecordings().map(\.id), [local.id])
+        let incompleteCounts = try store.syncOverview()
+        XCTAssertEqual(incompleteCounts.synced, 0, "Restored metadata must not count as a confirmed upload")
+        XCTAssertEqual(incompleteCounts.pending, 1, "Only the original local recording owns pending upload work")
+        XCTAssertTrue(try store.recentRecordings(dogID: dog.id).contains { $0.id == remoteID }, "Incomplete remote metadata remains visible in history")
+        let localSync = try store.syncJSON(recordingID: local.id)
+        let localArtifacts = try store.artifacts(recordingID: local.id)
+        let localHashes = try localArtifacts.map { try WoonaStore.sha256File(root.appendingPathComponent($0.relativePath)) }
+
+        XCTAssertFalse(try store.restoreRemoteRecording(detail(remoteID, ingestStatus: "complete")))
+        XCTAssertEqual(try store.recording(id: remoteID)?.serverSyncState, "synced")
+        XCTAssertEqual(try store.recording(id: remoteID)?.questionnaire, canonical)
+        XCTAssertEqual(try store.syncOverview().synced, 1)
+        XCTAssertEqual(try store.syncOverview().pending, 1)
+        XCTAssertEqual(try store.pendingRecordings().map(\.id), [local.id])
+        XCTAssertTrue(try store.recentRecordings(dogID: dog.id).contains { $0.id == remoteID })
+        XCTAssertEqual(try store.syncJSON(recordingID: local.id), localSync)
+        XCTAssertEqual(try store.artifacts(recordingID: local.id).map(\.id), localArtifacts.map(\.id))
+        XCTAssertEqual(try localArtifacts.map { try WoonaStore.sha256File(root.appendingPathComponent($0.relativePath)) }, localHashes)
     }
 
     func testSessionEditQueuesAnswersAndPreservesCaptureFieldsAndFiles() throws {
@@ -3307,7 +3521,7 @@ final class WoonaDataTests: XCTestCase {
         do {
             _ = try await client.updateQuestionnaire(recordingID: UUID(), questionnaire: completeSession(), expectedRevision: 2)
             XCTFail("Stale revision must fail")
-        } catch ServerSyncError.requestFailed(let status, _) { XCTAssertEqual(status, 409) }
+        } catch ServerSyncError.requestFailed(let status, _, _) { XCTAssertEqual(status, 409) }
     }
 
     @MainActor

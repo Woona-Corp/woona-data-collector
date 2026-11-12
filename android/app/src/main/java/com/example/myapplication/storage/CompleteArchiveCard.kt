@@ -168,7 +168,10 @@ fun CompleteArchiveCard(language: AppLanguage, captureActive: Boolean) {
     if (job == null) archivePath?.let { path ->
         val ready = File(path)
         AlertDialog(
-            onDismissRequest = { archivePath = null },
+            onDismissRequest = {
+                discardCompleteArchive(ready)
+                archivePath = null
+            },
             title = { Text(if (russian) "Архив готов" else "Archive ready") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -192,12 +195,19 @@ fun CompleteArchiveCard(language: AppLanguage, captureActive: Boolean) {
                                 .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                 .apply { clipData = ClipData.newRawUri(ready.name, uri) }
                             context.startActivity(Intent.createChooser(intent, title))
-                            archivePath = null
                         } catch (failure: Exception) { saveError = failure.message ?: "Cannot open system share menu" }
                     }) { Text(if (russian) "Поделиться" else "Share") }
-                    TextButton(onClick = { archivePath = null }) { Text(if (russian) "Закрыть" else "Close") }
+                    TextButton(onClick = {
+                        discardCompleteArchive(ready)
+                        archivePath = null
+                    }) { Text(if (russian) "Закрыть" else "Close") }
                 }
             },
         )
     }
+}
+
+internal fun discardCompleteArchive(archive: File) {
+    archive.delete()
+    archive.parentFile?.delete()
 }

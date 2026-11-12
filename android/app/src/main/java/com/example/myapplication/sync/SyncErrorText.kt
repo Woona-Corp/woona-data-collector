@@ -15,9 +15,9 @@ fun serverSyncErrorText(message: String, language: AppLanguage): String {
 fun animalIdentityConflictText(language: AppLanguage, localAnimalId: String? = null): String {
     val id = localAnimalId?.trim()?.takeIf { it.isNotEmpty() }
     return if (language == AppLanguage.RUSSIAN) {
-        "Другая карточка уже использует ID${id?.let { " $it" }.orEmpty()}. Эта запись связана с новой карточкой, поэтому сервер её не принял. Восстановите карточки с сервера и выберите существующее животное. Проверьте аккаунт. Локальные данные сохранены; смена клички не устраняет конфликт."
+        "Другая карточка или историческая анкета уже использует ID${id?.let { " $it" }.orEmpty()}, поэтому сервер не принял запись. Сохраните исходный экспорт и проверьте историческую привязку записи и аккаунт перед выбором карточки или исправлением данных. Выбор другой карточки не изменяет уже созданную запись. Локальные данные сохранены; смена клички не устраняет конфликт."
     } else {
-        "Another profile already uses this ID${id?.let { " ($it)" }.orEmpty()}. This recording is linked to a new profile, so the server did not accept it. Use restore from server and select the existing animal. Check the account. Local data is preserved; renaming does not resolve the conflict."
+        "Another profile or historical questionnaire already uses this ID${id?.let { " ($it)" }.orEmpty()}, so the server did not accept the recording. Preserve the original export and review the recording's historical identity and account before selecting a profile or correcting data. Selecting another profile does not rewrite an existing recording. Local data is preserved; renaming does not resolve the conflict."
     }
 }
 

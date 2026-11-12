@@ -64,7 +64,7 @@ Debug допускает локальный HTTP для local networking; Releas
   SQLite/ZIP oracle. Затем на том же Mac выполняется **один** serial
   `test-without-building`: целые bundles `WoonaTests` и `WoonaUITests`
   в исходном scheme target order, units перед UI. Один physical report `full`
-  содержит сейчас 355 unit + 18 UI = 373 identities. Session ZIP proof
+  содержит сейчас 359 unit + 18 UI = 377 identities. Session ZIP proof
   проверяется по attachments этого bundle. Explicit reviewed 18 UI methods
   в [native_ci.py](tools/native_ci.py) проверяют полноту, не фильтруют запуск.
   Нет cross-Mac consumers, shards, duplicate unit execution, synthetic warm-up
@@ -96,7 +96,7 @@ Aggregator сравнивает discovered source XCTest identities с выпо�
 identities из `xcresulttool get test-results tests` JSON: exact набор
 в одном physical report (`full` для full, `unit` для unit),
 каждый один раз, каждый Passed; missing, duplicate, skipped, failed, retry/repetition,
-unknown schema и filtered suite не проходят. Сейчас source inventory — 355 unit
+unknown schema и filtered suite не проходят. Сейчас source inventory — 359 unit
 и 18 UI methods; новые units обнаруживаются автоматически, новый UI method
 требует явного включения в reviewed UI inventory. Discovery рассчитан на текущие обычные XCTest
 classes/methods, не Swift Testing, dynamic/inherited или parameterized tests.
@@ -134,7 +134,7 @@ python3 -m unittest discover -s ios/tools -p 'test_testflight_internal.py' -v
 **Изменения single-Mac CI требуют macOS/Xcode acceptance.** Linux hermetic
 subprocess и JSON schema tests подтверждают tooling policy, но не native
 acceptance. При приёмке full run проверить unit→UI порядок единственного
-invocation, точные 373 identities (355+18), attachments/session ZIP proof и полный
+invocation, точные 377 identities (359+18), attachments/session ZIP proof и полный
 агрегатор. Прежние consumer runs не доказывают принятие нового DAG или
 устранение AX timeout. Если Xcode возвращает иную schema, gate обязан упасть;
 не добавлять rebuild/retry/subset fallback. До release rollout нужны native

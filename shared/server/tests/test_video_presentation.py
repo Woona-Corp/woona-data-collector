@@ -134,6 +134,28 @@ class CfrAdmissionSafetyTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         read(item)
 
+    def test_matching_fingerprint_skips_read_and_changed_file_is_rehashed(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root/'derived/cfr30/clip.mp4'
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b'video')
+            item = self.proof()
+            stat = media.stat()
+            item['derivative_fingerprint'] = {
+                'device': stat.st_dev, 'inode': stat.st_ino, 'size_bytes': stat.st_size,
+                'mtime_ns': stat.st_mtime_ns, 'ctime_ns': stat.st_ctime_ns, 'sha256': item['sha256']}
+            registry = root/'derived/video-presentations.json'
+            registry.write_text(json.dumps({'schema_version': 2, 'entries': {'r': item}}))
+            with patch('server.video_presentation.hashlib.file_digest', wraps=hashlib.file_digest) as digest:
+                self.assertEqual(presentation_for_video('r', 'artifact', 'a'*64, root), item)
+                self.assertEqual(digest.call_count, 0)
+                media.write_bytes(b'other')
+                with self.assertRaisesRegex(ValueError, 'checksum|changed'):
+                    presentation_for_video('r', 'artifact', 'a'*64, root)
+                self.assertEqual(digest.call_count, 1)
+
     def test_migrated_task_noop_and_fresh_coordinate_conflict_prevent_patch(self):
         from copy import deepcopy
         from server.label_sync import managed_task_patch

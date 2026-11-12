@@ -35,6 +35,10 @@ sealed interface PacketValidationResult {
 
     data class Rejected(
         val reason: PacketValidationFailureReason,
+        val parsedBlockCount: Int? = null,
+        val consumedBytes: Int? = null,
+        val trailingBytes: Int? = null,
+        val failedBlockIndex: Int? = null,
     ) : PacketValidationResult
 }
 
@@ -64,13 +68,25 @@ class PacketValidator(
         }
 
         val parseResult = sensorBlockParser.parseResult(packetBytes)
+        val trailingBytes = packetBytes.size - parseResult.consumedBytes
         if (
             parseResult.parsedBlockCount != measurementCount ||
             parseResult.blocks.size != measurementCount ||
             parseResult.blocks.any { it.channelSamples.isEmpty() } ||
-            packetBytes.size - parseResult.consumedBytes !in 0..MAX_SENSOR_BLOCK_TRAILER_BYTES
+            trailingBytes !in 0..MAX_SENSOR_BLOCK_TRAILER_BYTES
         ) {
-            return PacketValidationResult.Rejected(PacketValidationFailureReason.INVALID_SENSOR_BLOCKS)
+            val failedBlockIndex = when {
+                parseResult.parsedBlockCount != measurementCount ||
+                    parseResult.blocks.size != measurementCount -> parseResult.parsedBlockCount
+                else -> parseResult.blocks.indexOfFirst { it.channelSamples.isEmpty() }.takeIf { it >= 0 }
+            }
+            return PacketValidationResult.Rejected(
+                reason = PacketValidationFailureReason.INVALID_SENSOR_BLOCKS,
+                parsedBlockCount = parseResult.parsedBlockCount,
+                consumedBytes = parseResult.consumedBytes,
+                trailingBytes = trailingBytes,
+                failedBlockIndex = failedBlockIndex,
+            )
         }
 
         return PacketValidationResult.Accepted(

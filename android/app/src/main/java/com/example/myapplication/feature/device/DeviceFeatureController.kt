@@ -936,8 +936,9 @@ class DeviceFeatureController(
         videoRecorder?.setPreviewSurface(surface)
     }
 
+    @Synchronized
     fun onTransportDiagnostic(message: String) {
-        if (v2PreviewConnection) return // Never append preview diagnostics to an old recording.
+        if (closeRequested || v2PreviewConnection) return // Never append preview diagnostics to an old recording.
         if (awaitingCaptureReady) {
             pendingTransportDiagnostics += message
             return

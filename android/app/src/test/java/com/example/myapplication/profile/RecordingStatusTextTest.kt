@@ -66,6 +66,17 @@ class RecordingStatusTextTest {
         assertTrue(recordingCaptureText("failed", "no_sensor_data", null, ru).contains("ни одного корректного"))
     }
 
+    @Test fun persistenceFailuresIdentifyStorageSubsystemInBothLanguages() {
+        listOf("packet_persistence_failed", "polar_persistence_failed").forEach { code ->
+            val ruText = recordingCaptureText("failed", code, null, ru)
+            assertTrue(code, ruText.contains("не удалось сохранить файлы записи"))
+            assertFalse(code, ruText.contains("не распознана"))
+            val enText = recordingCaptureText("failed", code, null, en)
+            assertTrue(code, enText.contains("recording files could not be saved"))
+            assertFalse(code, enText.contains("unrecognized"))
+        }
+    }
+
     @Test fun uploadFailureExplainsCauseAndRetryPolicySeparatelyFromCapture() {
         val retry = recordingUploadText("retryable_error", "Server returned HTTP 503: unavailable", ru)
         assertTrue(retry.contains("запланирован повтор"))

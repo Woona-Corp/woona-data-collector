@@ -20,6 +20,9 @@ data class PacketOverlapDiagnostic(
             (missingBytes + notificationPayloadBytes - 1) / notificationPayloadBytes
         }
 
+    val notificationEstimateRoundedUp: Boolean
+        get() = missingBytes > 0 && missingBytes % notificationPayloadBytes != 0
+
     fun summary(): String = listOf(
         "currentCounter=${currentCounter ?: "?"}",
         "nextCounter=${nextCounter ?: "?"}",
@@ -27,11 +30,25 @@ data class PacketOverlapDiagnostic(
         "receivedBeforeNextStart=$receivedBeforeNextStart",
         "missingBytes=$missingBytes",
         "estimatedMissingNotificationsAt${notificationPayloadBytes}B=$estimatedMissingNotifications",
+        "notificationEstimateRoundedUp=$notificationEstimateRoundedUp",
     ).joinToString(", ")
 }
 
 enum class PacketAssemblyFailureReason(val description: String) {
     OVERLAPPING_PACKET_START("New packet start marker found before previous packet completed"),
+}
+
+enum class PacketResyncReason {
+    LEADING_GARBAGE,
+    MALFORMED_LENGTH,
+    DISCARDED_TAIL,
+}
+
+data class PacketResyncDiagnostic(
+    val reason: PacketResyncReason,
+    val discardedBytes: Int,
+) {
+    fun summary(): String = "reason=$reason, discardedBytes=$discardedBytes"
 }
 
 sealed interface PacketAssemblyResult {
@@ -56,6 +73,7 @@ sealed interface PacketAssemblyResult {
 class PacketAssembler(
     initialCapacity: Int = DEFAULT_CAPACITY,
     private val sensorBlockParser: SensorBlockParser = SensorBlockParser(),
+    private val onResyncDiagnostic: (PacketResyncDiagnostic) -> Unit = {},
 ) {
     private var buffer = ByteArray(initialCapacity.coerceAtLeast(MIN_PACKET_SIZE))
     private var size = 0
@@ -87,12 +105,16 @@ class PacketAssembler(
                 return results
             }
 
-            if (headerIndex > 0) shiftLeft(headerIndex)
+            if (headerIndex > 0) {
+                shiftLeft(headerIndex)
+                reportResync(PacketResyncReason.LEADING_GARBAGE, headerIndex)
+            }
             if (size < MIN_PACKET_SIZE) return results
 
             val expectedLength = decodeLength(buffer)
             if (expectedLength !in MIN_PACKET_SIZE..MAX_PACKET_SIZE) {
                 shiftLeft(1)
+                reportResync(PacketResyncReason.MALFORMED_LENGTH, discardedBytes = 1)
                 continue
             }
 
@@ -117,10 +139,12 @@ class PacketAssembler(
                 return results
             }
 
+            val packetBytes = buffer.copyOfRange(0, expectedLength)
+            val accepted = packetValidator.validate(packetBytes) is PacketValidationResult.Accepted
             when (val overlap = scanForNestedOverlap(
                 expectedLength = expectedLength,
-                lookbackBytes = MAX_NESTED_OVERLAP_LOOKBACK_BYTES,
-                requireCandidateEndAfterExpectedLength = true,
+                lookbackBytes = if (accepted) MAX_NESTED_OVERLAP_LOOKBACK_BYTES else null,
+                requireCandidateEndAfterExpectedLength = accepted,
             )) {
                 NestedOverlapResult.None -> Unit
                 NestedOverlapResult.Pending -> return results
@@ -135,7 +159,6 @@ class PacketAssembler(
                 }
             }
 
-            val packetBytes = buffer.copyOfRange(0, expectedLength)
             results += PacketAssemblyResult.Completed(
                 packet = CompletedPacket(
                     bytes = packetBytes,
@@ -197,12 +220,12 @@ class PacketAssembler(
 
     private fun scanForNestedOverlap(
         expectedLength: Int,
-        lookbackBytes: Int,
+        lookbackBytes: Int?,
         requireCandidateEndAfterExpectedLength: Boolean,
     ): NestedOverlapResult {
         if (expectedLength <= 1 || size < HEADER_SIZE) return NestedOverlapResult.None
 
-        val searchStart = maxOf(1, expectedLength - lookbackBytes)
+        val searchStart = lookbackBytes?.let { maxOf(1, expectedLength - it) } ?: 1
         val searchEnd = minOf(expectedLength, size - HEADER_SIZE + 1)
         if (searchStart >= searchEnd) return NestedOverlapResult.None
 
@@ -338,8 +361,14 @@ class PacketAssembler(
         if (size <= HEADER_SIZE - 1) return
 
         val tailSize = HEADER_SIZE - 1
+        val discardedBytes = size - tailSize
         System.arraycopy(buffer, size - tailSize, buffer, 0, tailSize)
         size = tailSize
+        reportResync(PacketResyncReason.DISCARDED_TAIL, discardedBytes)
+    }
+
+    private fun reportResync(reason: PacketResyncReason, discardedBytes: Int) {
+        onResyncDiagnostic(PacketResyncDiagnostic(reason, discardedBytes))
     }
 
     private fun shiftLeft(count: Int) {
@@ -394,7 +423,7 @@ class PacketAssembler(
         val START_MARKER = byteArrayOf(0x33, 0x99.toByte(), 0xAA.toByte(), 0x55)
         const val MAX_PACKET_SIZE = 16_384
         const val DEFAULT_CAPACITY = MAX_PACKET_SIZE
-        const val MAX_NESTED_OVERLAP_LOOKBACK_BYTES = 16_384
+        const val MAX_NESTED_OVERLAP_LOOKBACK_BYTES = MAX_PACKET_SIZE
         const val ASSUMED_NOTIFICATION_PAYLOAD_BYTES = 244
         const val HEADER_SIZE = 4
         const val MIN_PACKET_SIZE = 16

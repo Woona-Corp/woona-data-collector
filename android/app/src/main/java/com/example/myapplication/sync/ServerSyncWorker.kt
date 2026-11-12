@@ -248,12 +248,15 @@ class RecordingSyncWorker(
                     setProgressAsync(workDataOf("artifact_id" to artifactId, "uploaded_bytes" to uploadedBytes, "verified" to available))
                 },
             )
-            database.acceptServerRecording(client.fetchRecording(recordingId))
             database.markRecordingSynced(
                 recordingId,
                 receipt.receiptSha256,
                 receipt.verifiedAtUtc,
             )
+            val acceptedAfterUpload = try { client.fetchRecording(recordingId) }
+                catch (error: ServerHttpException) { if (error.status == 404) null else throw error }
+            transferContext.ensureActive()
+            acceptedAfterUpload?.let { database.acceptServerRecording(it) }
             if (database.recording(recordingId)?.serverSyncState == "pending") {
                 SyncActivityLog.record(applicationContext, "recording", recordingId,
                     SyncActivityAction.UPLOAD, SyncActivityOutcome.QUEUED)

@@ -10,6 +10,16 @@ from pathlib import Path
 FRAME_RATE = 30
 
 
+def derivative_fingerprint(stat, checksum):
+    return {'device': stat.st_dev, 'inode': stat.st_ino, 'size_bytes': stat.st_size,
+            'mtime_ns': stat.st_mtime_ns, 'ctime_ns': stat.st_ctime_ns, 'sha256': checksum}
+
+
+def derivative_fingerprint_matches(item, stat):
+    fingerprint = item.get('derivative_fingerprint')
+    return isinstance(fingerprint, dict) and fingerprint == derivative_fingerprint(stat, item.get('sha256'))
+
+
 def is_cfr30(item):
     """Admission proof emitted only after encoding and complete timestamp/decode checks."""
     if not isinstance(item, dict) or item.get('transform') != 'cfr30':
@@ -74,10 +84,16 @@ def presentation_for_video(recording_id, artifact_id, source_sha256, storage=Non
         raise ValueError('Video presentation file missing or changed')
     path = (root / relative).resolve()
     boundary = root / 'derived' / 'cfr30' if cfr else root / 'derived'
-    if not path.is_relative_to(boundary) or not path.is_file() or path.stat().st_size != item.get('size_bytes'):
+    if not path.is_relative_to(boundary) or not path.is_file():
         raise ValueError('Video presentation file missing or changed')
-    if cfr:
+    stat = path.stat()
+    if stat.st_size != item.get('size_bytes'):
+        raise ValueError('Video presentation file missing or changed')
+    if cfr and not derivative_fingerprint_matches(item, stat):
         with path.open('rb') as stream:
-            if hashlib.file_digest(stream, 'sha256').hexdigest() != item['sha256']:
-                raise ValueError('Video presentation checksum changed')
+            checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
+            verified = os.fstat(stream.fileno())
+        if (checksum != item['sha256']
+                or derivative_fingerprint(stat, checksum) != derivative_fingerprint(verified, checksum)):
+            raise ValueError('Video presentation checksum changed')
     return dict(item)

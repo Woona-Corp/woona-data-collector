@@ -288,14 +288,14 @@ enum ServerSyncError: LocalizedError {
     case tokenMissing
     case responseInvalid
     case transfer(code: String, message: String, retryable: Bool)
-    case requestFailed(Int, String)
-    case animalIDConflict
+    case requestFailed(Int, String, retryable: Bool?)
+    case animalIDConflict(String)
 
     static func responseError(status: Int, data: Data, secret: String? = nil) -> ServerSyncError {
         let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         let detail = body?["detail"] as? [String: Any] ?? body
-        if status == 409, detail?["code"] as? String == "animal_id_already_exists" { return .animalIDConflict }
         let code = detail?["code"] as? String
+        let retryable = detail?["retryable"] as? Bool ?? body?["retryable"] as? Bool
         let message = detail?["message"] as? String ?? body?["detail"] as? String ?? HTTPURLResponse.localizedString(forStatusCode: status)
         // Keep useful server diagnostics visible without retaining credentials or
         // arbitrary response fields. The original request ID remains searchable.
@@ -305,17 +305,30 @@ enum ServerSyncError: LocalizedError {
             if let value = detail?[key] ?? body?[key] { diagnostics[key] = value }
         }
         let extra = (try? JSONSerialization.data(withJSONObject: diagnostics, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) }
-        return .requestFailed(status, safeSyncDiagnostic((code.map { "\($0): \(message)" } ?? message) + (diagnostics.isEmpty ? "" : "\n" + (extra ?? "")), secret: secret))
+        if status == 409, code == "animal_id_already_exists" {
+            var identityDiagnostics = diagnostics
+            identityDiagnostics["code"] = "animal_id_already_exists"
+            let identityExtra = (try? JSONSerialization.data(withJSONObject: identityDiagnostics, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) }
+            return .animalIDConflict(safeSyncDiagnostic(identityExtra ?? "", secret: secret))
+        }
+        return .requestFailed(status, safeSyncDiagnostic((code.map { "\($0): \(message)" } ?? message) + (diagnostics.isEmpty ? "" : "\n" + (extra ?? "")), secret: secret), retryable: retryable)
     }
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL: "Server URL is invalid. Use a complete HTTPS URL with a valid host and port, without username/password, query or fragment. HTTP is allowed only for localhost, 127.0.0.1, [::1] or 10.0.2.2."
-        case .tokenMissing: "Server token is missing"
-        case .responseInvalid: "Server response is invalid"
-        case .transfer(let code, let message, _): "\(code): \(message)"
-        case .animalIDConflict: "This animal ID already belongs to another profile. Check the account, restore profiles and select the existing dog. Local recordings are preserved; changing the name does not release the ID."
-        case .requestFailed(let status, let message): "Server returned \(status): \(message)"
+        case .invalidURL:
+            return "Server URL is invalid. Use a complete HTTPS URL with a valid host and port, without username/password, query or fragment. HTTP is allowed only for localhost, 127.0.0.1, [::1] or 10.0.2.2."
+        case .tokenMissing:
+            return "Server token is missing"
+        case .responseInvalid:
+            return "Server response is invalid"
+        case .transfer(let code, let message, _):
+            return "\(code): \(message)"
+        case .animalIDConflict(let diagnostics):
+            let message = "This animal ID is reserved by another profile or historical questionnaire. Preserve the original export and review this recording's historical identity and account before selecting a profile or correcting data. Selecting another profile does not rewrite an existing recording. Local recordings are preserved; renaming does not resolve the conflict."
+            return diagnostics.isEmpty ? message : message + "\n" + diagnostics
+        case .requestFailed(let status, let message, _):
+            return "Server returned \(status): \(message)"
         }
     }
 }
@@ -347,7 +360,7 @@ final class KeychainTokenStore {
         if token.isEmpty {
             let status = SecItemDelete(key as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw ServerSyncError.requestFailed(Int(status), "Unable to remove server token")
+                throw ServerSyncError.requestFailed(Int(status), "Unable to remove server token", retryable: nil)
             }
             return
         }
@@ -358,14 +371,14 @@ final class KeychainTokenStore {
         )
         if updateStatus == errSecSuccess { return }
         guard updateStatus == errSecItemNotFound else {
-            throw ServerSyncError.requestFailed(Int(updateStatus), "Unable to update token")
+            throw ServerSyncError.requestFailed(Int(updateStatus), "Unable to update token", retryable: nil)
         }
         var value = key
         value[kSecValueData as String] = data
         value[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(value as CFDictionary, nil)
         guard status == errSecSuccess else {
-            throw ServerSyncError.requestFailed(Int(status), "Unable to store token")
+            throw ServerSyncError.requestFailed(Int(status), "Unable to store token", retryable: nil)
         }
     }
 }
@@ -508,7 +521,8 @@ final class WoonaServerClient {
             let permanent: Bool
             if case ServerSyncError.animalIDConflict = error { permanent = true }
             else if case ServerSyncError.transfer(_, _, let retryable) = error { permanent = !retryable }
-            else if case ServerSyncError.requestFailed(let status, _) = error { permanent = (400..<500).contains(status) && ![408,429].contains(status) }
+            else if case ServerSyncError.requestFailed(_, _, let retryable) = error, retryable == true { permanent = false }
+            else if case ServerSyncError.requestFailed(let status, _, _) = error { permanent = (400..<500).contains(status) && ![408,429].contains(status) }
             else if case WoonaStoreError.invalidData = error { permanent = true }
             else { permanent = false }
             try? store.updateProfileSync(versionID: profile.profileVersionID, state: permanent ? "permanent_error" : "retryable_error", error: error)
@@ -591,7 +605,7 @@ final class WoonaServerClient {
     // A stale list can race an operator retirement. Neither an arbitrary 404 nor
     // an authorization/network error proves retirement or permits local purge.
     private func confirmedRetirement(after error: Error, kind: String, id: UUID) async throws -> Bool {
-        guard case ServerSyncError.requestFailed(let status, _) = error, [404, 410].contains(status) else { return false }
+        guard case ServerSyncError.requestFailed(let status, _, _) = error, [404, 410].contains(status) else { return false }
         let digest = WoonaStore.sha256(Data(id.uuidString.lowercased().utf8))
         return try await deletions().contains { $0.kind == kind && $0.id_sha256 == digest }
     }
@@ -600,7 +614,7 @@ final class WoonaServerClient {
     // Continue other restore items, but make that partial outcome visible. Only
     // fresh exact deletion markers are ever passed to the store's purge path.
     private func skipMissingRestoreEntity(after error: Error, kind: String, id: UUID) async throws -> Bool {
-        guard case ServerSyncError.requestFailed(let status, _) = error, [404, 410].contains(status) else { return false }
+        guard case ServerSyncError.requestFailed(let status, _, _) = error, [404, 410].contains(status) else { return false }
         let confirmed = try await confirmedRetirement(after: error, kind: kind, id: id)
         if !confirmed {
             let warning = ServerRestoreWarning(kind: kind, id: id, status: status)
@@ -756,7 +770,7 @@ final class WoonaServerClient {
             }
             let existing: RecordingUploadStatus?
             do { existing = try await json(method: "GET", path: "/v1/recordings/\(recording.id.uuidString)/sync-status", body: nil, as: RecordingUploadStatus.self) }
-            catch ServerSyncError.requestFailed(404, _) { existing = nil }
+            catch ServerSyncError.requestFailed(404, _, _) { existing = nil }
             if recording.questionnaireDirty, existing != nil, let questionnaire = recording.questionnaire {
                 let accepted = try await updateQuestionnaire(recordingID: recording.id, questionnaire: questionnaire, expectedRevision: recording.questionnaireRevision)
                 let canonical = try JSONDecoder().decode(SessionQuestionnaire.self, from: JSONEncoder().encode(accepted.sessionQuestionnaire))
@@ -897,7 +911,11 @@ final class WoonaServerClient {
                 state = retryable ? "retryable_error" : "permanent_error"
             } else if case ServerSyncError.animalIDConflict = error {
                 state = "permanent_error"
-            } else if case ServerSyncError.requestFailed(let status, _) = error,
+            } else if case ServerSyncError.requestFailed(_, _, let retryable) = error, retryable == true {
+                state = "retryable_error"
+            } else if case ServerSyncError.requestFailed(_, _, let retryable) = error, retryable == false {
+                state = "permanent_error"
+            } else if case ServerSyncError.requestFailed(let status, _, _) = error,
                [400, 401, 403, 404, 409, 410, 413, 422].contains(status) {
                 state = "permanent_error"
             } else if case WoonaStoreError.invalidData = error {
@@ -923,6 +941,7 @@ final class WoonaServerClient {
         }
         var current = try await uploadOffset(artifactID, size: size)
         var resynchronizations = 0
+        var lastConflictMessage = ""
         try onProgress(current)
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
@@ -937,10 +956,12 @@ final class WoonaServerClient {
             do {
                 response = try await rawRequest(method: "PATCH", path: "/v1/artifacts/\(artifactID.uuidString)/content",
                     body: chunk, contentType: "application/offset+octet-stream", headers: ["Upload-Offset": String(current)])
-            } catch ServerSyncError.requestFailed(409, _) {
+            } catch ServerSyncError.requestFailed(409, let message, _) {
+                lastConflictMessage = safeSyncDiagnostic(message, secret: token)
                 resynchronizations += 1
                 guard resynchronizations <= 3 else {
-                    throw ServerSyncError.transfer(code: "upload_conflict_stalled", message: "Server repeatedly rejected the upload offset. Retry will resume from its confirmed position.", retryable: true)
+                    let details = lastConflictMessage.isEmpty ? "" : "\n" + lastConflictMessage
+                    throw ServerSyncError.transfer(code: "upload_conflict_stalled", message: "Server repeatedly rejected the upload offset. Retry will resume from its confirmed position." + details, retryable: true)
                 }
                 current = try await uploadOffset(artifactID, size: size)
                 try onProgress(current)
@@ -1146,8 +1167,8 @@ final class WoonaServerClient {
         guard let response = response as? HTTPURLResponse else { throw ServerSyncError.responseInvalid }
         guard (200...299).contains(response.statusCode) else {
             let error = ServerSyncError.responseError(status: response.statusCode, data: data, secret: token)
-            if case .requestFailed(let status, let message) = error {
-                throw ServerSyncError.requestFailed(status, safeSyncDiagnostic(message, secret: token))
+            if case .requestFailed(let status, let message, let retryable) = error {
+                throw ServerSyncError.requestFailed(status, safeSyncDiagnostic(message, secret: token), retryable: retryable)
             }
             throw error
         }

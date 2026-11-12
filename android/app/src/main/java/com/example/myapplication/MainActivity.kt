@@ -80,6 +80,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+internal fun preferredDiagnosticArtifact(
+    artifacts: List<com.example.myapplication.data.Artifact>,
+): com.example.myapplication.data.Artifact? =
+    artifacts.firstOrNull {
+        it.type == com.example.myapplication.data.ArtifactType.DIAGNOSTIC && it.localPresence in setOf("local", "both")
+    } ?: artifacts.firstOrNull {
+        it.type == com.example.myapplication.data.ArtifactType.DIAGNOSTIC && it.localPresence == "remote_only"
+    }
+
 class MainActivity : ComponentActivity() {
     private val serviceUuid = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb")
     private val characteristicUuid = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
@@ -513,8 +522,13 @@ class MainActivity : ComponentActivity() {
                                 },
                                 recordingEvidence = { recording ->
                                     com.example.myapplication.sync.SyncActivityHistory("recording", recording.id, selectedLanguage, recording.serverSyncState)
-                                    com.example.myapplication.sync.CaptureDiagnosticDetails(recording.id, selectedLanguage) {
-                                        val artifact = recording.artifacts.firstOrNull { it.type == com.example.myapplication.data.ArtifactType.DIAGNOSTIC && it.localPresence in setOf("local", "both") }
+                                    val diagnosticArtifact = preferredDiagnosticArtifact(recording.artifacts)
+                                    com.example.myapplication.sync.CaptureDiagnosticDetails(
+                                        recordingId = recording.id,
+                                        language = selectedLanguage,
+                                        refreshKey = diagnosticArtifact?.let { it.localPresence to it.relativePath },
+                                    ) {
+                                        val artifact = diagnosticArtifact?.takeIf { it.localPresence in setOf("local", "both") }
                                         artifact?.let {
                                             com.example.myapplication.storage.readRecordingDiagnosticTail(woonaDatabase.rootDirectory, recording.relativeDirectory, it.relativePath)
                                                 ?.let { text -> com.example.myapplication.sync.redactSyncDetails(text, serverSettingsStore.get().token) }

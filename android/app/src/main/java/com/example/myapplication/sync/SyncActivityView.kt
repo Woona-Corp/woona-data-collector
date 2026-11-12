@@ -60,12 +60,17 @@ fun SyncActivityHistory(kind: String, id: String, language: AppLanguage, refresh
 
 /** The caller resolves the exact recording artifact; no path or network is inferred by UI. */
 @Composable
-fun CaptureDiagnosticDetails(recordingId: String, language: AppLanguage, load: suspend () -> String?) {
+fun CaptureDiagnosticDetails(
+    recordingId: String,
+    language: AppLanguage,
+    refreshKey: Any? = null,
+    load: suspend () -> String?,
+) {
     var expanded by remember(recordingId) { mutableStateOf(false) }
     var content by remember(recordingId) { mutableStateOf<String?>(null) }
     var loading by remember(recordingId) { mutableStateOf(false) }
     fun text(en: String, ru: String) = if (language == AppLanguage.RUSSIAN) ru else en
-    LaunchedEffect(recordingId, expanded) {
+    LaunchedEffect(recordingId, expanded, refreshKey) {
         if (expanded) {
             loading = true
             try { content = withContext(Dispatchers.IO) { runCatching { load() }.getOrNull() } }

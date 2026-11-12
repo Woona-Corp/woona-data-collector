@@ -17,16 +17,28 @@ The final duration rounds up by less than one frame.
 Every output's presentation timestamps, frame count and duration are checked, then
 the complete output is decoded and both source/output hashes checked before atomic
 admission to registry schema 2. Entries bind source artifact ID/SHA-256, derivative
-path/hash/size, frame count/rate and an identity time mapping. New outputs bound
+path/hash/size, frame count/rate and an identity time mapping. Initial full output
+SHA-256 verification also establishes a `derivative_fingerprint` binding that hash
+to device, inode, size, `mtime_ns` and `ctime_ns`. Outputs have immutable UUID-based
+paths, and schema 2 registry updates use atomic replacement. New outputs bound
 source-image timestamp selection using every inspected source PTS and the encoder's
 `fps round=near` rule; unsupported gaps exceeding 1/30 s are rejected. Output CFR
 alone is not this proof, nor is timestamp selection pixel/content identity or
 hardware synchronization. Historical entries remain provenance, not re-certified
-encoder truth. Full source hashes are checked during encoding; cached reuse and
-read-only admission stream-check derivative hashes against the DB source anchor.
-Dataset export checks
-full source and derivative hashes again. `--audit /private/path/report.json` checks
-every original presentation timestamp without changing files.
+encoder truth.
+
+Full source hashes are checked during encoding. Cached reuse and read-only admission
+reuse the initial derivative verification when its fingerprint matches exactly;
+they do not reread every byte on each admission. A missing or mismatched fingerprint
+triggers a full derivative hash, with `stat` metadata compared before and after the
+complete read. Checksum or metadata changes fail closed. Dataset export checks full
+source and derivative hashes again regardless of the cached fingerprint.
+`--audit /private/path/report.json` checks every original presentation timestamp
+without changing files.
+
+The fast path trusts the immutable-UUID output publication contract. It is not a
+byte-for-byte audit on every admission and does not guarantee detection of an
+external writer that changes bytes while preserving all recorded fingerprint fields.
 
 The maintained `operations/video/video-normalize.service` and timer are host-only,
 using three CPUs and low priority. The owner reports migration complete; this

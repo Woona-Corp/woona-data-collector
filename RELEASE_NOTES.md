@@ -1,5 +1,29 @@
 # Woona mobile release notes
 
+## Android 1.5.9 / iOS 1.5.9 — 2026-11-12
+
+- Preserve resumable upload declarations when a questionnaire is edited after a
+  partial upload. Restored unfinished recordings return to the pending queue,
+  stale missing-resource retries can recover after account linking, and completion
+  receipts are retained before optional metadata refreshes.
+- Keep incomplete server recordings retryable on iOS and preserve safe identity
+  conflict diagnostics, including request ID and next action, without enabling an
+  automatic retry loop for Animal ID conflicts.
+- Android packet assembly validates before scanning, supports bounded lookback
+  resynchronization and records actual rejection details. BLE connection callbacks
+  and capture counters retain more diagnostic context. Diagnostic log bytes are
+  frozen before their size and checksum are declared to the server.
+- Android complete-archive Share reuses the prepared ZIP and offers Save; closing
+  or dismissing the sheet removes only that prepared copy, never source captures.
+  Sync details prefer local or combined diagnostics with a remote fallback.
+- Server diagnostics distinguish aborted uploads and committed chunks, propagate a
+  normalized request ID through Caddy, and rotate container logs. Persisted
+  SHA-bound fingerprints avoid rereading unchanged large videos during no-op
+  normalization and presentation checks. PostgreSQL uses an init process and
+  FileBrowser has a health check.
+- Wire formats and server schema `0009` are unchanged. Original capture files and
+  capture-device ownership checks are preserved; no backup job is enabled.
+
 ## Android 1.5.8 / iOS 1.5.8 — 2026-11-09
 
 - Prevent creating another local dog card with an already used animal ID,

@@ -2,6 +2,7 @@ package com.example.myapplication.protocol
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -86,6 +87,79 @@ class PacketAssemblerTest {
         val completed = packets.single() as PacketAssemblyResult.Completed
         assertEquals(5L, completed.packet.counter)
         assertArrayEquals(valid, completed.packet.bytes)
+    }
+
+    @Test
+    fun append_reportsLeadingGarbageWithoutChangingPacketLossOrRejectionMetrics() {
+        val diagnostics = mutableListOf<PacketResyncDiagnostic>()
+        val assembler = PacketAssembler(onResyncDiagnostic = diagnostics::add)
+        val packet = testPacket(counter = 99)
+
+        val results = assembler.append(byteArrayOf(0x00, 0x11, 0x22) + packet)
+
+        assertEquals(
+            listOf(PacketResyncDiagnostic(PacketResyncReason.LEADING_GARBAGE, discardedBytes = 3)),
+            diagnostics,
+        )
+        assertEquals(1, results.count { it is PacketAssemblyResult.Completed })
+        assertEquals(0, results.count { it is PacketAssemblyResult.Rejected })
+        val stats = PacketStatsTracker()
+        results.filterIsInstance<PacketAssemblyResult.Completed>().forEach {
+            stats.record(it.packet.counter)
+        }
+        assertEquals(0L, stats.snapshot().packetsLost)
+    }
+
+    @Test
+    fun append_reportsMalformedLengthWithoutChangingPacketLossOrRejectionMetrics() {
+        val diagnostics = mutableListOf<PacketResyncDiagnostic>()
+        val assembler = PacketAssembler(onResyncDiagnostic = diagnostics::add)
+        val malformed = byteArrayOf(
+            0x33,
+            0x99.toByte(),
+            0xAA.toByte(),
+            0x55,
+            0x01,
+            0x00,
+        ) + ByteArray(10)
+
+        val results = assembler.append(malformed + testPacket(counter = 5))
+
+        assertEquals(
+            PacketResyncDiagnostic(PacketResyncReason.MALFORMED_LENGTH, discardedBytes = 1),
+            diagnostics.single { it.reason == PacketResyncReason.MALFORMED_LENGTH },
+        )
+        assertEquals(malformed.size, diagnostics.sumOf { it.discardedBytes })
+        assertEquals(1, results.count { it is PacketAssemblyResult.Completed })
+        assertEquals(0, results.count { it is PacketAssemblyResult.Rejected })
+        val stats = PacketStatsTracker()
+        results.filterIsInstance<PacketAssemblyResult.Completed>().forEach {
+            stats.record(it.packet.counter)
+        }
+        assertEquals(0L, stats.snapshot().packetsLost)
+    }
+
+    @Test
+    fun append_reportsDiscardedTailWithoutChangingPacketLossOrRejectionMetrics() {
+        val diagnostics = mutableListOf<PacketResyncDiagnostic>()
+        val assembler = PacketAssembler(onResyncDiagnostic = diagnostics::add)
+
+        val discarded = assembler.append(ByteArray(18) { index -> (index + 1).toByte() })
+
+        assertTrue(discarded.isEmpty())
+        assertEquals(
+            listOf(PacketResyncDiagnostic(PacketResyncReason.DISCARDED_TAIL, discardedBytes = 15)),
+            diagnostics,
+        )
+        val recovered = assembler.append(testPacket(counter = 6))
+        val results = discarded + recovered
+        assertEquals(1, results.count { it is PacketAssemblyResult.Completed })
+        assertEquals(0, results.count { it is PacketAssemblyResult.Rejected })
+        val stats = PacketStatsTracker()
+        results.filterIsInstance<PacketAssemblyResult.Completed>().forEach {
+            stats.record(it.packet.counter)
+        }
+        assertEquals(0L, stats.snapshot().packetsLost)
     }
 
     @Test
@@ -208,6 +282,201 @@ class PacketAssemblerTest {
         assertEquals(PacketAssemblyFailureReason.OVERLAPPING_PACKET_START, rejection.reason)
         assertEquals(16, requireNotNull(rejection.diagnostic).missingBytes)
         assertEquals(12L, (results.last() as PacketAssemblyResult.Completed).packet.counter)
+    }
+
+    @Test
+    fun overlapDiagnostic_roundsUpOneByteButNotExact244ByteNotification() {
+        val oneByteMissing = PacketOverlapDiagnostic(
+            currentCounter = 1,
+            nextCounter = 2,
+            expectedLength = 245,
+            receivedBeforeNextStart = 244,
+            missingBytes = 1,
+            notificationPayloadBytes = 244,
+        )
+        val exactNotificationMissing = oneByteMissing.copy(
+            expectedLength = 488,
+            receivedBeforeNextStart = 244,
+            missingBytes = 244,
+        )
+
+        assertEquals(1, oneByteMissing.estimatedMissingNotifications)
+        assertTrue(oneByteMissing.notificationEstimateRoundedUp)
+        assertTrue(oneByteMissing.summary().contains("notificationEstimateRoundedUp=true"))
+        assertEquals(1, exactNotificationMissing.estimatedMissingNotifications)
+        assertFalse(exactNotificationMissing.notificationEstimateRoundedUp)
+        assertTrue(exactNotificationMissing.summary().contains("notificationEstimateRoundedUp=false"))
+    }
+
+    @Test
+    fun append_rejectsAndRecoversNestedPacketBeyondLookbackBeforeDeclaredLength() {
+        val assembler = PacketAssembler()
+        val first = testPacket(
+            counter = 1,
+            timerMillis = 100,
+            measurementCount = 1,
+            blocks = listOf(
+                sensorBlock(sensorType = 2, channelSamples = listOf(List(2_989) { it % 100 })),
+            ),
+        )
+        val second = testPacket(
+            counter = 2,
+            timerMillis = 1_100,
+            measurementCount = 1,
+            blocks = listOf(
+                sensorBlock(sensorType = 2, channelSamples = listOf(List(39) { it })),
+            ),
+        )
+        val nestedStartIndex = 1_500
+        assertEquals(6_000, first.size)
+        assertEquals(100, second.size)
+        assertTrue(nestedStartIndex < first.size - 1_024)
+
+        val results = assembler.append(first.copyOfRange(0, nestedStartIndex) + second)
+
+        assertEquals(2, results.size)
+        val rejection = results.first() as PacketAssemblyResult.Rejected
+        assertEquals(PacketAssemblyFailureReason.OVERLAPPING_PACKET_START, rejection.reason)
+        val diagnostic = requireNotNull(rejection.diagnostic)
+        assertEquals(1L, diagnostic.currentCounter)
+        assertEquals(2L, diagnostic.nextCounter)
+        assertEquals(6_000, diagnostic.expectedLength)
+        assertEquals(nestedStartIndex, diagnostic.receivedBeforeNextStart)
+        assertEquals(4_500, diagnostic.missingBytes)
+        val completed = results.last() as PacketAssemblyResult.Completed
+        assertEquals(2L, completed.packet.counter)
+        assertArrayEquals(second, completed.packet.bytes)
+    }
+
+    @Test
+    fun append_broadScansInvalidCompletePacketForNestedStart() {
+        val assembler = PacketAssembler()
+        val recovered = testPacket(
+            counter = 2,
+            timerMillis = 1_100,
+            measurementCount = 1,
+            blocks = listOf(sensorBlock(sensorType = 2, channelSamples = listOf(listOf(30, 40)))),
+        )
+        val corrupted = testPacket(
+            counter = 1,
+            timerMillis = 100,
+            measurementCount = 1,
+            payloadBytes = ByteArray(5_984),
+        )
+        val nestedStartIndex = 1_500
+        recovered.copyInto(corrupted, destinationOffset = nestedStartIndex)
+
+        val results = assembler.append(corrupted)
+
+        assertEquals(2, results.size)
+        assertEquals(
+            PacketAssemblyFailureReason.OVERLAPPING_PACKET_START,
+            (results.first() as PacketAssemblyResult.Rejected).reason,
+        )
+        val completed = results.last() as PacketAssemblyResult.Completed
+        assertEquals(2L, completed.packet.counter)
+        assertArrayEquals(recovered, completed.packet.bytes)
+    }
+
+    @Test
+    fun append_continuesScanningAfterIncompleteNestedCandidate() {
+        val assembler = PacketAssembler()
+        val fakeIncompleteHeader = testPacket(
+            counter = 2,
+            timerMillis = 1_100,
+            measurementCount = 1,
+        )
+        val fakeDeclaredLength = 10_000
+        fakeIncompleteHeader[4] = (fakeDeclaredLength and 0xFF).toByte()
+        fakeIncompleteHeader[5] = ((fakeDeclaredLength shr 8) and 0xFF).toByte()
+        val recovered = testPacket(
+            counter = 3,
+            timerMillis = 2_100,
+            measurementCount = 1,
+            blocks = listOf(sensorBlock(sensorType = 2, channelSamples = listOf(listOf(30, 40)))),
+        )
+        val corrupted = testPacket(
+            counter = 1,
+            timerMillis = 100,
+            measurementCount = 1,
+            payloadBytes = ByteArray(5_984),
+        )
+        val fakeStartIndex = 600
+        val recoveredStartIndex = 1_500
+        fakeIncompleteHeader.copyInto(corrupted, destinationOffset = fakeStartIndex)
+        recovered.copyInto(corrupted, destinationOffset = recoveredStartIndex)
+
+        val results = assembler.append(corrupted)
+
+        assertEquals(2, results.size)
+        assertEquals(
+            PacketAssemblyFailureReason.OVERLAPPING_PACKET_START,
+            (results.first() as PacketAssemblyResult.Rejected).reason,
+        )
+        val completed = results.last() as PacketAssemblyResult.Completed
+        assertEquals(3L, completed.packet.counter)
+        assertArrayEquals(recovered, completed.packet.bytes)
+    }
+
+    @Test
+    fun append_doesNotTreatDistantPayloadHeaderAsOverlap() {
+        val assembler = PacketAssembler()
+        val fakeNested = testPacket(
+            counter = 2,
+            timerMillis = 1_100,
+            measurementCount = 1,
+            blocks = listOf(sensorBlock(sensorType = 2, channelSamples = listOf(listOf(11)))),
+        )
+        val samples = ByteArray(1_600)
+        fakeNested.copyInto(samples)
+        val payload = byteArrayOf(0x02, 0x01, 0x20, 0x03, 0x00, 0x00) + samples
+        val packet = testPacket(
+            counter = 1,
+            timerMillis = 100,
+            measurementCount = 1,
+            payloadBytes = payload,
+        )
+
+        val packets = assembler.append(packet)
+
+        assertEquals(1, packets.size)
+        val completed = packets.single() as PacketAssemblyResult.Completed
+        assertEquals(1L, completed.packet.counter)
+        assertArrayEquals(packet, completed.packet.bytes)
+    }
+
+    @Test
+    fun append_emitsCompleteValidPacketBeforeScanningPlausibleNestedPayloadHeader() {
+        val assembler = PacketAssembler()
+        val fakeNested = testPacket(
+            counter = 2,
+            timerMillis = 200,
+            measurementCount = 1,
+            blocks = listOf(sensorBlock(sensorType = 2, channelSamples = listOf(listOf(11)))),
+        )
+        assertEquals(0, fakeNested.size % 2)
+        val sampleCount = fakeNested.size / 2
+        val payload = byteArrayOf(
+            0x02,
+            0x01,
+            (sampleCount and 0xFF).toByte(),
+            ((sampleCount shr 8) and 0xFF).toByte(),
+            0x00,
+            0x00,
+        ) + fakeNested
+        val packet = testPacket(
+            counter = 1,
+            timerMillis = 100,
+            measurementCount = 1,
+            payloadBytes = payload,
+        )
+
+        val packets = assembler.append(packet)
+
+        assertEquals(1, packets.size)
+        val completed = packets.single() as PacketAssemblyResult.Completed
+        assertEquals(1L, completed.packet.counter)
+        assertArrayEquals(packet, completed.packet.bytes)
     }
 
     @Test

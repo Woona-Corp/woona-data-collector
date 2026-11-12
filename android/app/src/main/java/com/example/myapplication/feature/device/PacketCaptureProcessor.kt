@@ -113,7 +113,7 @@ class PacketCaptureProcessor(
         monotonicNs: Long,
         deviceTimerMillis: Long,
     ) -> Unit = { _, _, _ -> },
-    private val packetAssembler: PacketAssembler = PacketAssembler(),
+    packetAssembler: PacketAssembler? = null,
     private val packetStats: PacketStatsTracker = PacketStatsTracker(),
     private val packetValidator: PacketValidator = PacketValidator(),
     private val wallClockMillisProvider: () -> Long = System::currentTimeMillis,
@@ -122,6 +122,15 @@ class PacketCaptureProcessor(
     private val maxPendingFragments: Int = MAX_PENDING_FRAGMENTS,
     private val flushRaw: () -> Unit = { rawFragmentFileStore.flush() },
 ) : PacketCaptureController {
+    private val pendingResyncDiagnosticEvents = mutableListOf<PacketDiagnosticEvent>()
+    private val packetAssembler = packetAssembler ?: PacketAssembler(
+        onResyncDiagnostic = { diagnostic ->
+            pendingResyncDiagnosticEvents += createDiagnosticEvent(
+                type = PacketDiagnosticType.INFO,
+                message = "Packet resync: ${diagnostic.summary()}",
+            )
+        },
+    )
     private val processingLock = Any()
     private val queueAdmissionLock = Any()
     private val idleMonitor = Object()
@@ -282,9 +291,18 @@ class PacketCaptureProcessor(
             isAcceptingFragments = false
         }
         if (!awaitQueueIdle(timeoutMillis)) return false
-        checkProcessingFailure()
-        emitPendingQueueOverflowDiagnostic()
-        flush()
+        synchronized(processingLock) {
+            checkProcessingFailure()
+            emitPendingQueueOverflowDiagnostic()
+            flush()
+            try {
+                // Transport callbacks can outlive capture drain and artifact hashing.
+                diagnosticLogFileStore.finishSession()
+            } catch (exception: Exception) {
+                latchFailure(exception)
+                throw exception
+            }
+        }
         return true
     }
 
@@ -578,6 +596,12 @@ class PacketCaptureProcessor(
             val updates = mutableListOf<PacketProcessingUpdate>()
 
             val packets = packetAssembler.append(fragment.bytes)
+            if (pendingResyncDiagnosticEvents.isNotEmpty()) {
+                updates += createStatsUpdateLocked(
+                    diagnosticEvents = pendingResyncDiagnosticEvents.toList(),
+                )
+                pendingResyncDiagnosticEvents.clear()
+            }
             for (packet in packets) {
                 when (packet) {
                     is PacketAssemblyResult.Rejected -> {
@@ -710,6 +734,12 @@ class PacketCaptureProcessor(
                                             message = buildRejectedPacketMessage(
                                                 reason = rejectionReason,
                                                 packetLength = packet.packet.bytes.size,
+                                                counter = packet.packet.counter,
+                                                timerMillis = decodePacketTimerMillis(packet.packet.bytes),
+                                                parsedBlockCount = validation.parsedBlockCount,
+                                                consumedBytes = validation.consumedBytes,
+                                                trailingBytes = validation.trailingBytes,
+                                                failedBlockIndex = validation.failedBlockIndex,
                                             ),
                                         ),
                                     ),
@@ -965,17 +995,34 @@ class PacketCaptureProcessor(
         )
     }
 
+    private fun decodePacketTimerMillis(packetBytes: ByteArray): Long? {
+        val timerOffset = 11
+        if (packetBytes.size < timerOffset + 4) return null
+        return (packetBytes[timerOffset].toLong() and 0xFF) or
+            ((packetBytes[timerOffset + 1].toLong() and 0xFF) shl 8) or
+            ((packetBytes[timerOffset + 2].toLong() and 0xFF) shl 16) or
+            ((packetBytes[timerOffset + 3].toLong() and 0xFF) shl 24)
+    }
+
     private fun buildRejectedPacketMessage(
         reason: String,
         packetLength: Int? = null,
         counter: Long? = null,
         timerMillis: Long? = null,
+        parsedBlockCount: Int? = null,
+        consumedBytes: Int? = null,
+        trailingBytes: Int? = null,
+        failedBlockIndex: Int? = null,
     ): String {
         val details = buildList {
             add(appTextResolver.getString(R.string.rejected_packet_detail_reason, reason))
             if (packetLength != null) add(appTextResolver.getString(R.string.rejected_packet_detail_length, packetLength))
             if (counter != null) add(appTextResolver.getString(R.string.rejected_packet_detail_counter, counter))
             if (timerMillis != null) add(appTextResolver.getString(R.string.rejected_packet_detail_timer, timerMillis))
+            if (parsedBlockCount != null) add("parsedBlockCount=$parsedBlockCount")
+            if (consumedBytes != null) add("consumedBytes=$consumedBytes")
+            if (trailingBytes != null) add("trailingBytes=$trailingBytes")
+            if (failedBlockIndex != null) add("failedBlockIndex=$failedBlockIndex")
         }
         return appTextResolver.getString(
             R.string.rejected_packet_message,

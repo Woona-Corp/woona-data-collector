@@ -60,4 +60,36 @@ class CompleteArchiveSaveTest {
         assertThrows(IOException::class.java) { copyCompleteArchive(archive, { broken }) }
         assertTrue(archive.isFile)
     }
+
+    @Test fun discardDeletesOnlyPreparedArchiveAndEmptyExportDirectory() {
+        val directory = Files.createTempDirectory("complete-discard-test").toFile()
+        try {
+            val exportRoot = File(directory, "cache/woona_complete_exports")
+            val exportDirectory = File(exportRoot, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
+            val archive = File(exportDirectory, "prepared.zip").apply { writeText("prepared") }
+            val source = File(directory, "files/Woona/recordings/source.bin").apply { parentFile!!.mkdirs(); writeText("source") }
+
+            discardCompleteArchive(archive)
+
+            assertFalse(archive.exists())
+            assertFalse(exportDirectory.exists())
+            assertTrue(exportRoot.isDirectory)
+            assertEquals("source", source.readText())
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test fun discardNeverRecursivelyDeletesExportDirectoryContents() {
+        val directory = Files.createTempDirectory("complete-discard-test").toFile()
+        try {
+            val exportDirectory = File(directory, "woona_complete_exports/${java.util.UUID.randomUUID()}").apply { mkdirs() }
+            val archive = File(exportDirectory, "prepared.zip").apply { writeText("prepared") }
+            val sibling = File(exportDirectory, "keep.bin").apply { writeText("keep") }
+
+            discardCompleteArchive(archive)
+
+            assertFalse(archive.exists())
+            assertEquals("keep", sibling.readText())
+            assertTrue(exportDirectory.isDirectory)
+        } finally { directory.deleteRecursively() }
+    }
 }

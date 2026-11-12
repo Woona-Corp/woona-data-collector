@@ -26,8 +26,8 @@ def fixture(identifier='ExampleTests/testExample()', status='Passed'):
 class NativeCITests(unittest.TestCase):
     def test_current_source_inventory_and_exact_reviewed_ui(self):
         items = ci.inventory()
-        self.assertEqual(355, len([i for i in items if i.startswith('WoonaTests/')]))
-        self.assertEqual(373, len(items))
+        self.assertEqual(359, len([i for i in items if i.startswith('WoonaTests/')]))
+        self.assertEqual(377, len(items))
         self.assertIn('WoonaTests/BleControlWriteQueueTests/testQueueBoundsFourFramesAndDisconnectFailsEveryPendingCommandOnce', items)
         self.assertIn('WoonaTests/V2PreviewTests/testCoarseningKeepsEndpointsAndPropagatesSegmentBreaks', items)
         self.assertEqual(18, len([i for i in items if i.startswith('WoonaUITests/')]))
@@ -267,8 +267,8 @@ class NativeCITests(unittest.TestCase):
                 proof = json.loads((root / 'native-proof.json').read_text())
                 self.assertTrue(proof['fullproof'])
                 self.assertTrue(proof['zip64_large'])
-                self.assertEqual(373, len(proof['passed']))
-                self.assertEqual(355, proof['counts']['unit']['passed'])
+                self.assertEqual(377, len(proof['passed']))
+                self.assertEqual(359, proof['counts']['unit']['passed'])
                 self.assertEqual(18, proof['counts']['ui']['passed'])
                 self.assertEqual({'full': 'result'}, proof['result_hashes'])
                 self.assertEqual('products', proof['products_sha256'])
@@ -313,8 +313,16 @@ class NativeCITests(unittest.TestCase):
         assert match is not None
         script = textwrap.dedent(match[0].removesuffix('          PY'))
         valid = {'id': 123, 'name': 'ios-native-full-evidence', 'expired': False,
+                 'created_at': '2026-11-12T11:35:33Z',
                  'digest': 'sha256:' + 'a' * 64, 'size_in_bytes': 100}
-        variants = [('valid', [valid]), ('missing', []), ('duplicate', [valid, valid])]
+        previous = {**valid, 'id': 122, 'created_at': '2026-11-12T11:04:32Z',
+                    'digest': 'sha256:' + 'b' * 64}
+        variants = [('valid', [valid]), ('missing', []), ('duplicate', [valid, valid]),
+                    ('rerun_latest', [previous, valid]), ('rerun_latest_reordered', [valid, previous]),
+                    ('rerun_highest_id_older_timestamp', [
+                        {**previous, 'created_at': valid['created_at']},
+                        {**valid, 'created_at': previous['created_at']},
+                    ])]
         variants += [(key, [{**valid, key: value}]) for key, value in (
             ('expired', True), ('id', 0), ('id', True), ('size_in_bytes', 0),
             ('digest', None), ('digest', ''), ('digest', 'sha256:invalid'))]
@@ -322,15 +330,19 @@ class NativeCITests(unittest.TestCase):
             evidence = Path(directory) / 'native-evidence'
             evidence.mkdir()
             for name, artifacts in variants:
+                accepted = name in ('valid', 'rerun_latest', 'rerun_latest_reordered',
+                                    'rerun_highest_id_older_timestamp')
                 with self.subTest(name=name, artifacts=artifacts):
                     ci.write(evidence / 'artifacts.json', {'artifacts': artifacts})
                     ci.write(evidence / 'native-proof.json', {'mode': 'full', 'fullproof': True})
                     result = subprocess.run([sys.executable, '-c', script], cwd=directory,
                                             env={**ci.os.environ, 'MODE': 'full'},
                                             capture_output=True, text=True)
-                    self.assertEqual(name == 'valid', result.returncode == 0, result.stderr)
+                    self.assertEqual(accepted, result.returncode == 0, result.stderr)
                     proof = json.loads((evidence / 'native-proof.json').read_text())
-                    self.assertEqual(name == 'valid', 'artifacts' in proof)
+                    self.assertEqual(accepted, 'artifacts' in proof)
+                    if accepted:
+                        self.assertEqual([123], [a['id'] for a in proof['artifacts']])
 
     def test_aggregate_unit_mode_does_not_require_full_or_ui_reports(self):
         identities = {'source': 'sha', 'run': 'run', 'attempt': '1', 'inputs_sha256': 'inputs'}

@@ -115,4 +115,82 @@ class CompleteArchiveCardTest {
         }
         assertEquals("source data", File(isolated.filesDir, "Woona/recordings/source.bin").readText())
     }
+
+    @Test fun shareKeepsPreparedArchiveAndSaveAvailableWithoutAnotherExport() {
+        val shared = mutableListOf<Intent>()
+        val sharing = object : ContextWrapper(isolated) {
+            override fun startActivity(intent: Intent) { shared += intent }
+        }
+        val owner = object : ActivityResultRegistryOwner {
+            override val activityResultRegistry = object : ActivityResultRegistry() {
+                override fun <I, O> onLaunch(requestCode: Int, contract: ActivityResultContract<I, O>, input: I, options: ActivityOptionsCompat?) {
+                    dispatchResult(requestCode, Activity.RESULT_OK, Intent().setData(selectedUri))
+                }
+            }
+        }
+        compose.setContent {
+            CompositionLocalProvider(LocalContext provides sharing, LocalActivityResultRegistryOwner provides owner) {
+                CompleteArchiveCard(AppLanguage.ENGLISH, captureActive = false)
+            }
+        }
+        val archive = createPreparedArchive()
+
+        compose.onNodeWithText("Share").performClick()
+
+        assertEquals(1, shared.size)
+        val chooser = shared.single()
+        assertEquals(Intent.ACTION_CHOOSER, chooser.action)
+        val send = requireNotNull(chooser.getParcelableExtra(Intent.EXTRA_INTENT) as Intent?)
+        val sharedUri = requireNotNull(send.getParcelableExtra(Intent.EXTRA_STREAM) as Uri?)
+        assertEquals(Intent.ACTION_SEND, send.action)
+        assertEquals(FileProvider.getUriForFile(sharing, "${sharing.packageName}.provider", archive), sharedUri)
+        assertTrue(send.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+        assertTrue("Share must not delete the URI source", archive.isFile)
+        compose.onNodeWithTag("archive.all.save").assertIsDisplayed().performClick()
+        compose.waitUntil(30_000) { compose.onAllNodesWithText("Archive saved to the selected location.").fetchSemanticsNodes().isNotEmpty() }
+
+        ZipFile(selected).use { zip -> assertNotNull(zip.getEntry("manifest.json")) }
+        assertEquals("source data", File(isolated.filesDir, "Woona/recordings/source.bin").readText())
+        assertFalse(archive.exists())
+    }
+
+    @Test fun closeDiscardsOnlyPreparedArchiveAndItsExportDirectory() {
+        compose.setContent {
+            CompositionLocalProvider(LocalContext provides isolated, LocalActivityResultRegistryOwner provides compose.activity) {
+                CompleteArchiveCard(AppLanguage.ENGLISH, captureActive = false)
+            }
+        }
+        val archive = createPreparedArchive()
+
+        compose.onNodeWithText("Close").performClick()
+
+        assertPreparedArchiveDiscarded(archive)
+    }
+
+    @Test fun dismissDiscardsOnlyPreparedArchiveAndItsExportDirectory() {
+        compose.setContent {
+            CompositionLocalProvider(LocalContext provides isolated, LocalActivityResultRegistryOwner provides compose.activity) {
+                CompleteArchiveCard(AppLanguage.ENGLISH, captureActive = false)
+            }
+        }
+        val archive = createPreparedArchive()
+
+        androidx.test.espresso.Espresso.pressBack()
+
+        assertPreparedArchiveDiscarded(archive)
+    }
+
+    private fun createPreparedArchive(): File {
+        compose.onNodeWithTag("archive.all.create").performClick()
+        compose.waitUntil(30_000) { compose.onAllNodesWithTag("archive.all.save").fetchSemanticsNodes().isNotEmpty() }
+        return File(isolated.cacheDir, "woona_complete_exports").walkTopDown().single { it.isFile && it.extension == "zip" }
+    }
+
+    private fun assertPreparedArchiveDiscarded(archive: File) {
+        compose.waitForIdle()
+        assertFalse("Prepared ZIP must be deleted", archive.exists())
+        assertFalse("Its UUID export directory must be deleted", archive.parentFile!!.exists())
+        assertTrue("The shared export root must be preserved", File(isolated.cacheDir, "woona_complete_exports").isDirectory)
+        assertEquals("source data", File(isolated.filesDir, "Woona/recordings/source.bin").readText())
+    }
 }

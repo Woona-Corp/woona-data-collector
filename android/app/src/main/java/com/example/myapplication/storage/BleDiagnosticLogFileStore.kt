@@ -10,6 +10,8 @@ class BleDiagnosticLogFileStore(
     private val timestampProvider: () -> Long = { System.currentTimeMillis() },
 ) {
     private val lock = Any()
+    private val operationalDirectory = directory
+    private var sessionFinished = false
     private var currentFile: File? = null
     private var writer: BufferedWriter? = null
     private var isClosed = false
@@ -52,12 +54,26 @@ class BleDiagnosticLogFileStore(
         }
     }
 
+    /** Freeze the capture artifact; later transport events belong to an operational log. */
+    fun finishSession() {
+        synchronized(lock) {
+            check(!isClosed) { "Diagnostic log file store is closed" }
+            if (sessionFinished) return
+            writer?.close()
+            writer = null
+            sessionFinished = true
+            directory = operationalDirectory
+            sessionFileName = null
+        }
+    }
+
     fun resetSession() {
         synchronized(lock) {
             check(!isClosed) { "Diagnostic log file store is closed" }
             writer?.close()
             writer = null
             currentFile = null
+            sessionFinished = false
         }
     }
 
@@ -68,6 +84,7 @@ class BleDiagnosticLogFileStore(
             writer = null
             currentFile = null
             this.directory = directory
+            sessionFinished = false
             sessionFileName = "diagnostics.log"
         }
     }
@@ -78,8 +95,13 @@ class BleDiagnosticLogFileStore(
         check(!isClosed) { "Diagnostic log file store is closed" }
         if (writer == null) {
             directory.mkdirs()
-            val file = File(directory, sessionFileName ?: "$filePrefix${timestampProvider()}.log")
-            currentFile = file
+            val file = if (sessionFinished) {
+                File.createTempFile("$filePrefix${timestampProvider()}_", ".log", directory)
+            } else {
+                File(directory, sessionFileName ?: "$filePrefix${timestampProvider()}.log")
+            }
+            // Keep currentFile pointing at the frozen artifact for export/registration.
+            if (!sessionFinished) currentFile = file
             writer = BufferedWriter(FileWriter(file, true), BUFFER_SIZE_BYTES)
         }
         return requireNotNull(writer)

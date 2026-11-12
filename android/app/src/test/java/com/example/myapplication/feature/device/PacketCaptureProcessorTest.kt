@@ -17,6 +17,51 @@ import java.util.concurrent.TimeUnit
 
 class PacketCaptureProcessorTest {
     @Test
+    fun finishCapture_freezesSessionDiagnosticsButPreservesLaterTransportEvents() {
+        val directory = Files.createTempDirectory("packet-processor-final-diagnostics").toFile()
+        val session = File(directory, "session")
+        val processor = PacketCaptureProcessor(
+            packetFileStore = BlePacketFileStore(directory),
+            rawFragmentFileStore = BleRawFragmentFileStore(directory),
+            diagnosticLogFileStore = BleDiagnosticLogFileStore(directory),
+            onPacketProcessed = {},
+            onError = { message, throwable -> throw AssertionError(message, throwable) },
+        )
+        try {
+            processor.useSessionDirectory(session)
+            processor.recordDiagnosticEvent(PacketDiagnosticType.INFO, "capture event")
+            assertEquals(PacketSubmitResult.ACCEPTED, processor.submit(validPacket(counter = 10, timerMillis = 50)))
+            assertTrue(processor.finishCapture(2_000))
+            val log = requireNotNull(processor.currentLogFile())
+            val frozen = log.readBytes()
+            assertTrue(log.readText().contains("Accepted packet"))
+            val declaredSha = java.security.MessageDigest.getInstance("SHA-256").digest(frozen)
+
+            // Disconnect callbacks arrive after the terminal transaction/manifest.
+            processor.recordDiagnosticEvent(PacketDiagnosticType.INFO, "BLE disconnected after capture")
+            processor.flush()
+            assertTrue(processor.finishCapture(2_000)) // Finalization retry is idempotent.
+            assertEquals(log, processor.currentLogFile())
+            assertArrayEquals(frozen, log.readBytes())
+            assertArrayEquals(declaredSha, java.security.MessageDigest.getInstance("SHA-256").digest(log.readBytes()))
+            assertTrue(directory.listFiles().orEmpty().filter { it.isFile && it.extension == "log" }
+                .any { it.readText().contains("BLE disconnected after capture") })
+
+            val nextSession = File(directory, "next-session")
+            processor.useSessionDirectory(nextSession)
+            processor.resetSession()
+            processor.recordDiagnosticEvent(PacketDiagnosticType.INFO, "next capture event")
+            assertTrue(processor.finishCapture(2_000))
+            assertEquals(File(nextSession, "diagnostics.log"), processor.currentLogFile())
+            assertTrue(requireNotNull(processor.currentLogFile()).readText().contains("next capture event"))
+            assertArrayEquals(frozen, log.readBytes())
+        } finally {
+            processor.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun submit_writesOnlyValidatedPackets() {
         val directory = Files.createTempDirectory("packet-processor-valid").toFile()
         val updates = mutableListOf<PacketProcessingUpdate>()
@@ -75,7 +120,49 @@ class PacketCaptureProcessorTest {
         assertNull(processor.currentFile())
         assertEquals(1L, updates.single().packetsRejected)
         assertEquals("Invalid measurement count", updates.single().lastPacketIssue)
-        assertTrue(updates.single().diagnosticEvents.single().message.contains("Rejected packet"))
+        assertEquals(
+            "Rejected packet: reason=Invalid measurement count, len=16, counter=10, timer=50",
+            updates.single().diagnosticEvents.single().message,
+        )
+    }
+
+    @Test
+    fun submit_logsValidatorMetadataForRejectedSensorBlock() {
+        val directory = Files.createTempDirectory("packet-processor-invalid-block").toFile()
+        val updates = mutableListOf<PacketProcessingUpdate>()
+        val latch = CountDownLatch(1)
+        val processor = PacketCaptureProcessor(
+            packetFileStore = BlePacketFileStore(directory = directory, timestampProvider = { 2L }),
+            rawFragmentFileStore = BleRawFragmentFileStore(directory = directory, timestampProvider = { 22L }),
+            diagnosticLogFileStore = BleDiagnosticLogFileStore(directory = directory, timestampProvider = { 222L }),
+            onPacketProcessed = {
+                updates += it
+                latch.countDown()
+            },
+            onError = { message, throwable -> throw AssertionError(message, throwable) },
+        )
+        val invalid = packet(
+            counter = 10,
+            timerMillis = 50,
+            measurementCount = 3,
+            blocks = listOf(
+                sensorBlock(sensorType = 2, channelSamples = listOf(listOf(10, 20))),
+                ByteArray(4),
+            ),
+        )
+
+        processor.submit(invalid)
+
+        assertTrue(latch.await(1, TimeUnit.SECONDS))
+        processor.close()
+
+        assertEquals(1L, updates.single().packetsRejected)
+        assertEquals("Invalid sensor block layout", updates.single().lastPacketIssue)
+        assertEquals(
+            "Rejected packet: reason=Invalid sensor block layout, len=30, counter=10, timer=50, " +
+                "parsedBlockCount=1, consumedBytes=26, trailingBytes=4, failedBlockIndex=1",
+            updates.single().diagnosticEvents.single().message,
+        )
     }
 
     @Test
@@ -111,6 +198,50 @@ class PacketCaptureProcessorTest {
         assertNotNull(logFile)
         assertTrue(requireNotNull(logFile).readText().contains("INFO"))
         assertTrue(requireNotNull(logFile).readText().contains("BLE MTU changed: mtu=247 status=0"))
+    }
+
+    @Test
+    fun submit_persistsResyncInfoWithoutSensorValuesOrPacketMetricChanges() {
+        val directory = Files.createTempDirectory("packet-processor-resync-info").toFile()
+        val updates = mutableListOf<PacketProcessingUpdate>()
+        val latch = CountDownLatch(2)
+        val processor = PacketCaptureProcessor(
+            packetFileStore = BlePacketFileStore(directory = directory, timestampProvider = { 25L }),
+            rawFragmentFileStore = BleRawFragmentFileStore(directory = directory, timestampProvider = { 225L }),
+            diagnosticLogFileStore = BleDiagnosticLogFileStore(directory = directory, timestampProvider = { 2225L }),
+            onPacketProcessed = {
+                updates += it
+                latch.countDown()
+            },
+            onError = { message, throwable -> throw AssertionError(message, throwable) },
+        )
+        val packet = validPacket(
+            counter = 10,
+            timerMillis = 50,
+            blocks = listOf(sensorBlock(2, listOf(listOf(31_000, 32_000)))),
+        )
+
+        processor.submit(byteArrayOf(0x11, 0x22, 0x33) + packet)
+
+        assertTrue(latch.await(1, TimeUnit.SECONDS))
+        processor.close()
+
+        val resyncUpdate = updates.first()
+        assertEquals(0L, resyncUpdate.packetsReceived)
+        assertEquals(0L, resyncUpdate.packetsLost)
+        assertEquals(0L, resyncUpdate.packetsRejected)
+        val event = resyncUpdate.diagnosticEvents.single()
+        assertEquals(PacketDiagnosticType.INFO, event.type)
+        assertEquals("Packet resync: reason=LEADING_GARBAGE, discardedBytes=3", event.message)
+        assertTrue(!event.message.contains("31000"))
+        assertTrue(!event.message.contains("32000"))
+        assertEquals(1L, updates.last().packetsReceived)
+        assertEquals(0L, updates.last().packetsLost)
+        assertEquals(0L, updates.last().packetsRejected)
+        val logFile = directory.listFiles()?.firstOrNull { it.name.startsWith("ble_log_") }
+        val log = requireNotNull(logFile).readText()
+        assertTrue(log.contains("INFO"))
+        assertTrue(log.contains("Packet resync: reason=LEADING_GARBAGE, discardedBytes=3"))
     }
 
     @Test

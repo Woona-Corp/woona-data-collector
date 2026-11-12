@@ -223,12 +223,34 @@ class WoonaDatabaseTest {
         val session = completeSessionQuestionnaire()
         val record = database.beginRecording(dog.id, RecordingSource.LIVE, session)
         database.finishRecording(record.id, RecordingStatus.COMPLETED)
+        assertEquals(0, requireNotNull(database.recording(record.id)).serverSyncAttemptCount)
         val initial = requireNotNull(database.recording(record.id)?.questionnaire)
         database.saveSessionQuestionnaire(record.id, initial.copy(sessionLabel = "Edited"))
         assertEquals("Edited", database.recording(record.id)?.questionnaire?.sessionLabel)
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
             database.saveSessionQuestionnaire(record.id, initial.copy(videoRequested = !initial.videoRequested))
         }
+    }
+
+    @Test
+    fun partialUploadQuestionnaireEditRequiresServerAndPreservesDeclaration() {
+        val local = completedPacketRecording("Partial upload edit")
+        val syncArtifact = requireNotNull(database.recordingSyncRecord(local.id)).artifacts.single { it.type == "sync" }
+        database.markRecordingUploading(local.id)
+        database.markArtifactProgress(syncArtifact.id, 17)
+        database.markRecordingSyncError(local.id, true, "transfer_paused", "Paused")
+        val before = requireNotNull(database.recording(local.id))
+        assertTrue(before.requiresServerQuestionnaireEdit)
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            database.saveSessionQuestionnaire(local.id, requireNotNull(before.questionnaire).copy(sessionLabel = "Offline edit"))
+        }
+        val after = requireNotNull(database.recording(local.id))
+        val preserved = after.artifacts.single { it.id == syncArtifact.id }
+        assertEquals(syncArtifact.sha256, preserved.sha256)
+        assertEquals(17, preserved.uploadedBytes)
+        assertEquals("uploading", preserved.uploadState)
+        assertEquals(before.questionnaire, after.questionnaire)
+        assertTrue(database.recentRecordings(local.dogId).single().requiresServerQuestionnaireEdit)
     }
 
     @Test
@@ -1156,6 +1178,139 @@ class WoonaDatabaseTest {
                 override fun getHeaderFields():Map<String,List<String>> = emptyMap()
             }
         })
+
+    @Test
+    fun authoritativeRestoreWithoutReceiptRequeuesOnlyStale404() {
+        val codes = listOf("http_404", "http_401", "http_403", "http_409", "http_422", "metadata_conflict", "local_artifact_conflict")
+        codes.forEach { code ->
+            val local = completedPacketRecording("Restore $code")
+            database.hashPendingArtifacts()
+            database.markRecordingUploading(local.id)
+            database.markRecordingSynced(local.id, "d".repeat(64), "2026-10-27T00:00:00Z")
+            database.markRecordingSyncError(local.id, false, code, "Stale account/resource failure")
+            val declarations = requireNotNull(database.recordingSyncRecord(local.id)).artifacts
+                .associate { it.id to (it.sha256 to it.sizeBytes) }
+            val remote = remoteCompletedRecording(local).copy(receiptSha256 = null, verifiedAtUtc = null)
+
+            database.restoreServerMetadata(emptyList(), listOf(remote))
+
+            val restored = requireNotNull(database.recording(local.id))
+            if (code == "http_404") {
+                assertEquals("pending", restored.serverSyncState)
+                assertTrue(local.id in database.pendingRecordingIds())
+            } else {
+                assertEquals(code, "permanent_error", restored.serverSyncState)
+                assertTrue(local.id !in database.pendingRecordingIds())
+            }
+            assertEquals("d".repeat(64), restored.serverReceiptSha256)
+            assertEquals(1, restored.serverSyncAttemptCount)
+            restored.artifacts.forEach { artifact ->
+                assertEquals(declarations.getValue(artifact.id), artifact.sha256 to artifact.sizeBytes)
+            }
+            database.readableDatabase.rawQuery(
+                "SELECT last_error_code FROM server_sync_state WHERE recording_id=?",
+                arrayOf(local.id),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                if (code == "http_404") assertNull(cursor.getString(0)) else assertEquals(code, cursor.getString(0))
+            }
+        }
+    }
+
+    @Test
+    fun completedRestoreWithUnfinishedLocalReferenceStaysPending() {
+        val local = completedPacketRecording("Restore with local reference")
+        val remote = remoteCompletedRecording(local)
+        val metadata = ReferenceMetadata("Polar H10", "2026-10-05T12:00:00Z", "2026-10-05T12:01:00Z", 0.0)
+        database.attachReference(local.id, ArtifactType.HEART_RATE, "hr.csv", "utc,bpm\n0,120\n".byteInputStream(), metadata)
+        database.hashPendingArtifacts()
+        val reference = requireNotNull(database.recording(local.id)).artifacts.single { it.type == ArtifactType.HEART_RATE }
+
+        listOf("local", "both").forEach { presence ->
+            database.writableDatabase.execSQL(
+                "UPDATE artifacts SET local_presence=?,upload_state='pending',uploaded_bytes=0 WHERE id=?",
+                arrayOf(presence, reference.id),
+            )
+            database.restoreServerMetadata(emptyList(), listOf(remote))
+
+            val restored = requireNotNull(database.recording(local.id))
+            assertEquals(presence, "pending", restored.serverSyncState)
+            assertTrue(local.id in database.pendingRecordingIds())
+            assertEquals(remote.receiptSha256, restored.serverReceiptSha256)
+            val preserved = restored.artifacts.single { it.id == reference.id }
+            assertEquals(presence, preserved.localPresence)
+            assertEquals("pending", preserved.uploadState)
+            assertEquals(reference.sha256, preserved.sha256)
+            assertEquals(reference.sizeBytes, preserved.sizeBytes)
+        }
+    }
+
+    @Test
+    fun linkDogAccountRequeuesOnlyThatDogs404Recordings() {
+        val stale = completedPacketRecording("Link stale 404")
+        val conflict = completedPacketRecording("Link terminal 409")
+        database.linkDogAccount(conflict.dogId, "first")
+        val otherDog = completedPacketRecording("Other dog 404")
+        val entries = listOf(
+            Triple(stale, "http_404", "pending"),
+            Triple(conflict, "http_409", "permanent_error"),
+            Triple(otherDog, "http_404", "permanent_error"),
+        )
+        val declarations = entries.associate { (local, _, _) ->
+            local.id to requireNotNull(database.recordingSyncRecord(local.id)).artifacts
+                .map { Triple(it.id, it.sha256, it.sizeBytes) }
+        }
+        entries.forEach { (local, code, _) ->
+            database.hashPendingArtifacts()
+            database.markRecordingUploading(local.id)
+            database.markRecordingSynced(local.id, "e".repeat(64), "2026-10-27T00:00:00Z")
+            database.markRecordingSyncError(local.id, false, code, "Before account link")
+        }
+
+        database.linkDogAccount(stale.dogId, "first")
+
+        entries.forEach { (local, _, expected) ->
+            val restored = requireNotNull(database.recording(local.id))
+            assertEquals(local.id, expected, restored.serverSyncState)
+            assertEquals(1, restored.serverSyncAttemptCount)
+            assertEquals("e".repeat(64), restored.serverReceiptSha256)
+            assertEquals(declarations.getValue(local.id),
+                requireNotNull(database.recordingSyncRecord(local.id)).artifacts.map { Triple(it.id, it.sha256, it.sizeBytes) })
+        }
+        assertTrue(stale.id in database.pendingRecordingIds())
+        assertTrue(conflict.id !in database.pendingRecordingIds())
+        assertTrue(otherDog.id !in database.pendingRecordingIds())
+    }
+
+    @Test
+    fun recordingReceiptAndUnfinishedArtifactPendingRollbackAtomically() {
+        val local = completedPacketRecording("Atomic receipt")
+        val declarations = requireNotNull(database.recordingSyncRecord(local.id)).artifacts
+            .map { Triple(it.id, it.sha256, it.sizeBytes) }
+        database.markRecordingUploading(local.id)
+        database.writableDatabase.execSQL("""
+            CREATE TRIGGER reject_pending_receipt BEFORE UPDATE OF state ON server_sync_state
+            WHEN NEW.recording_id='${local.id}' AND NEW.state='pending'
+            BEGIN SELECT RAISE(ABORT,'injected pending failure'); END
+        """.trimIndent())
+
+        org.junit.Assert.assertThrows(android.database.sqlite.SQLiteException::class.java) {
+            database.markRecordingSynced(local.id, "f".repeat(64), "2026-10-27T00:00:00Z")
+        }
+
+        val rolledBack = requireNotNull(database.recording(local.id))
+        assertEquals("uploading", rolledBack.serverSyncState)
+        assertNull(rolledBack.serverReceiptSha256)
+        assertEquals(1, rolledBack.serverSyncAttemptCount)
+        assertEquals(declarations,
+            requireNotNull(database.recordingSyncRecord(local.id)).artifacts.map { Triple(it.id, it.sha256, it.sizeBytes) })
+        database.writableDatabase.execSQL("DROP TRIGGER reject_pending_receipt")
+        database.markRecordingSynced(local.id, "f".repeat(64), "2026-10-27T00:00:00Z")
+        val completed = requireNotNull(database.recording(local.id))
+        assertEquals("pending", completed.serverSyncState)
+        assertEquals("f".repeat(64), completed.serverReceiptSha256)
+        assertEquals(1, completed.serverSyncAttemptCount)
+    }
 
     private fun completedPacketRecording(name: String): RecordingSyncRecord {
         val profile = database.saveProfile(completeDogQuestionnaire(name))

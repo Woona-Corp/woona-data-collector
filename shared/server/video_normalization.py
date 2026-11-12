@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 
-from server.video_presentation import is_cfr30
+from server.video_presentation import derivative_fingerprint, derivative_fingerprint_matches, is_cfr30
 
 FPS = 30
 
@@ -30,7 +30,7 @@ def encoder_recipe(preset, crf):
 
 
 def prepared(root, row, item, preset, crf):
-    """DB source identity/size anchor; stream-check the actual cached derivative."""
+    """Reuse a matching verified fingerprint; otherwise stream-check the derivative."""
     if not is_cfr30(item):
         return False
     if (item.get('source_artifact_id') != str(row['id']) or item.get('source_sha256') != row['sha256']
@@ -39,9 +39,20 @@ def prepared(root, row, item, preset, crf):
     try:
         source = local_file(root, row['server_relative_path'])
         output = local_file(root, item['relative_path'])
-        return (output.is_relative_to(Path(root).resolve() / 'derived' / 'cfr30')
-                and source.stat().st_size == row['expected_size_bytes']
-                and output.stat().st_size == item['size_bytes'] and sha256(output) == item['sha256'])
+        before = output.stat()
+        if (not output.is_relative_to(Path(root).resolve() / 'derived' / 'cfr30')
+                or source.stat().st_size != row['expected_size_bytes']
+                or before.st_size != item['size_bytes']):
+            return False
+        if derivative_fingerprint_matches(item, before):
+            return True
+        if sha256(output) != item['sha256']:
+            return False
+        after = output.stat()
+        if derivative_fingerprint(before, item['sha256']) != derivative_fingerprint(after, item['sha256']):
+            return False
+        item['derivative_fingerprint'] = derivative_fingerprint(after, item['sha256'])
+        return True
     except (OSError, ValueError, KeyError):
         return False
 
@@ -182,9 +193,7 @@ def normalize_one(root, row, registry, *, threads=3, preset='ultrafast', crf=18)
         raise ValueError('Source artifact checksum/size mismatch')
     prior = registry.get('entries', {}).get(recording)
     if prepared(root, row, prior, preset, crf):
-        path = local_file(root, prior['relative_path'])
-        if sha256(path) == prior['sha256']:
-            return prior
+        return prior
     # Legacy orientation-only presentations corrected erroneous display matrices.
     # Carry this explicit correction forward instead of reintroducing the original matrix.
     rotation = prior.get('source_rotation_override', prior.get('rotation_degrees')) if prior else None
@@ -226,7 +235,7 @@ def normalize_one(root, row, registry, *, threads=3, preset='ultrafast', crf=18)
         if len(out_audio) != len(audio) or any(
                 original['codec_name'] != converted['codec_name']
                 or abs(float(original.get('start_time', 0)) - float(converted.get('start_time', 0))) > .001
-                for original, converted in zip(audio, out_audio)):
+                for original, converted in zip(audio, out_audio, strict=False)):
             raise ValueError('Audio streams or initial timing changed')
         grid = packet_grid(pending, out_video)
         if (not grid['cfr30'] or grid['frames'] != frames or abs(out_start) > 1e-6
@@ -255,6 +264,7 @@ def normalize_one(root, row, registry, *, threads=3, preset='ultrafast', crf=18)
             os.fsync(stream.fileno())
         os.link(pending, output)  # Never overwrite bytes referenced by an active registry.
         pending.unlink()
+        item['derivative_fingerprint'] = derivative_fingerprint(output.stat(), item['sha256'])
         fsync_directory(output.parent)
         return item
     finally:
@@ -277,7 +287,11 @@ def prepare(root, rows, registry_path, *, threads=3, preset='ultrafast', crf=18)
         registry['schema_version'] = 2
         failed = []
         for row in rows:
-            if prepared(root, row, registry['entries'].get(str(row['recording_id'])), preset, crf):
+            prior = registry['entries'].get(str(row['recording_id']))
+            previous_fingerprint = prior.get('derivative_fingerprint') if isinstance(prior, dict) else None
+            if prepared(root, row, prior, preset, crf):
+                if prior['derivative_fingerprint'] != previous_fingerprint:
+                    atomic_json(registry_path, registry)
                 continue
             try:
                 item = normalize_one(root, row, registry, threads=threads, preset=preset, crf=crf)

@@ -342,6 +342,9 @@ class DeviceFeatureSmokeTest {
         controller.close()
         assertTrue(bleSessionController.closeCalled)
         assertTrue(packetCaptureController.closeCalled)
+        bleSessionController.listener.onDiagnosticMessage("GATT connection state: status=8, newState=0, lateEvent=true")
+        instrumentation.waitForIdleSync()
+        assertEquals(1, packetCaptureController.recordedDiagnostics.size)
     }
 
     @Test
