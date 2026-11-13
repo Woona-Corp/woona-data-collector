@@ -26,7 +26,7 @@ def digest(data):
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def synthetic(path, *, compressed=False, mutate=None, extra=None):
+def synthetic(path, *, compressed=False, mutate=None, extra=None, wrapped=False):
     layer = b"synthetic layer contents"
     config = {"os": "linux", "architecture": "amd64", "rootfs": {"type": "layers", "diff_ids": [digest(layer)]}}
     if mutate:
@@ -44,8 +44,19 @@ def synthetic(path, *, compressed=False, mutate=None, extra=None):
     cfg = descriptor(config_raw, "config.v1+json")
     layers = [descriptor(layer, "layer.v1.tar" + ("+gzip" if compressed else ""))]
     manifest = descriptor(p.canonical({"schemaVersion": 2, "config": cfg, "layers": layers}), "manifest.v1+json")
+    producer = manifest["digest"]
+    root_manifest = manifest
+    if wrapped:
+        image = dict(manifest, platform={"os": "linux", "architecture": "amd64"})
+        attestation = descriptor(p.canonical({"schemaVersion": 2, "config": cfg, "layers": []}), "manifest.v1+json")
+        attestation.update(platform={"os": "unknown", "architecture": "unknown"},
+                           annotations={"vnd.docker.reference.type": "attestation-manifest",
+                                        "vnd.docker.reference.digest": manifest["digest"]})
+        wrapper = descriptor(p.canonical({"schemaVersion": 2, "manifests": [image, attestation]}), "index.v1+json")
+        producer = wrapper["digest"]
+        root_manifest = wrapper
     blobs["oci-layout"] = p.canonical({"imageLayoutVersion": "1.0.0"})
-    blobs["index.json"] = p.canonical({"schemaVersion": 2, "manifests": [manifest]})
+    blobs["index.json"] = p.canonical({"schemaVersion": 2, "manifests": [root_manifest]})
     with tarfile.open(path, "w") as archive:
         for name, raw in blobs.items():
             info = tarfile.TarInfo(name)
@@ -55,7 +66,7 @@ def synthetic(path, *, compressed=False, mutate=None, extra=None):
             info = tarfile.TarInfo(extra[0])
             info.type = extra[1]
             archive.addfile(info, io.BytesIO())
-    return digest(path.read_bytes()), cfg["digest"], manifest["digest"]
+    return digest(path.read_bytes()), cfg["digest"], producer
 
 
 def plan():
@@ -79,6 +90,17 @@ class ArchiveTests(unittest.TestCase):
                 manifest_producer = p.image_binding(path, checksum, manifest)
                 self.assertEqual(manifest_producer["producer_kind"], "platform-manifest")
                 self.assertEqual(manifest_producer["config"], config)
+
+    def test_buildx_wrapper_with_linked_attestation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "image.tar"
+            checksum, config, index = synthetic(path, compressed=True, wrapped=True)
+            result = p.image_binding(path, checksum, index)
+            self.assertEqual(result["producer"], index)
+            self.assertEqual(result["producer_kind"], "image-index")
+            self.assertEqual(result["config"], config)
+            self.assertNotEqual(result["manifest"], index)
+            self.assertEqual(p.image_binding(path, checksum, config)["producer_kind"], "configuration")
 
     def test_wrong_archive_or_producer(self):
         with tempfile.TemporaryDirectory() as tmp:

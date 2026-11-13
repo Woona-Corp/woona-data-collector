@@ -96,10 +96,10 @@ def safe_name(name):
 
 
 def image_binding(path, expected_archive, producer):
-    """Prove producer config -> OCI platform manifest -> consumer identity.
+    """Prove producer config/index -> OCI platform manifest -> consumer identity.
 
-    Never extract. Only a single linux/amd64 OCI image, raw or gzip OCI layers.
-    Docker legacy save, indexes of indexes, zstd and ambiguous platforms reject.
+    Never extract. Accept a direct linux/amd64 image or one Buildx index wrapper
+    with one image and linked unknown/unknown attestations. Layers may be raw/gzip.
     All blobs (including unused extras) must be content-addressed and intact.
     """
     require(DIGEST.fullmatch(expected_archive) and DIGEST.fullmatch(producer), "invalid image digest")
@@ -147,6 +147,25 @@ def image_binding(path, expected_archive, producer):
         require(index.get("schemaVersion") == 2 and len(index.get("manifests", [])) == 1,
                 "ambiguous OCI platform")
         descriptor = index["manifests"][0]
+        producer_index = None
+        if descriptor.get("mediaType") == "application/vnd.oci.image.index.v1+json":
+            nested = decode(raw(blob(descriptor)))
+            candidates = nested.get("manifests", [])
+            require(nested.get("schemaVersion") == 2 and isinstance(candidates, list) and candidates,
+                    "invalid Buildx image index")
+            images = [item for item in candidates if item.get("platform") == {"os": "linux", "architecture": "amd64"}]
+            require(len(images) == 1, "ambiguous OCI platform")
+            selected = images[0]
+            for item in candidates:
+                if item is selected:
+                    continue
+                annotations = item.get("annotations", {})
+                require(item.get("platform") == {"os": "unknown", "architecture": "unknown"} and
+                        annotations.get("vnd.docker.reference.type") == "attestation-manifest" and
+                        annotations.get("vnd.docker.reference.digest") == selected.get("digest"),
+                        "unrelated Buildx manifest")
+            producer_index = descriptor["digest"]
+            descriptor = selected
         require(descriptor.get("mediaType") == "application/vnd.oci.image.manifest.v1+json",
                 "unsupported platform manifest")
         manifest_digest = descriptor["digest"]
@@ -155,8 +174,11 @@ def image_binding(path, expected_archive, producer):
         require(manifest["config"].get("mediaType") == "application/vnd.oci.image.config.v1+json",
                 "unsupported config descriptor")
         config_digest = manifest["config"]["digest"]
-        require(producer in (config_digest, manifest_digest), "producer identity absent from archive chain")
-        producer_kind = "configuration" if producer == config_digest else "platform-manifest"
+        identities = {config_digest: "configuration", manifest_digest: "platform-manifest"}
+        if producer_index is not None:
+            identities[producer_index] = "image-index"
+        require(producer in identities, "producer identity absent from archive chain")
+        producer_kind = identities[producer]
         config = decode(raw(blob(manifest["config"])))
         require(config.get("os") == "linux" and config.get("architecture") == "amd64",
                 "unsupported consumer platform")
