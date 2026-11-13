@@ -25,6 +25,19 @@ class DependencyLockTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_compose(shared)
 
+    def test_service_healthy_dependency_requires_healthcheck(self):
+        if not (ROOT.parent / 'compose.yaml').is_file():
+            self.skipTest('Compose contracts run before image build, not in the runtime image')
+        with tempfile.TemporaryDirectory() as temporary:
+            shared = Path(temporary)
+            for name in ('compose.yaml', 'compose.production.yaml', 'compose.label.yaml'):
+                content = (ROOT.parent / name).read_text()
+                if name == 'compose.yaml':
+                    content = content.replace('    healthcheck:\n', '    # healthcheck removed\n', 1)
+                (shared / name).write_text(content)
+            with self.assertRaisesRegex(ValueError, 'service_healthy.*healthcheck'):
+                validate_compose(shared)
+
     def test_rejects_unhashed_unpinned_or_external_requirements(self):
         for text in ("fastapi==0.143.0", "fastapi>=0.143.0", "-r other.lock", "--index-url https://example.org", "foo @ https://example.org/foo.whl", ""):
             with self.subTest(text=text), self.assertRaises(ValueError):

@@ -67,8 +67,10 @@ def validate(root: Path = ROOT) -> None:
 
 
 def validate_compose(shared: Path = ROOT.parent) -> None:
+    contents = {}
     for name in ('compose.yaml', 'compose.production.yaml', 'compose.label.yaml'):
         content = (shared / name).read_text()
+        contents[name] = content
         images = [value.split('#', 1)[0].strip() for value in
                   re.findall(r'^\s+image:\s*(.*?)\s*$', content, re.M)]
         if not images or any(not re.fullmatch(r'[A-Za-z0-9_./:-]+@sha256:[0-9a-f]{64}', image)
@@ -81,6 +83,25 @@ def validate_compose(shared: Path = ROOT.parent) -> None:
             if name == 'compose.label.yaml' and \
                     '      dockerfile: server/Dockerfile\n      target: verified\n' not in content:
                 raise ValueError('Label-sync builds must use the same verified source')
+    for names in (('compose.yaml',),
+                  ('compose.yaml', 'compose.production.yaml'),
+                  ('compose.yaml', 'compose.label.yaml')):
+        content = '\n'.join(contents[name] for name in names)
+        healthchecks = set()
+        service = None
+        for line in content.splitlines():
+            if re.match(r'^\S', line):
+                service = None
+            match = re.match(r'^  ([A-Za-z0-9_-]+):$', line)
+            if match:
+                service = match[1]
+            elif service and line == '    healthcheck:':
+                healthchecks.add(service)
+        dependencies = set(re.findall(
+            r'^      ([A-Za-z0-9_-]+):\n        condition: service_healthy$', content, re.M))
+        missing = dependencies - healthchecks
+        if missing:
+            raise ValueError(f'service_healthy dependencies require healthcheck: {sorted(missing)}')
 
 
 if __name__ == "__main__":
