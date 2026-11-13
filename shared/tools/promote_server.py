@@ -284,7 +284,7 @@ for p in ('live','ready'):
 '''
 # This reads only health/auth status, never response bodies; token stays in container.
 AUTH = '''import os,urllib.request
-r=urllib.request.Request('http://127.0.0.1:8080/v1/accounts',headers={'Authorization':'Bearer '+os.environ['WOONA_PROMOTION_SMOKE_TOKEN']})
+r=urllib.request.Request('http://127.0.0.1:8080/v1/me',headers={'Authorization':'Bearer '+os.environ['WOONA_PROMOTION_SMOKE_TOKEN']})
 assert urllib.request.urlopen(r,timeout=3).status==200
 '''
 

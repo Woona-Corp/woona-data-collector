@@ -357,6 +357,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(any(set(args) & {"up", "down", "stop", "restart", "rm", "downgrade"}
                              for args, _ in self.commands))
 
+    def test_authenticated_smoke_uses_existing_me_endpoint(self):
+        self.assertIn("http://127.0.0.1:8080/v1/me", p.AUTH)
+        self.assertNotIn("/v1/accounts", p.AUTH)
+
     def test_apply_scoped_no_build_no_dependencies_direct_uvicorn_and_observe(self):
         with patch.object(p, "snapshot", side_effect=[self.before, self.before, self.after, self.after]), \
                 patch.object(p, "probe", return_value=self.observed), patch.object(p, "run", side_effect=self.command), \
