@@ -178,8 +178,9 @@ chain. Without extracting into a host filesystem:
 2. Verify the OCI index's selected platform-manifest digest/size against that blob's
    actual bytes; verify the manifest's configuration digest/size against the actual
    configuration blob. The CI producer's observed ID must equal the corresponding
-   proven configuration **or** platform-manifest identity; derive and retain its
-   type, rather than assuming `.Id` always means configuration on every engine.
+   proven configuration, platform-manifest or supported Buildx image-index identity;
+   derive and retain its type, rather than assuming `.Id` always means configuration
+   on every engine.
    Check OS/architecture, ordered layers, descriptor sizes/hashes and configuration
    rootfs diff IDs. Compressed layers need correct compressed/diff-ID handling;
    do not apply an uncompressed-only proof to another format.
@@ -315,8 +316,10 @@ The source CLI described above remains read-only and separate in responsibility.
 ### Owner setup and review (not performed by this implementation)
 
 Before using this workflow, the owner must configure GitHub's **production**
-environment with required reviewers (prevent self-review), main-only deployment
-branches, and protected main/reviewed workflows. Add environment secrets only:
+environment with required reviewers, main-only deployment branches, and protected
+main/reviewed workflows. In the documented single-maintainer setup the owner may
+be the sole reviewer with self-review permitted; no independent reviewer is then
+required. Add environment secrets only:
 
 - `SERVER_SSH_KEY`: dedicated authorized key for fixed `root@167.99.223.71`;
 - `SERVER_SSH_KNOWN_HOSTS`: independently verified pinned OpenSSH host-key entry
@@ -405,14 +408,17 @@ then enforces the exact six exported filenames, strict JSON, manifest/binding
 comparison and archive checksum. It parses OCI without filesystem extraction:
 unique safe regular members, bounded files/counts, all content-addressed blobs,
 exactly one linux/amd64 platform, config/platform descriptors, ordered layers and
-uncompressed diff IDs. Raw and gzip OCI layers are supported. The optional Docker
-compatibility manifest must point to the same config/layers. Configuration and
-platform-manifest digests are retained as **different typed identities**; producer
-kind is established by its equality to a verified descriptor, not guessed from
-Docker's version. Index identities, legacy-only Docker archives, nested/multiple
-platforms, zstd, unsafe/duplicate/link/special/sparse members or unknown layouts
-stop. There is no operator checkbox to skip the archive bridge. A new supported
-format requires reviewed implementation and hermetic tests first.
+uncompressed diff IDs. A direct platform manifest and one Buildx index wrapper are
+supported; any additional wrapper entries must be unknown/unknown attestations
+linked to the selected image. Raw and gzip OCI layers are supported. The optional
+Docker compatibility manifest must point to the same config/layers. Configuration,
+platform-manifest and image-index digests are retained as **different typed
+identities**; producer kind is established by equality to a verified descriptor,
+not guessed from Docker's version. Legacy-only Docker archives, deeper nesting,
+multiple platforms, unrelated manifests, zstd, unsafe/duplicate/link/special/sparse
+members or unknown layouts stop. There is no operator checkbox to skip the archive
+bridge. A new supported format requires reviewed implementation and hermetic tests
+first.
 
 Preflight streams only trusted helper code and bounded public plan to pinned SSH.
 It checks reviewed Compose bytes, existing API/worker identities and public source,
