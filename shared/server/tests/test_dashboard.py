@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from server.dashboard import KINDS, available_file, render, require_label_user, summarize
+from server.dashboard import KINDS, available_file, render, render_record_detail, require_label_user, summarize
 
 
 class DashboardTest(unittest.TestCase):
@@ -46,21 +46,24 @@ class DashboardTest(unittest.TestCase):
         page = render(data, "<")
         self.assertIn("&lt;", page)
         self.assertNotIn("Тест <пёс>", page)
-        self.assertIn('content="60"', page)
+        self.assertNotIn('http-equiv="refresh"', page)
+        self.assertIn('Обновить вручную', page)
         self.assertIn('class="topbar"', page)
         self.assertIn('class="panel" id="data-manager"', page)
-        self.assertIn('сессий: 1/1', page)
-        self.assertIn('Найдено 1 из 2 групп', render(data, "", status="complete"))
-        self.assertIn('Найдено 1 из 2 групп', render(data, "", status="incomplete"))
-        self.assertIn('Найдено 0 из 2 групп', render(data, "", ble="absent"))
+        self.assertIn('Анкеты доступны', page)
+        self.assertIn('Есть разметка: 1 / 1 задач', page)
+        self.assertIn('Шаг: 1 записей / 2 интервалов', page)
+        self.assertIn('Найдено 1 из 2 записей', render(data, "", status="complete"))
+        self.assertIn('Найдено 1 из 2 записей', render(data, "", status="incomplete"))
+        self.assertIn('Найдено 0 из 2 записей', render(data, "", ble="absent"))
         self.assertIn('Показано 1–2 из 2', render(data, "", page=100))
         self.assertIn('Анкета старого формата', render(data, ""))
-        self.assertIn('Открыть ↗', render(data, ""))
+        self.assertIn('Открыть разметку', render_record_detail(data, data['records'][0]))
         pending = deepcopy(data)
         pending["records"][0]["tasks"] = {kind: None for kind in KINDS}
         pending["records"][0]["annotated_any"] = False
         self.assertIn('Анкета старого формата', render(pending, ""))
-        self.assertIn('Найдено 0 из 2 групп', render(pending, "", status="ready"))
+        self.assertIn('Найдено 0 из 2 записей', render(pending, "", status="ready"))
 
     def test_anonymous_user_cannot_read_dashboard(self):
         request = Request({"type": "http", "headers": [], "method": "GET", "path": "/dashboard"})
@@ -85,6 +88,27 @@ class DashboardReconciliationTest(unittest.TestCase):
             [{'id': 21, 'title': 'Activity', 'timeline_name': 'videoLabels', 'labels': []}],
             {'activity': tasks}, {}, {'dogs': 1, 'profile_versions': 1, 'session_questionnaires': 1,
                 'drive_files': 0, 'drive_unindexed_files': 0, **(extra or {})})
+
+    def test_same_day_records_sort_by_start_time_not_uuid(self):
+        record = self.summarize([])['records'][0]
+        older = {**record, 'source_id': 'woona:z', 'started_at': '2026-10-26T10:00:00+00:00'}
+        newer = {**record, 'source_id': 'woona:a', 'started_at': '2026-10-26T11:00:00+00:00'}
+        result = summarize([older, newer],
+            [{'id': 21, 'title': 'Activity', 'timeline_name': 'videoLabels', 'labels': []}],
+            {'activity': []}, {}, {})
+        self.assertEqual([item['source_id'] for item in result['records']], ['woona:a', 'woona:z'])
+
+    def test_fresh_integrity_exclusion_is_not_overridden_by_file_presence(self):
+        data = self.summarize([])
+        record = data['records'][0]
+        record['server_status'] = {'labeling': {
+            'eligible': False, 'exclusionReasons': ['Проверка целостности серверных файлов не подтверждена']}}
+        result = summarize([record], [{'id': 21, 'title': 'Activity', 'timeline_name': 'videoLabels', 'labels': []}],
+                           {'activity': []}, {}, {})
+        self.assertFalse(result['records'][0]['eligible'])
+        self.assertEqual(result['reconciliation']['eligible_missing_tasks'], [])
+        self.assertEqual(result['records'][0]['exclusion_reasons'],
+                         ['Проверка целостности серверных файлов не подтверждена'])
 
     def test_duplicates_orphans_and_missing_import_are_independent(self):
         data = self.summarize([{'id': 1, 'data': {'source_id': 'woona:unknown'}},
@@ -154,7 +178,9 @@ class DashboardPhysicalObservationTest(unittest.TestCase):
     def artifact(self, recording, identity, *, kind: str | None = 'video', status='available', relative=None) -> dict:
         import hashlib
         import json
-        row = dict(id=recording, started_at=self.now, ingest_status='complete',
+        row = dict(id=recording, started_at=self.now, ended_at=None, source='live',
+            session_label='Synthetic session', dog_id='synthetic-dog', account_id='synthetic-account',
+            ingest_status='complete',
             capture_status='completed', questionnaire_validation_state='complete',
             session_questionnaire={'schemaVersion': 2, 'plannedActivities': ['Активность']},
             capture_error_code=None, capture_error_message=None, server_verified_at=self.now,
@@ -193,7 +219,8 @@ class DashboardPhysicalObservationTest(unittest.TestCase):
 
     def test_initialize_once_and_preserve_first_row_and_empty_left_join(self):
         from unittest.mock import Mock
-        dates = Mock()
+        dates = Mock(wraps=self.now)
+        dates.astimezone.return_value = dates
         dates.date.return_value = self.now.date()
         self.rows = [self.artifact(str(r), f'{r}-{a}') for r in range(2) for a in range(8)]
         self.rows.append(self.artifact('empty', 'empty', kind=None))
@@ -206,6 +233,38 @@ class DashboardPhysicalObservationTest(unittest.TestCase):
         self.assertEqual(records[0]['dog'], 'Synthetic <dog>')
         self.assertTrue(all(not any(key.startswith('_') for key in r) for r in records))
         self.assertEqual(dates.date.call_count, 3)
+
+    def test_catalog_metadata_is_per_recording_not_per_artifact(self):
+        from datetime import timedelta, timezone
+        first = self.artifact('one', 'video')
+        first.update(started_at=self.now.astimezone(timezone(timedelta(hours=7))),
+                     ended_at=self.now + timedelta(hours=1), account_id='team-one',
+                     source='replay', dog_id='dog-one', session_label='Historical session')
+        self.rows = [first, {**first, 'artifact_id': 'packet', 'artifact_type': 'packet'}]
+        records, _ = self.dashboard.records_from_sources()
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record['date'], self.now.date().isoformat())
+        self.assertEqual(record['started_at'], self.now.isoformat())
+        self.assertEqual(record['duration_seconds'], 3600)
+        self.assertEqual(record['account_id'], 'team-one')
+        self.assertEqual(record['account_name'], 'team-one')
+        self.assertEqual(record['dog_id'], 'dog-one')
+        self.assertEqual(record['source'], 'replay')
+        self.assertEqual(record['session_label'], 'Historical session')
+        self.assertEqual(len(record['files']), 2)
+
+    def test_catalog_date_is_utc_and_unknown_duration_is_not_zero(self):
+        from datetime import datetime, timedelta, timezone
+        start = datetime(2026, 11, 10, 1, tzinfo=timezone(timedelta(hours=3)))
+        self.rows = [self.artifact('unknown', 'unknown'), self.artifact('zero', 'zero'),
+                     self.artifact('invalid', 'invalid')]
+        for row, end in zip(self.rows, (None, start, start - timedelta(seconds=1)), strict=True):
+            row.update(started_at=start, ended_at=end, account_id=None)
+        records, _ = self.dashboard.records_from_sources()
+        self.assertEqual([r['date'] for r in records], ['2026-11-09'] * 3)
+        self.assertEqual([r['duration_seconds'] for r in records], [None, 0, None])
+        self.assertTrue(all(r['account_id'] is None for r in records))
 
     def test_physical_matrix_json_html_receipt_and_next_request_with_warm_ls(self):
         import io
