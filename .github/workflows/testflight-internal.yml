@@ -39,8 +39,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Verify internal-only helper safety tests
-        run: python3 -m unittest discover -s ios/tools -p 'test_testflight_internal.py' -v
+      - name: Verify TestFlight helper safety tests
+        run: python3 -m unittest discover -s ios/tools -p 'test_testflight_*.py' -v
       - name: Derive exact uploaded build from the distribution run
         id: derive_build
         env:
@@ -78,6 +78,14 @@ jobs:
           ASSIGN_INTERNAL: ${{ inputs.assign_internal }}
           INTERNAL_GROUP_IDS: ${{ inputs.internal_group_ids }}
         run: python3 ios/tools/testflight_internal.py
+      - name: Inspect exact build and external beta review status read-only
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          CHECK_VERSION: ${{ inputs.version }}
+          CHECK_BUILD: ${{ steps.derive_build.outputs.build }}
+        run: python3 ios/tools/testflight_external.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -85,5 +93,6 @@ jobs:
           path: |
             testflight-internal-status.json
             testflight-internal-polls.jsonl
+            testflight-external-status.json
           if-no-files-found: warn
           retention-days: ${{ job.status == 'success' && 7 || 14 }}
