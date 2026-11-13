@@ -185,8 +185,9 @@ chain. Without extracting into a host filesystem:
    rootfs diff IDs. Compressed layers need correct compressed/diff-ID handling;
    do not apply an uncompressed-only proof to another format.
 3. Independently inspect the loaded consumer image. Its reported kind/value must
-   match the corresponding **proven** configuration or platform-manifest identity.
-   Retain original producer binding, archive checksum, identity-chain evidence and
+   match the corresponding **proven** configuration, platform-manifest or supported
+   Buildx image-index identity. Retain original producer binding, archive checksum,
+   identity-chain evidence and
    consumer observation separately. Do not edit the producer's recorded ID.
 4. Run the image's explicit no-migration verification entrypoint as UID10001 with
    no network, verify source bytes/schema/full source ID again, and run `compare`

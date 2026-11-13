@@ -368,14 +368,17 @@ def remote(payload, apply=False):
     require(loaded.returncode == 0, "consumer image load failed")
     bridge = payload["bridge"]
     image = None
-    # A legacy store indexes config IDs; containerd may index only platform IDs.
+    # Stores may index config, platform-manifest, or Buildx image-index IDs.
     # Inspect only identities independently proven by the archive, never a tag.
-    for lookup in (bridge["config"], bridge["manifest"]):
+    identities = {bridge["config"]: "configuration", bridge["manifest"]: "platform-manifest"}
+    if bridge.get("producer_kind") == "image-index":
+        identities[bridge["producer"]] = "image-index"
+    for lookup in identities:
         try:
             image = run(["docker", "image", "inspect", "--format", "{{.Id}}", lookup]).decode().strip()
         except Rejected:
             continue
-        require(image in (bridge["config"], bridge["manifest"]), "consumer identity not proven by archive")
+        require(image in identities, "consumer identity not proven by archive")
         break
     require(image is not None, "loaded consumer identity unavailable")
     observed = decode(run(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
@@ -413,7 +416,7 @@ def remote(payload, apply=False):
     if auth == b"configured":
         run(["docker", "exec", current["api"][0], "python", "-B", "-c", AUTH])
     return {"status": "applied-observed", "source": payload["source"], "image": image,
-            "consumer_kind": "configuration" if image == bridge["config"] else "platform-manifest",
+            "consumer_kind": identities[image],
             "schema": plan["schema_revision"], "worker": "running-stable-not-functional-proof",
             "authenticated_smoke": "passed" if auth == b"configured" else "not-configured",
             "unrelated_container_ids": "unchanged", "rollback": "not-exercised-no-automatic-action"}
