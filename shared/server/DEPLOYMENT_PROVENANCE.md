@@ -448,7 +448,7 @@ Post-deploy gates repeatedly verify running source/manifest/UID, schema, readine
 API/worker stable container IDs, no worker/API restart, and unchanged other Compose
 container IDs throughout the 30–300 second reviewed observation window. Worker
 observation is process stability, **not proof of successful labeling of real data**.
-An authenticated status-only `/v1/accounts` smoke runs only if a real dedicated
+An authenticated status-only `/v1/me` smoke runs only if a real dedicated
 `WOONA_PROMOTION_SMOKE_TOKEN` is already configured inside the API container; it
 never falls back to an example/debug token or exports a response body. No token
 means explicit `not-configured`, not an authenticated-test claim. Do not configure

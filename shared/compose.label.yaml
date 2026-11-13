@@ -1,6 +1,10 @@
 services:
   postgres:
     restart: unless-stopped
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
     volumes: !override
       - ${WOONA_POSTGRES_ROOT:?set WOONA_POSTGRES_ROOT}:/var/lib/postgresql
 
@@ -10,6 +14,10 @@ services:
       args:
         WOONA_SOURCE_ID: ${WOONA_SOURCE_ID:?set the reviewed full source commit}
     restart: unless-stopped
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
     environment:
       WOONA_ENVIRONMENT: production
       WOONA_ALLOW_LEGACY_MIGRATION: "false"
@@ -21,7 +29,12 @@ services:
 
   label_postgres:
     image: postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+    init: true
     restart: unless-stopped
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
     environment:
       POSTGRES_DB: labelstudio
       POSTGRES_USER: labelstudio
@@ -37,6 +50,10 @@ services:
   label_studio:
     image: heartexlabs/label-studio:1.22.0@sha256:86b4e8046e83a16290cb2d1046f0fa94a4c98fdb9c8d42711808f18e25d47be2
     restart: unless-stopped
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
     environment:
       DJANGO_DB: default
       POSTGRE_NAME: labelstudio
@@ -75,6 +92,10 @@ services:
         WOONA_SOURCE_ID: ${WOONA_SOURCE_ID:?set the reviewed full source commit}
     command: ["python", "-m", "server.label_sync"]
     restart: unless-stopped
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
     volumes:
       - ${WOONA_STORAGE_ROOT_HOST:?set WOONA_STORAGE_ROOT_HOST}:/srv/woona:ro
     environment:
@@ -93,6 +114,10 @@ services:
   caddy:
     image: caddy:2-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
     restart: unless-stopped
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
     depends_on:
       api:
         condition: service_healthy
