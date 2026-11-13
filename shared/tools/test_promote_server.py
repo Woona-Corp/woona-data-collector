@@ -392,6 +392,24 @@ class RuntimeTests(unittest.TestCase):
             result = p.remote(self.payload, apply=True)
         self.assertEqual(result["consumer_kind"], "platform-manifest")
 
+    def test_consumer_store_transition_uses_proven_buildx_index_lookup(self):
+        self.payload["bridge"].update(config="sha256:" + "f" * 64,
+                                      manifest="sha256:" + "e" * 64,
+                                      producer=self.new_image, producer_kind="image-index")
+
+        def consumer(args, **kwargs):
+            if "inspect" in args and args[-1] in (self.payload["bridge"]["config"],
+                                                  self.payload["bridge"]["manifest"]):
+                raise p.Rejected("external command failed (output suppressed)")
+            return self.command(args, **kwargs)
+
+        with patch.object(p, "snapshot", side_effect=[self.before, self.before, self.after, self.after]), \
+                patch.object(p, "probe", return_value=self.observed), patch.object(p, "run", side_effect=consumer), \
+                patch.object(p.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
+                patch.object(p.time, "monotonic", side_effect=[0, 31]):
+            result = p.remote(self.payload, apply=True)
+        self.assertEqual(result["consumer_kind"], "image-index")
+
     def test_candidate_uid_source_or_schema_mismatch_stops_before_replacement(self):
         for key, wrong in (("uid", 0), ("source_id", OLD_SOURCE), ("schema_revision", "0010")):
             bad = dict(self.observed, **{key: wrong})
