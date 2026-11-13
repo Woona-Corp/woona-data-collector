@@ -377,6 +377,7 @@ class RuntimeTests(unittest.TestCase):
         override = kwargs["data"].decode()
         self.assertTrue(override.startswith(p.compose_input().decode()))
         self.assertIn('entrypoint: ["uvicorn"]', override)
+        self.assertIn('environment: {"WOONA_PROMOTION_SMOKE_TOKEN": "${WOONA_PROMOTION_SMOKE_TOKEN}"}', override)
         self.assertIn("  label_sync:\n", override)
         self.assertNotIn("alembic", override)
 

@@ -385,7 +385,8 @@ def remote(payload, apply=False):
                            "--entrypoint", "python", image, "-B", "-c", PROBE, payload["source"]]))
     require(observed == payload["observation"], "consumer tree/UID/schema mismatch")
     override = {"services": {
-        "api": {"image": image, "entrypoint": ["uvicorn"], "command": ["server.app:app", "--host", "0.0.0.0", "--port", "8080"]},  # nosec B104: container-only; reviewed Compose publishes loopback
+        "api": {"image": image, "entrypoint": ["uvicorn"], "command": ["server.app:app", "--host", "0.0.0.0", "--port", "8080"],  # nosec B104: container-only; reviewed Compose publishes loopback
+                "environment": {"WOONA_PROMOTION_SMOKE_TOKEN": "${WOONA_PROMOTION_SMOKE_TOKEN}"}},
         "label_sync": {"image": image, "entrypoint": ["python"], "command": ["-B", "-m", "server.label_sync"]}}}
     require(snapshot() == before, "runtime changed after preflight; separate review required")
     run(COMPOSE + ["-f", "-", "up", "-d", "--no-build", "--no-deps", "--pull", "never",
