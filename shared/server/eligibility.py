@@ -14,7 +14,7 @@ def activity_exclusion_reasons(ingest_status, capture_status, capture_error_code
         reasons.append('Сессия сердцебиения: хранение вне проекта активности')
     if questionnaire.get('schemaVersion') != 2:
         reasons.append('Анкета старого формата')
-    if not set(questionnaire.get('plannedActivities') or []) & {'Аллюр/движение', 'Активность'}:
+    if not set(questionnaire.get('plannedActivities') or []) & {'Аллюр/движение', 'Активность', 'Покой'}:
         reasons.append('В плане нет съёмки активности')
     missing = REQUIRED_ACTIVITY_ARTIFACTS - set(available_kinds)
     if missing:

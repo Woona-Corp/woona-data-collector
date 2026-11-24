@@ -20,6 +20,14 @@ class EligibilityTest(unittest.TestCase):
         self.assertEqual([], activity_exclusion_reasons('complete', 'completed', None,
             {'schemaVersion': 2, 'plannedActivities': ['Аллюр/движение']}, REQUIRED_ACTIVITY_ARTIFACTS))
 
+    def test_rest_only_is_admitted_but_empty_plan_is_not(self):
+        questionnaire = {'schemaVersion': 2, 'sessionKind': 'activity', 'plannedActivities': ['Покой']}
+        self.assertEqual([], activity_exclusion_reasons('complete', 'completed', None,
+            questionnaire, REQUIRED_ACTIVITY_ARTIFACTS))
+        self.assertEqual(['В плане нет съёмки активности'], activity_exclusion_reasons(
+            'complete', 'completed', None, {**questionnaire, 'plannedActivities': []},
+            REQUIRED_ACTIVITY_ARTIFACTS))
+
     def test_dashboard_funnel_distinguishes_upload_capture_and_missing_import(self):
         def record(identity, error=None, uploaded=True):
             return {'source_id': 'woona:' + identity, 'origin': 'Woona', 'dog': identity,
